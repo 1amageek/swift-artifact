@@ -6,7 +6,8 @@ one through a pluggable renderer protocol — with first-class support for **par
 rendering** while a model is still streaming.
 
 - **Swift 6.3+**, **iOS / macOS / iPadOS / visionOS / Mac Catalyst 26+**
-- Five SPM libraries — depend only on what you need
+- One umbrella module (`SwiftArtifact`) or five fine-grained libraries — pick your
+  granularity
 - **Two-stage rendering model**: every renderer declares a `refine(_:)` step that
   reduces the in-flight payload to a renderer-valid subset, so the `body` never sees
   half-formed input
@@ -24,8 +25,24 @@ See [SPEC.md](SPEC.md) for the full specification.
 dependencies: [
     .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.2.0"),
 ]
+```
 
-// Target dependencies (pick what you need)
+The simplest option is the umbrella product `SwiftArtifact`, which re-exports every
+sub-module:
+
+```swift
+// Target dependency
+.product(name: "SwiftArtifact", package: "swift-artifact"),
+```
+
+```swift
+import SwiftArtifact   // grants access to every type and renderer below
+```
+
+If you want to pull in only a subset (e.g. you ship a Markdown-only client and don't
+want WebKit in your binary), depend on individual products instead:
+
+```swift
 .product(name: "ArtifactCore",            package: "swift-artifact"),
 .product(name: "ArtifactRenderer",        package: "swift-artifact"),
 .product(name: "ArtifactView",            package: "swift-artifact"),
@@ -37,6 +54,7 @@ dependencies: [
 
 | Module | Depends on | Purpose |
 |---|---|---|
+| `SwiftArtifact` | All of the below | Umbrella — `@_exported` re-export of every module |
 | `ArtifactCore` | — | `ArtifactType`, `AnyArtifact`, parsing |
 | `ArtifactRenderer` | Core | `ArtifactRenderable` protocol, `RefinedPayload`, `AnyArtifactRenderer` |
 | `ArtifactView` | Core + Renderer | `ArtifactView`, `ArtifactCard`, `ArtifactCanvas`, env registry |
@@ -52,10 +70,7 @@ gestures.
 
 ```swift
 import SwiftUI
-import ArtifactCore
-import ArtifactView
-import ArtifactNativeRenderer
-import ArtifactWebRenderer
+import SwiftArtifact
 
 struct ChatBubble: View {
     let message: String  // raw text containing <artifact> tags

@@ -10,6 +10,7 @@ let package = Package(
         .macCatalyst(.v26),
     ],
     products: [
+        .library(name: "SwiftArtifact", targets: ["SwiftArtifact"]),
         .library(name: "ArtifactCore", targets: ["ArtifactCore"]),
         .library(name: "ArtifactRenderer", targets: ["ArtifactRenderer"]),
         .library(name: "ArtifactView", targets: ["ArtifactView"]),
@@ -45,6 +46,16 @@ let package = Package(
             dependencies: ["ArtifactCore", "ArtifactRenderer", "ArtifactView"],
             resources: [
                 .process("Resources")
+            ]
+        ),
+        .target(
+            name: "SwiftArtifact",
+            dependencies: [
+                "ArtifactCore",
+                "ArtifactRenderer",
+                "ArtifactView",
+                "ArtifactNativeRenderer",
+                "ArtifactWebRenderer",
             ]
         ),
         .testTarget(
