@@ -22,16 +22,23 @@ public struct ArtifactView: View {
     }
 
     public var body: some View {
-        if let renderer = renderers[artifact.type] {
-            switch renderer.refine(artifact) {
-            case .preRenderable:
-                ArtifactProgressView(artifact: artifact)
-            case let .renderable(payload):
-                renderer.body(artifact, payload)
+        Group {
+            if let renderer = renderers[artifact.type] {
+                switch renderer.refine(artifact) {
+                case .preRenderable:
+                    ArtifactProgressView(artifact: artifact)
+                case let .renderable(payload):
+                    renderer.body(artifact, payload)
+                }
+            } else {
+                DefaultArtifactView(artifact)
             }
-        } else {
-            DefaultArtifactView(artifact)
         }
+        // Make rendered content selectable by default. Renderers that need
+        // different behavior (e.g. WebView surfaces with their own selection
+        // model, or interactive widgets) can override with
+        // `.textSelection(.disabled)`.
+        .textSelection(.enabled)
     }
 }
 
@@ -51,16 +58,19 @@ public struct _ArtifactView<R: ArtifactRenderable>: View {
     }
 
     public var body: some View {
-        switch R.refine(artifact) {
-        case let .preRenderable(progress):
-            if R.PreRenderableBody.self == EmptyView.self {
-                ArtifactProgressView(artifact: artifact)
-            } else {
-                renderer.preRenderableBody(artifact: artifact, progress: progress)
+        Group {
+            switch R.refine(artifact) {
+            case let .preRenderable(progress):
+                if R.PreRenderableBody.self == EmptyView.self {
+                    ArtifactProgressView(artifact: artifact)
+                } else {
+                    renderer.preRenderableBody(artifact: artifact, progress: progress)
+                }
+            case let .renderable(payload):
+                renderer.body(artifact: artifact, payload: payload)
             }
-        case let .renderable(payload):
-            renderer.body(artifact: artifact, payload: payload)
         }
+        .textSelection(.enabled)
     }
 }
 

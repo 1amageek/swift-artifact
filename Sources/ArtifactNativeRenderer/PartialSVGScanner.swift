@@ -1,113 +1,211 @@
 import Foundation
 
-/// Reduces a streaming SVG payload to the largest valid prefix the renderer
-/// can draw.
+/// Reduces a streaming SVG payload to the largest prefix that forms a
+/// well-balanced `<svg>...</svg>` document.
 ///
-/// A streaming SVG might be received as `<svg ...><circle.../><rec` — the
-/// trailing `<rec` is a half-emitted element that browsers / decoders treat
-/// as malformed. The scanner trims everything after the last fully closed
-/// element inside the root `<svg>` and re-appends `</svg>`.
+/// SVG is XML, so a flat search for the next `</tagName>` is incorrect when
+/// the same element is nested (`<g><g>...</g></g>`) — it would close the
+/// outer element at the inner closing tag. The scanner therefore maintains
+/// a depth-tracked stack of open element names and only releases an element
+/// when its matching close tag is observed at the same depth.
+///
+/// XML quoting rules are also respected: `>` inside attribute strings is
+/// treated as content, and three forms of structured content are skipped
+/// without being interpreted as element markup —
+///
+/// - XML comments: `<!-- ... -->`
+/// - CDATA sections: `<![CDATA[ ... ]]>`
+/// - Processing instructions: `<?xxx ... ?>`
+///
+/// Each of those three forms is byte-skipped to its closing delimiter so any
+/// `<` / `>` characters they contain do not perturb the tag stack.
 public enum PartialSVGScanner {
-    /// Returns `nil` until the opening `<svg ...>` tag has been seen in full.
-    /// Once it has, returns a self-contained SVG string: the opening tag, the
-    /// completed child elements, and a synthetic `</svg>` close.
+    /// Returns the largest renderable prefix, framed as a self-contained
+    /// `<svg ...>...</svg>` document, or `nil` until the opening `<svg>` tag
+    /// has streamed in full.
     public static func longestValidPrefix(_ source: String) -> String? {
-        guard let openRange = source.range(of: "<svg", options: .caseInsensitive) else {
+        guard let svgStart = source.range(of: "<svg", options: .caseInsensitive)?.lowerBound else {
             return nil
         }
-        guard let openEnd = closingAngleOfTag(in: source, from: openRange.lowerBound) else {
-            // The opening tag itself is still streaming.
+        let afterSvgTagPrefix = source.index(svgStart, offsetBy: 4)
+        guard let openTagEnd = Self.scanToClosingAngle(in: source, from: afterSvgTagPrefix) else {
+            // The opening `<svg ...>` tag hasn't finished streaming yet.
             return nil
         }
-        // If the closing </svg> is already present, hand back the full slice.
-        if let closeRange = source.range(of: "</svg>", options: .caseInsensitive) {
-            return String(source[openRange.lowerBound...closeRange.upperBound])
+        // A self-closed root <svg ... /> stands on its own — no walk needed.
+        let charBeforeAngle = source[source.index(before: openTagEnd)]
+        if charBeforeAngle == "/" {
+            return String(source[svgStart...openTagEnd])
         }
-
-        let contentStart = source.index(after: openEnd)
-        let content = source[contentStart...]
-        // Walk the children, tracking the last index after a completed element.
-        var index = content.startIndex
-        var lastCompleted = index
-        while index < content.endIndex {
-            let char = content[index]
-            if char == "<" {
-                // Look for matching `>` that is not inside an attribute string.
-                guard let closeIndex = closingAngleOfTag(in: content, from: index) else {
-                    // Tag is incomplete — stop here.
-                    break
-                }
-                let tag = content[index...closeIndex]
-                if tag.hasPrefix("</") {
-                    // End tag for the most recently opened element.
-                    lastCompleted = content.index(after: closeIndex)
-                } else if tag.hasSuffix("/>") {
-                    // Self-closing element.
-                    lastCompleted = content.index(after: closeIndex)
-                } else {
-                    // Open tag for a container. Skip ahead to the matching
-                    // closing tag if it has fully arrived; otherwise stop.
-                    let tagName = extractTagName(tag)
-                    guard !tagName.isEmpty else {
-                        break
-                    }
-                    let closingNeedle = "</\(tagName)>"
-                    let searchStart = content.index(after: closeIndex)
-                    guard let endRange = content.range(
-                        of: closingNeedle,
-                        options: .caseInsensitive,
-                        range: searchStart..<content.endIndex
-                    ) else {
-                        break
-                    }
-                    lastCompleted = endRange.upperBound
-                    index = endRange.upperBound
-                    continue
-                }
-                index = content.index(after: closeIndex)
-            } else {
-                // Treat whitespace / text content as part of the previous
-                // element — only flush lastCompleted when we close a tag.
-                index = content.index(after: index)
-            }
+        let openTag = source[svgStart...openTagEnd]
+        let contentStart = source.index(after: openTagEnd)
+        let result = Self.walk(in: source, from: contentStart)
+        let content = source[contentStart..<result.lastCompleted]
+        if result.rootClosed {
+            // The walker swallowed `</svg>` already.
+            return "\(openTag)\(content)"
         }
-        let trimmedChildren = content[..<lastCompleted]
-        return "\(source[openRange.lowerBound...openEnd])\(trimmedChildren)</svg>"
+        return "\(openTag)\(content)</svg>"
     }
 
-    private static func closingAngleOfTag(
-        in source: some StringProtocol,
+    // MARK: - Walk
+
+    private struct WalkResult {
+        let lastCompleted: String.Index
+        let rootClosed: Bool
+    }
+
+    private static func walk(in source: String, from start: String.Index) -> WalkResult {
+        var stack: [String] = []
+        var lastCompleted = start
+        var i = start
+
+        while i < source.endIndex {
+            let c = source[i]
+            if c != "<" {
+                i = source.index(after: i)
+                continue
+            }
+
+            let remaining = source[i...]
+
+            // <!-- comment -->
+            if remaining.hasPrefix("<!--") {
+                let inner = source.index(i, offsetBy: 4)
+                guard inner <= source.endIndex,
+                      let endRange = source.range(
+                          of: "-->",
+                          range: inner..<source.endIndex
+                      )
+                else { break }
+                let after = endRange.upperBound
+                if stack.isEmpty { lastCompleted = after }
+                i = after
+                continue
+            }
+
+            // <![CDATA[ ... ]]>
+            if remaining.hasPrefix("<![CDATA[") {
+                let inner = source.index(i, offsetBy: 9)
+                guard inner <= source.endIndex,
+                      let endRange = source.range(
+                          of: "]]>",
+                          range: inner..<source.endIndex
+                      )
+                else { break }
+                let after = endRange.upperBound
+                if stack.isEmpty { lastCompleted = after }
+                i = after
+                continue
+            }
+
+            // <? processing instruction ?>
+            if remaining.hasPrefix("<?") {
+                let inner = source.index(i, offsetBy: 2)
+                guard inner <= source.endIndex,
+                      let endRange = source.range(
+                          of: "?>",
+                          range: inner..<source.endIndex
+                      )
+                else { break }
+                let after = endRange.upperBound
+                if stack.isEmpty { lastCompleted = after }
+                i = after
+                continue
+            }
+
+            // Regular element. Find its closing `>` while respecting
+            // attribute quoting.
+            guard let tagEnd = Self.scanToClosingAngle(in: source, from: i) else {
+                // Tag is still streaming — drop it and stop here.
+                break
+            }
+            let tag = source[i...tagEnd]
+            let afterTag = source.index(after: tagEnd)
+
+            if tag.hasPrefix("</") {
+                let name = Self.extractEndTagName(tag).lowercased()
+                if stack.isEmpty {
+                    if name == "svg" {
+                        // The streaming root has just closed.
+                        return WalkResult(lastCompleted: afterTag, rootClosed: true)
+                    }
+                    // Stray end tag with nothing open — malformed; stop.
+                    break
+                }
+                if stack[stack.count - 1] != name {
+                    // Mismatched nesting — stop at the last balanced point.
+                    break
+                }
+                stack.removeLast()
+                if stack.isEmpty { lastCompleted = afterTag }
+                i = afterTag
+                continue
+            }
+
+            if tag.dropLast().hasSuffix("/") {
+                // Self-closing element.
+                if stack.isEmpty { lastCompleted = afterTag }
+                i = afterTag
+                continue
+            }
+
+            // Opening tag for a container element.
+            let name = Self.extractStartTagName(tag).lowercased()
+            guard !name.isEmpty else { break }
+            stack.append(name)
+            i = afterTag
+        }
+
+        return WalkResult(lastCompleted: lastCompleted, rootClosed: false)
+    }
+
+    // MARK: - Helpers
+
+    private static func scanToClosingAngle(
+        in source: String,
         from start: String.Index
     ) -> String.Index? {
-        var index = start
-        var insideAttribute = false
-        var quoteChar: Character = " "
-        while index < source.endIndex {
-            let char = source[index]
-            if insideAttribute {
-                if char == quoteChar { insideAttribute = false }
-            } else if char == "\"" || char == "'" {
-                insideAttribute = true
-                quoteChar = char
-            } else if char == ">" {
-                return index
+        var i = start
+        var quote: Character? = nil
+        while i < source.endIndex {
+            let c = source[i]
+            if let q = quote {
+                if c == q { quote = nil }
+            } else if c == "\"" || c == "'" {
+                quote = c
+            } else if c == ">" {
+                return i
             }
-            index = source.index(after: index)
+            i = source.index(after: i)
         }
         return nil
     }
 
-    private static func extractTagName(_ tag: Substring) -> String {
-        // tag form: "<name attr=..." or "<name>" — strip leading '<' and stop
-        // at the first whitespace / '>' / '/'.
-        var iterator = tag.makeIterator()
-        guard let first = iterator.next(), first == "<" else { return "" }
+    private static func extractStartTagName(_ tag: Substring) -> String {
+        // tag form: "<name attr=..." or "<name>" or "<name/>"
+        var iter = tag.makeIterator()
+        guard let first = iter.next(), first == "<" else { return "" }
         var name = ""
-        while let char = iterator.next() {
-            if char == " " || char == "\t" || char == "\n" || char == "\r" || char == "/" || char == ">" {
+        while let c = iter.next() {
+            if c == " " || c == "\t" || c == "\n" || c == "\r" || c == "/" || c == ">" {
                 break
             }
-            name.append(char)
+            name.append(c)
+        }
+        return name
+    }
+
+    private static func extractEndTagName(_ tag: Substring) -> String {
+        // tag form: "</name>" or "</name >"
+        var iter = tag.makeIterator()
+        guard iter.next() == "<", iter.next() == "/" else { return "" }
+        var name = ""
+        while let c = iter.next() {
+            if c == " " || c == "\t" || c == "\n" || c == "\r" || c == ">" {
+                break
+            }
+            name.append(c)
         }
         return name
     }

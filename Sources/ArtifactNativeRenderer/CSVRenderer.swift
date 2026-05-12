@@ -3,8 +3,11 @@ import ArtifactCore
 import ArtifactRenderer
 import ArtifactView
 
-/// Renders CSV payloads as a scrollable `Grid`. `hasHeader` attribute (default
-/// `"true"`) controls whether the first row is treated as column headers.
+/// Renders CSV payloads as a spreadsheet-style table. The first row is
+/// treated as the column header unless `hasHeader="false"` is set on the
+/// artifact. See `CSVTableView` for the visual contract (sticky header,
+/// type-aware alignment, zebra striping, lazy body rendering, and copy
+/// affordances).
 public struct CSVRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .csv
 
@@ -14,17 +17,9 @@ public struct CSVRenderer: ArtifactRenderable, Sendable {
         if artifact.isComplete {
             return .renderable(artifact.payload)
         }
-        // Drop any trailing partial row by truncating at the last newline.
-        guard let newlineIndex = artifact.payload.lastIndex(of: "\n") else {
-            return .preRenderable(
-                PreRenderableProgress(
-                    receivedCharacters: artifact.payload.count,
-                    hint: "waiting for first complete row"
-                )
-            )
-        }
-        let prefix = String(artifact.payload[..<newlineIndex])
-        if prefix.isEmpty {
+        // Quote-aware truncation: newlines inside `"..."` fields are not row
+        // terminators. See `PartialCSVScanner`.
+        guard let prefix = PartialCSVScanner.longestValidPrefix(artifact.payload) else {
             return .preRenderable(
                 PreRenderableProgress(
                     receivedCharacters: artifact.payload.count,
@@ -47,30 +42,7 @@ public struct CSVRenderer: ArtifactRenderable, Sendable {
             header = []
             body = rows
         }
-
-        return ScrollView([.vertical, .horizontal]) {
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
-                if !header.isEmpty {
-                    GridRow {
-                        ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                            Text(cell)
-                                .font(.callout.weight(.semibold))
-                        }
-                    }
-                    Divider().gridCellColumns(max(header.count, 1))
-                }
-                ForEach(Array(body.enumerated()), id: \.offset) { _, row in
-                    GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            Text(cell)
-                                .font(.callout)
-                        }
-                    }
-                }
-            }
-            .padding(.vertical, 4)
-        }
-        .frame(maxHeight: 360)
+        return CSVTableView(header: header, rows: body)
     }
 }
 
