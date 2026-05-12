@@ -7,11 +7,15 @@ import ArtifactView
 /// Pure-Swift Mermaid renderer backed by `beautiful-mermaid-swift` (ELK-based
 /// layout, Core Graphics drawing). No `WKWebView`, no JavaScript.
 ///
-/// Streaming policy is conservative: `refine(_:)` holds at `.preRenderable`
-/// until the artifact is complete. BeautifulMermaid renders a fully
-/// laid-out graph in one pass — partial inputs would either fail to parse
-/// or produce a layout that re-flows entirely on each new line, which is
-/// worse for the eye than a single deferred render.
+/// Streaming: `refine(_:)` emits the **longest line-aligned prefix** of the
+/// payload that parses cleanly through `MermaidParser`. Each new chunk
+/// triggers a re-layout, so the diagram grows node-by-node as the source
+/// arrives. The trailing partial line (no newline yet) is always dropped
+/// before parsing; if the next-most-recent complete line is also unparseable
+/// (a half-typed edge, a dangling label), the refiner backtracks one line at
+/// a time up to `streamingBacktrackLimit` lines before falling back to
+/// `.preRenderable`. The complete payload is always returned as-is so a
+/// final parse error surfaces via the view layer rather than being hidden.
 ///
 /// Diagram-type coverage matches BeautifulMermaid:
 /// flowchart / graph / stateDiagram-v2 / sequenceDiagram / classDiagram /
@@ -20,22 +24,65 @@ import ArtifactView
 public struct MermaidRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .mermaid
 
+    /// Maximum number of trailing complete lines to drop when looking for a
+    /// parseable prefix during streaming. Bounded so each `refine` call runs
+    /// at most `1 + streamingBacktrackLimit` parser invocations.
+    static let streamingBacktrackLimit: Int = 5
+
     public init() {}
 
     public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
         if artifact.isComplete {
             return .renderable(artifact.payload)
         }
+        if let prefix = longestParseablePrefix(of: artifact.payload) {
+            return .renderable(prefix)
+        }
         return .preRenderable(
             PreRenderableProgress(
                 receivedCharacters: artifact.payload.count,
-                hint: "waiting for diagram to complete"
+                hint: "waiting for parseable diagram prefix"
             )
         )
     }
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         MermaidBody(source: payload)
+    }
+
+    /// Returns the longest line-aligned prefix of `source` that
+    /// `MermaidParser.parse` accepts, or `nil` if no such prefix exists.
+    ///
+    /// Strategy: split on `\n`, drop the trailing partial line (one with no
+    /// terminating newline — it is still being typed), then attempt to parse.
+    /// On failure, drop one more complete line and retry, up to
+    /// `streamingBacktrackLimit` retries. Empty input and prefixes that
+    /// reduce to nothing return `nil`.
+    static func longestParseablePrefix(of source: String) -> String? {
+        guard !source.isEmpty else { return nil }
+
+        let lines = source.components(separatedBy: "\n")
+        let hasTrailingNewline = source.hasSuffix("\n")
+        let lastCompleteIndex = hasTrailingNewline ? lines.count : lines.count - 1
+        guard lastCompleteIndex >= 1 else { return nil }
+
+        let lowerBound = max(1, lastCompleteIndex - streamingBacktrackLimit)
+        for count in stride(from: lastCompleteIndex, through: lowerBound, by: -1) {
+            let candidate = lines.prefix(count).joined(separator: "\n")
+            if parseSucceeds(candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func parseSucceeds(_ source: String) -> Bool {
+        do {
+            _ = try MermaidParser.parse(source)
+            return true
+        } catch {
+            return false
+        }
     }
 }
 
@@ -103,26 +150,48 @@ private struct MermaidBody: View {
 
     private var diagramScroller: some View {
         GeometryReader { geometry in
-            let scaledWidth = max(diagramBounds.width * zoomScale, 1)
-            let scaledHeight = max(diagramBounds.height * zoomScale, 1)
+            // `MermaidDiagramView` lays out at its natural `diagramBounds`
+            // and does not honor a smaller frame on its own — shrinking the
+            // frame alone leaves the diagram drawing at full size and
+            // overflowing. To actually visually scale, render the
+            // representable at natural size and apply `.scaleEffect`, then
+            // wrap with an outer frame whose dimensions reflect the scaled
+            // visual extent so the ScrollView sees correct contentSize.
+            let naturalWidth = max(diagramBounds.width, 1)
+            let naturalHeight = max(diagramBounds.height, 1)
+            let scaledWidth = naturalWidth * zoomScale
+            let scaledHeight = naturalHeight * zoomScale
+            let contentWidth = max(scaledWidth + scrollPadding * 2, geometry.size.width)
+            let contentHeight = max(scaledHeight + scrollPadding * 2, geometry.size.height)
 
             ScrollView([.horizontal, .vertical]) {
-                MermaidDiagramView(
-                    source: source,
-                    theme: theme,
-                    parseError: $parseError,
-                    diagramBounds: $diagramBounds
-                )
-                .frame(width: scaledWidth, height: scaledHeight)
-                .padding(scrollPadding)
-                .frame(
-                    minWidth: geometry.size.width,
-                    minHeight: geometry.size.height
-                )
+                ZStack {
+                    Color.clear
+                        .frame(width: contentWidth, height: contentHeight)
+
+                    MermaidDiagramView(
+                        source: source,
+                        theme: theme,
+                        parseError: $parseError,
+                        diagramBounds: $diagramBounds
+                    )
+                    .frame(width: naturalWidth, height: naturalHeight)
+                    .scaleEffect(zoomScale, anchor: .topLeading)
+                    .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
+                }
             }
             .defaultScrollAnchor(.center)
             .scrollBounceBehavior(.basedOnSize)
+            // `.highPriorityGesture` on macOS/iOS lets the pinch win against
+            // a long-press, while ScrollView's intrinsic pan remains
+            // recognized via a different gesture stream. macCatalyst routes
+            // touch through UIKit, where `.simultaneousGesture` is the
+            // documented pattern for coexisting magnify + scroll.
+            #if targetEnvironment(macCatalyst)
             .simultaneousGesture(magnifyGesture)
+            #else
+            .highPriorityGesture(magnifyGesture)
+            #endif
         }
     }
 
