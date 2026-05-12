@@ -2,14 +2,18 @@
 
 A Swift/SwiftUI library for displaying LLM-generated `<artifact>` blocks inside chat
 interfaces. Parses Claude-style artifact tags, models them as values, and renders each
-one through a pluggable renderer protocol.
+one through a pluggable renderer protocol — with first-class support for **partial
+rendering** while a model is still streaming.
 
 - **Swift 6.3+**, **iOS / macOS / iPadOS / visionOS / Mac Catalyst 26+**
 - Five SPM libraries — depend only on what you need
-- Streaming-aware: each renderer declares whether its current payload is
-  `empty / streaming / partial / complete`
-- Environment-driven renderer registry — call `.artifactRenderer(_:)` once at
-  the top of your view tree and let `ArtifactView` resolve the right renderer
+- **Two-stage rendering model**: every renderer declares a `refine(_:)` step that
+  reduces the in-flight payload to a renderer-valid subset, so the `body` never sees
+  half-formed input
+- **Streaming-aware refiners** for JSON, SVG, Mermaid, LaTeX, CSV, Markdown, and
+  GeoJSON — partial output is drawn as it arrives, not after the final token
+- Environment-driven renderer registry — call `.artifactRenderer(_:)` once at the top
+  of your view tree and let `ArtifactView` resolve the right renderer
 
 See [SPEC.md](SPEC.md) for the full specification.
 
@@ -18,15 +22,15 @@ See [SPEC.md](SPEC.md) for the full specification.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.1.0"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.2.0"),
 ]
 
 // Target dependencies (pick what you need)
 .product(name: "ArtifactCore",            package: "swift-artifact"),
 .product(name: "ArtifactRenderer",        package: "swift-artifact"),
 .product(name: "ArtifactView",            package: "swift-artifact"),
-.product(name: "ArtifactRendererNative",  package: "swift-artifact"),
-.product(name: "ArtifactRendererWeb",     package: "swift-artifact"),
+.product(name: "ArtifactNativeRenderer",  package: "swift-artifact"),
+.product(name: "ArtifactWebRenderer",     package: "swift-artifact"),
 ```
 
 ## Modules
@@ -34,13 +38,15 @@ dependencies: [
 | Module | Depends on | Purpose |
 |---|---|---|
 | `ArtifactCore` | — | `ArtifactType`, `AnyArtifact`, parsing |
-| `ArtifactRenderer` | Core | `ArtifactRenderable` protocol, `AnyArtifactRenderer` |
+| `ArtifactRenderer` | Core | `ArtifactRenderable` protocol, `RefinedPayload`, `AnyArtifactRenderer` |
 | `ArtifactView` | Core + Renderer | `ArtifactView`, `ArtifactCard`, `ArtifactCanvas`, env registry |
-| `ArtifactRendererNative` | View | Markdown / JSON / CSV / Code / SVG / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (QuickLook) |
-| `ArtifactRendererWeb` | View | HTML / React / Mermaid / LaTeX (KaTeX) / Vega-Lite via `WKWebView` |
+| `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) |
+| `ArtifactWebRenderer` | View | HTML / React / Mermaid / LaTeX (KaTeX) / Vega-Lite via `WKWebView` |
 
-`ArtifactRendererNative` pulls in [`swift-markdown-ui`](https://github.com/1amageek/swift-markdown-ui)
+`ArtifactNativeRenderer` pulls in [`swift-markdown-ui`](https://github.com/1amageek/swift-markdown-ui)
 for block-level Markdown rendering (headings, lists, tables, code blocks).
+The USDZ renderer uses RealityKit's `RealityView` with built-in pinch / drag / double-tap
+gestures.
 
 ## Minimal example
 
@@ -48,8 +54,8 @@ for block-level Markdown rendering (headings, lists, tables, code blocks).
 import SwiftUI
 import ArtifactCore
 import ArtifactView
-import ArtifactRendererNative
-import ArtifactRendererWeb
+import ArtifactNativeRenderer
+import ArtifactWebRenderer
 
 struct ChatBubble: View {
     let message: String  // raw text containing <artifact> tags
@@ -62,6 +68,7 @@ struct ChatBubble: View {
             .artifactRenderer(CSVRenderer())
             .artifactRenderer(SVGRenderer())
             .artifactRenderer(GeoJSONMapKitRenderer())
+            .artifactRenderer(USDZModel3DRenderer())
             .artifactRenderer(MermaidWebViewRenderer())
             .artifactRenderer(LaTeXWebViewRenderer())
             .artifactRenderer(HTMLWebViewRenderer())
@@ -98,6 +105,30 @@ The card respects two environment modifiers:
 .artifactCardDisclosure(.hidden)            // hide the expand/collapse button
 ```
 
+## Partial rendering
+
+Each renderer owns the rules for what counts as a renderable subset of its payload via
+`refine(_:)`. The view layer never shows a half-parsed structure — it shows either a
+waiting state (`.preRenderable`) or whatever the renderer says is safe to draw
+(`.renderable(String)`).
+
+| Type | Strategy while streaming |
+|---|---|
+| JSON / GeoJSON | longest valid prefix down to the deepest open frame |
+| SVG | element-level boundary tracking, last unclosed element dropped |
+| Mermaid | last incomplete line dropped + brace / quote balance check |
+| LaTeX | dangling `\command` and unbalanced braces trimmed back |
+| CSV | drops the last in-flight row |
+| Markdown | drops the last in-flight block |
+
+Renderers without an incremental strategy fall back to the default refiner, which
+waits for `artifact.isComplete`.
+
+A type-specific waiting UI is opt-in via `preRenderableBody(artifact:progress:)` — for
+example, the React renderer shows highlighted JSX source until the component finishes
+streaming. If a renderer doesn't override it, the view layer falls back to
+`ArtifactProgressView`.
+
 ## Supported artifact types
 
 ### Tier 1 — Claude-compatible
@@ -116,23 +147,46 @@ Register your own MIME type by conforming to `Artifactable` and adding an
 ## Writing a custom renderer
 
 ```swift
-struct MyMarkdownRenderer: ArtifactRenderable, Sendable {
-    static let artifactType: ArtifactType = .markdown
+struct MyJSONRenderer: ArtifactRenderable, Sendable {
+    static let artifactType: ArtifactType = .json
 
-    static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    // Optional: declare what counts as a renderable subset while streaming.
+    // Omitting this gives you the default — wait for artifact.isComplete.
+    static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        if let prefix = longestValidPrefix(of: artifact.payload) {
+            return .renderable(prefix)
+        }
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for first complete value"
+            )
+        )
     }
 
-    func body(artifact: AnyArtifact) -> some View {
-        Text(artifact.payload)
+    // body receives the refined string, never the raw payload. It can assume
+    // the input is well-formed for this renderer's type.
+    func body(artifact: AnyArtifact, payload: String) -> some View {
+        Text(payload).font(.system(.callout, design: .monospaced))
     }
 }
 ```
 
-`renderingState(for:)` lets the view layer switch between an empty placeholder, a
-streaming progress indicator, and the renderer body — without each renderer needing to
-implement that branching itself.
+For a type-specific waiting state, add `preRenderableBody`:
+
+```swift
+func preRenderableBody(
+    artifact: AnyArtifact,
+    progress: PreRenderableProgress
+) -> some View {
+    Text(artifact.payload)      // show the raw stream
+        .font(.system(.callout, design: .monospaced))
+        .foregroundStyle(.secondary)
+}
+```
 
 ## License
 
