@@ -3,6 +3,12 @@ import BeautifulMermaid
 import ArtifactCore
 import ArtifactRenderer
 import ArtifactView
+#if canImport(AppKit)
+import AppKit
+#endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Pure-Swift Mermaid renderer backed by `beautiful-mermaid-swift` (ELK-based
 /// layout, Core Graphics drawing). No `WKWebView`, no JavaScript.
@@ -133,14 +139,7 @@ private struct MermaidBody: View {
                     systemImage: "chart.line.uptrend.xyaxis"
                 )
             } else if let parseError {
-                ContentUnavailableView {
-                    Label("Cannot render diagram", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(parseError.localizedDescription)
-                        .font(.footnote)
-                        .monospaced()
-                        .multilineTextAlignment(.leading)
-                }
+                MermaidErrorView(error: parseError, source: source)
             } else {
                 diagramScroller
             }
@@ -212,6 +211,120 @@ private struct MermaidBody: View {
 
     private var theme: DiagramTheme {
         colorScheme == .dark ? .zincDark : .zincLight
+    }
+}
+
+/// Error state for `MermaidBody`. Restores the original
+/// `ContentUnavailableView` look and adds a collapsible source panel
+/// underneath so the user can inspect and copy what the model produced.
+///
+/// The source panel is collapsed by default — typical parse errors are
+/// self-explanatory from the error message, and showing the raw source
+/// up front would crowd the small (≤360pt) error frame. Expanding
+/// reveals a scrollable monospaced view plus a Copy button; the source
+/// also supports range selection + Cmd+C via `.textSelection(.enabled)`.
+private struct MermaidErrorView: View {
+    let error: Error
+    let source: String
+
+    @State private var isSourceExpanded = false
+    @State private var didCopy = false
+    @State private var resetTask: Task<Void, Never>?
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ContentUnavailableView {
+                Label("Cannot render diagram", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(error.localizedDescription)
+                    .font(.footnote)
+                    .monospaced()
+                    .multilineTextAlignment(.leading)
+            }
+
+            sourcePanel
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+        }
+    }
+
+    private var sourcePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) {
+                        isSourceExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.right")
+                            .rotationEffect(.degrees(isSourceExpanded ? 90 : 0))
+                            .imageScale(.small)
+                        Text(isSourceExpanded ? "Hide source" : "Show source")
+                            .font(.caption.weight(.medium))
+                    }
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                if isSourceExpanded {
+                    Button {
+                        copy()
+                    } label: {
+                        Label(
+                            didCopy ? "Copied" : "Copy",
+                            systemImage: didCopy ? "checkmark" : "doc.on.doc"
+                        )
+                        .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            if isSourceExpanded {
+                ScrollView {
+                    Text(source)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(maxHeight: 160)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(.quaternary)
+                )
+            }
+        }
+    }
+
+    private func copy() {
+        copyToPasteboard(source)
+        didCopy = true
+        resetTask?.cancel()
+        resetTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(2))
+                didCopy = false
+            } catch {
+                // Sleep cancelled by a newer copy press — leave the flag
+                // to be reset by that newer Task.
+            }
+        }
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #elseif canImport(UIKit)
+        UIPasteboard.general.string = text
+        #endif
     }
 }
 
