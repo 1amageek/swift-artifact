@@ -31,6 +31,10 @@ public struct ArtifactProgressView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(.quaternary)
         )
+        // Self-pad so the indicator keeps breathing room even when the
+        // hosting card opts into edge-to-edge content via
+        // `.artifactCardContentInsets(EdgeInsets())` (Map, Mermaid).
+        .padding(12)
     }
 
     private var displayTitle: String {

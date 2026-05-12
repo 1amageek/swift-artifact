@@ -19,6 +19,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/1amageek/swift-markdown-ui.git", from: "0.2.0"),
+        .package(url: "https://github.com/lukilabs/beautiful-mermaid-swift.git", from: "1.0.4"),
     ],
     targets: [
         .target(
@@ -39,6 +40,7 @@ let package = Package(
                 "ArtifactRenderer",
                 "ArtifactView",
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+                .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
             ]
         ),
         .target(

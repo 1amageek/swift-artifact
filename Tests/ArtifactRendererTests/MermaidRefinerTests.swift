@@ -1,7 +1,7 @@
 import Testing
 import ArtifactCore
 import ArtifactRenderer
-import ArtifactWebRenderer
+import ArtifactNativeRenderer
 
 @Suite("MermaidRenderer.refine")
 struct MermaidRefinerTests {
@@ -15,32 +15,26 @@ struct MermaidRefinerTests {
         )
     }
 
-    @Test func payloadWithoutValidHeaderIsPreRenderable() {
-        let result = MermaidWebViewRenderer.refine(
-            artifact(payload: "flow", isComplete: false)
+    @Test func incompletePayloadIsPreRenderable() {
+        let result = MermaidRenderer.refine(
+            artifact(payload: "flowchart LR\n    A --> B", isComplete: false)
         )
         if case .preRenderable = result {
             // OK
         } else {
-            Issue.record("Expected .preRenderable before a valid header")
+            Issue.record("Expected .preRenderable while streaming")
         }
     }
 
-    @Test func dropsTrailingIncompleteLine() {
-        let payload = """
-        flowchart LR
-            A --> B
-            B --> C
-            C --> "
-        """
-        let result = MermaidWebViewRenderer.refine(artifact(payload: payload, isComplete: false))
-        guard case let .renderable(prefix) = result else {
-            Issue.record("Expected .renderable once at least one line follows the header")
-            return
+    @Test func incompleteEmptyPayloadIsPreRenderable() {
+        let result = MermaidRenderer.refine(
+            artifact(payload: "", isComplete: false)
+        )
+        if case .preRenderable = result {
+            // OK
+        } else {
+            Issue.record("Expected .preRenderable for empty incomplete payload")
         }
-        // The trailing dangling-quote line must have been dropped.
-        #expect(prefix.contains("C --> \"") == false)
-        #expect(prefix.hasPrefix("flowchart LR"))
     }
 
     @Test func completePayloadIsReturnedRaw() {
@@ -48,9 +42,18 @@ struct MermaidRefinerTests {
         flowchart LR
             A --> B
         """
-        let result = MermaidWebViewRenderer.refine(
+        let result = MermaidRenderer.refine(
             artifact(payload: payload, isComplete: true)
         )
         #expect(result == .renderable(payload))
+    }
+
+    @Test func completeEmptyPayloadIsReturnedRaw() {
+        // refine is intentionally simple: even an empty `isComplete` artifact
+        // flows through. The view layer surfaces the "empty diagram" state.
+        let result = MermaidRenderer.refine(
+            artifact(payload: "", isComplete: true)
+        )
+        #expect(result == .renderable(""))
     }
 }
