@@ -78,16 +78,40 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         }
     }
 
-    /// Builds the gutter string: `"1\n2\n3..."` with one entry per visible
-    /// source line. A trailing newline in `source` does not get its own
-    /// number — that final empty position is not a content line.
+    /// Minimum number of line-number rows always rendered, regardless of
+    /// how short the source is. Reserves a stable visual height for the
+    /// code surface — a 2-line snippet still shows the same card size as
+    /// a 10-line snippet, and the gutter does not jitter as a stream
+    /// crosses the 9 → 10 line boundary.
+    private static let minimumGutterLineCount = 10
+
+    /// Builds the gutter string: `" 1\n 2\n 3..."` with one entry per
+    /// row, padded with leading spaces to the digit width of
+    /// `max(contentLineCount, minimumGutterLineCount)`. The row count
+    /// itself is also clamped to that minimum so that short or empty
+    /// payloads still reserve the gutter — line numbers beyond the source
+    /// content sit next to empty space, mirroring how editors render an
+    /// almost-empty buffer.
     private static func lineNumbers(for source: String) -> String {
-        guard !source.isEmpty else { return "" }
+        let contentLineCount = countContentLines(of: source)
+        let rowCount = max(contentLineCount, minimumGutterLineCount)
+        let width = String(rowCount).count
+        return (1...rowCount).map { number in
+            let digits = String(number)
+            return String(repeating: " ", count: width - digits.count) + digits
+        }.joined(separator: "\n")
+    }
+
+    /// Number of content lines in `source`. A trailing newline does not
+    /// get its own line — that final empty position is not a content
+    /// line.
+    private static func countContentLines(of source: String) -> Int {
+        guard !source.isEmpty else { return 0 }
         var lines = source.components(separatedBy: "\n")
         if lines.count > 1, lines.last == "" {
             lines.removeLast()
         }
-        return (1...lines.count).map(String.init).joined(separator: "\n")
+        return lines.count
     }
 }
 
