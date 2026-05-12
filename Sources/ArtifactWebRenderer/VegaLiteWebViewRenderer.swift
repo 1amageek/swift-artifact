@@ -10,13 +10,20 @@ public struct VegaLiteWebViewRenderer: ArtifactRenderable, Sendable {
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .streaming
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for complete Vega-Lite spec"
+            )
+        )
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
-        ArtifactWebView(html: WebRendererShells.vegaLite(payload: artifact.payload))
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
+        ArtifactWebView(html: WebRendererShells.vegaLite(payload: payload))
             .frame(minHeight: 320)
     }
 }

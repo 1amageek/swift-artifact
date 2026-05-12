@@ -5,23 +5,40 @@ import ArtifactView
 
 /// Renders Mermaid diagrams in a WKWebView.
 ///
-/// Demonstrates the spec's dynamic `renderingState` example: while bytes are
-/// still arriving, the renderer pre-validates the partial source with
-/// `MermaidValidator.canParse` and only declares `.partial` once a meaningful
-/// fragment has been seen. Otherwise the streaming placeholder is shown.
+/// Demonstrates the spec's dynamic refiner example: while bytes are still
+/// arriving, `refine(_:)` repeatedly drops the trailing line until the partial
+/// source passes `MermaidValidator.canParse`. The first prefix that parses
+/// becomes the renderable subset; until then the placeholder is shown.
 public struct MermaidWebViewRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .mermaid
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        if artifact.isComplete { return .complete }
-        return MermaidValidator.canParse(artifact.payload) ? .partial : .streaming
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        // Iteratively drop trailing lines until the validator accepts the
+        // remaining prefix. That keeps a half-written edge from causing the
+        // mermaid.js parser to error and reset the rendered diagram.
+        var lines = artifact.payload.split(separator: "\n", omittingEmptySubsequences: false)
+        while !lines.isEmpty {
+            let candidate = lines.joined(separator: "\n")
+            if MermaidValidator.canParse(candidate) {
+                return .renderable(candidate)
+            }
+            lines.removeLast()
+        }
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for diagram header"
+            )
+        )
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
-        ArtifactWebView(html: WebRendererShells.mermaid(payload: artifact.payload))
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
+        ArtifactWebView(html: WebRendererShells.mermaid(payload: payload))
             .frame(minHeight: 280)
     }
 }
@@ -52,7 +69,43 @@ public enum MermaidValidator {
         let lowered = trimmed.lowercased()
         guard prefixes.contains(where: { lowered.hasPrefix($0) }) else { return false }
         // Require at least one newline beyond the header.
-        return trimmed.contains("\n")
+        guard trimmed.contains("\n") else { return false }
+        // Reject sources with an unclosed quoted label or unbalanced grouping.
+        return hasBalancedTokens(trimmed)
+    }
+
+    private static func hasBalancedTokens(_ source: String) -> Bool {
+        var inQuote = false
+        var escape = false
+        var paren = 0
+        var bracket = 0
+        var brace = 0
+        for char in source {
+            if escape {
+                escape = false
+                continue
+            }
+            if inQuote {
+                if char == "\\" {
+                    escape = true
+                } else if char == "\"" {
+                    inQuote = false
+                }
+                continue
+            }
+            switch char {
+            case "\"": inQuote = true
+            case "(": paren += 1
+            case ")": paren -= 1
+            case "[": bracket += 1
+            case "]": bracket -= 1
+            case "{": brace += 1
+            case "}": brace -= 1
+            default: break
+            }
+            if paren < 0 || bracket < 0 || brace < 0 { return false }
+        }
+        return !inQuote && paren == 0 && bracket == 0 && brace == 0
     }
 }
 

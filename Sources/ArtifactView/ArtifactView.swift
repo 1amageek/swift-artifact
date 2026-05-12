@@ -23,13 +23,11 @@ public struct ArtifactView: View {
 
     public var body: some View {
         if let renderer = renderers[artifact.type] {
-            switch renderer.renderingState(artifact) {
-            case .empty:
-                EmptyView()
-            case .streaming:
+            switch renderer.refine(artifact) {
+            case .preRenderable:
                 ArtifactProgressView(artifact: artifact)
-            case .partial, .complete:
-                renderer.body(artifact)
+            case let .renderable(payload):
+                renderer.body(artifact, payload)
             }
         } else {
             DefaultArtifactView(artifact)
@@ -40,6 +38,9 @@ public struct ArtifactView: View {
 /// Typed counterpart to `ArtifactView` used internally by `ArtifactCard`'s
 /// renderer-based init. Public for generic-constraint reasons only — host
 /// code should prefer `ArtifactView(_:)` plus `.artifactRenderer(_:)`.
+///
+/// Unlike the env-based `ArtifactView`, this path honours the renderer's
+/// opt-in `preRenderableBody` (via the associated type) when provided.
 public struct _ArtifactView<R: ArtifactRenderable>: View {
     public let artifact: AnyArtifact
     public let renderer: R
@@ -50,26 +51,30 @@ public struct _ArtifactView<R: ArtifactRenderable>: View {
     }
 
     public var body: some View {
-        switch R.renderingState(for: artifact) {
-        case .empty:
-            EmptyView()
-        case .streaming:
-            ArtifactProgressView(artifact: artifact)
-        case .partial, .complete:
-            renderer.body(artifact: artifact)
+        switch R.refine(artifact) {
+        case let .preRenderable(progress):
+            if R.PreRenderableBody.self == EmptyView.self {
+                ArtifactProgressView(artifact: artifact)
+            } else {
+                renderer.preRenderableBody(artifact: artifact, progress: progress)
+            }
+        case let .renderable(payload):
+            renderer.body(artifact: artifact, payload: payload)
         }
     }
 }
 
 private struct _PreviewRenderer: ArtifactRenderable, Sendable {
     static let artifactType: ArtifactType = .markdown
-    func body(artifact: AnyArtifact) -> some View {
-        Text(artifact.payload)
+    func body(artifact: AnyArtifact, payload: String) -> some View {
+        Text(payload)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
-    static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.payload.isEmpty {
+            return .preRenderable(PreRenderableProgress(receivedCharacters: 0))
+        }
+        return .renderable(artifact.payload)
     }
 }
 
@@ -102,11 +107,13 @@ private struct _PreviewRenderer: ArtifactRenderable, Sendable {
     .frame(width: 420)
 }
 
-#Preview("Streaming via environment") {
-    struct _StreamingOnly: ArtifactRenderable, Sendable {
+#Preview("Pre-renderable via environment") {
+    struct _CompleteOnly: ArtifactRenderable, Sendable {
         static let artifactType: ArtifactType = .react
-        func body(artifact: AnyArtifact) -> some View { EmptyView() }
-        static func renderingState(for _: AnyArtifact) -> ArtifactRenderingState { .streaming }
+        func body(artifact: AnyArtifact, payload: String) -> some View { EmptyView() }
+        static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+            .preRenderable(PreRenderableProgress(receivedCharacters: artifact.payload.count))
+        }
     }
     return ArtifactView(
         AnyArtifact(
@@ -117,7 +124,7 @@ private struct _PreviewRenderer: ArtifactRenderable, Sendable {
             isComplete: false
         )
     )
-    .artifactRenderer(_StreamingOnly())
+    .artifactRenderer(_CompleteOnly())
     .padding()
     .frame(width: 420)
 }

@@ -13,8 +13,8 @@ let package = Package(
         .library(name: "ArtifactCore", targets: ["ArtifactCore"]),
         .library(name: "ArtifactRenderer", targets: ["ArtifactRenderer"]),
         .library(name: "ArtifactView", targets: ["ArtifactView"]),
-        .library(name: "ArtifactRendererNative", targets: ["ArtifactRendererNative"]),
-        .library(name: "ArtifactRendererWeb", targets: ["ArtifactRendererWeb"]),
+        .library(name: "ArtifactNativeRenderer", targets: ["ArtifactNativeRenderer"]),
+        .library(name: "ArtifactWebRenderer", targets: ["ArtifactWebRenderer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/1amageek/swift-markdown-ui.git", from: "0.2.0"),
@@ -32,7 +32,7 @@ let package = Package(
             dependencies: ["ArtifactCore", "ArtifactRenderer"]
         ),
         .target(
-            name: "ArtifactRendererNative",
+            name: "ArtifactNativeRenderer",
             dependencies: [
                 "ArtifactCore",
                 "ArtifactRenderer",
@@ -41,7 +41,7 @@ let package = Package(
             ]
         ),
         .target(
-            name: "ArtifactRendererWeb",
+            name: "ArtifactWebRenderer",
             dependencies: ["ArtifactCore", "ArtifactRenderer", "ArtifactView"],
             resources: [
                 .process("Resources")
@@ -57,8 +57,8 @@ let package = Package(
                 "ArtifactCore",
                 "ArtifactRenderer",
                 "ArtifactView",
-                "ArtifactRendererNative",
-                "ArtifactRendererWeb",
+                "ArtifactNativeRenderer",
+                "ArtifactWebRenderer",
             ]
         ),
     ],

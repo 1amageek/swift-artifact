@@ -13,12 +13,14 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.payload.isEmpty {
+            return .preRenderable(PreRenderableProgress(receivedCharacters: 0))
+        }
+        return .renderable(artifact.payload)
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let language = artifact.attributes["language"], !language.isEmpty {
                 Text(language)
@@ -27,7 +29,7 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
                     .foregroundStyle(.secondary)
             }
             ScrollView([.vertical, .horizontal]) {
-                Text(artifact.payload)
+                Text(payload)
                     .font(.system(.callout, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)

@@ -129,18 +129,20 @@ extension ArtifactCard where Actions == EmptyView {
 
 extension ArtifactCard {
     /// Wraps an artifact rendered by an explicit renderer in card chrome.
-    /// Hides the whole card when the rendering state is `.empty`.
+    /// Hides the whole card while the artifact has no payload bytes and is
+    /// still streaming — there is nothing useful to show yet, not even a
+    /// title bar.
     public init<R: ArtifactRenderable>(
         _ artifact: AnyArtifact,
         renderer: R,
         @ViewBuilder actions: () -> Actions
     ) where Content == _ArtifactView<R> {
-        let state = R.renderingState(for: artifact)
+        let hideCard = artifact.payload.isEmpty && !artifact.isComplete
         self.init(
             artifact: artifact,
             content: _ArtifactView(artifact, renderer: renderer),
             actions: actions(),
-            isEmpty: state == .empty
+            isEmpty: hideCard
         )
     }
 }
@@ -174,12 +176,14 @@ extension ArtifactCard where Content == ArtifactView {
 
 private struct _PreviewMarkdownRenderer: ArtifactRenderable {
     static let artifactType: ArtifactType = .markdown
-    func body(artifact: AnyArtifact) -> some View {
-        Text(artifact.payload).frame(maxWidth: .infinity, alignment: .leading)
+    func body(artifact: AnyArtifact, payload: String) -> some View {
+        Text(payload).frame(maxWidth: .infinity, alignment: .leading)
     }
-    static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.payload.isEmpty {
+            return .preRenderable(PreRenderableProgress(receivedCharacters: 0))
+        }
+        return .renderable(artifact.payload)
     }
 }
 

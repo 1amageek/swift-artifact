@@ -12,14 +12,36 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        // While streaming, only feed the parser up through the last newline
+        // — partial block constructs (e.g. half-written table rows) confuse
+        // CommonMark and produce flickering renders.
+        if let newlineIndex = artifact.payload.lastIndex(of: "\n") {
+            let prefix = String(artifact.payload[..<newlineIndex])
+            if prefix.isEmpty {
+                return .preRenderable(
+                    PreRenderableProgress(
+                        receivedCharacters: artifact.payload.count,
+                        hint: "waiting for first complete line"
+                    )
+                )
+            }
+            return .renderable(prefix)
+        }
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for first newline"
+            )
+        )
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
         ScrollView(.vertical) {
-            MarkdownView(artifact.payload)
+            MarkdownView(payload)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxHeight: 360)

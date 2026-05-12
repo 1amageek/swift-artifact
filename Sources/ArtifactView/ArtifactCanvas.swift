@@ -49,13 +49,15 @@ extension ArtifactCanvas where ArtifactBody == ArtifactCard<ArtifactView, EmptyV
 
 private struct _PreviewMarkdownRenderer: ArtifactRenderable, Sendable {
     static let artifactType: ArtifactType = .markdown
-    func body(artifact: AnyArtifact) -> some View {
-        Text(artifact.payload)
+    func body(artifact: AnyArtifact, payload: String) -> some View {
+        Text(payload)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
-    static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.payload.isEmpty {
+            return .preRenderable(PreRenderableProgress(receivedCharacters: 0))
+        }
+        return .renderable(artifact.payload)
     }
 }
 

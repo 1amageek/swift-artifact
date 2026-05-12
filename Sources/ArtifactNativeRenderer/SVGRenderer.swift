@@ -19,13 +19,23 @@ public struct SVGRenderer: ArtifactRenderable, Sendable {
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        if let prefix = PartialSVGScanner.longestValidPrefix(artifact.payload) {
+            return .renderable(prefix)
+        }
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for <svg> opening tag"
+            )
+        )
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
-        SVGBody(payload: artifact.payload)
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
+        SVGBody(payload: payload)
     }
 }
 

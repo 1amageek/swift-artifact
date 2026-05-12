@@ -10,14 +10,34 @@ public struct CSVRenderer: ArtifactRenderable, Sendable {
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .partial
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        // Drop any trailing partial row by truncating at the last newline.
+        guard let newlineIndex = artifact.payload.lastIndex(of: "\n") else {
+            return .preRenderable(
+                PreRenderableProgress(
+                    receivedCharacters: artifact.payload.count,
+                    hint: "waiting for first complete row"
+                )
+            )
+        }
+        let prefix = String(artifact.payload[..<newlineIndex])
+        if prefix.isEmpty {
+            return .preRenderable(
+                PreRenderableProgress(
+                    receivedCharacters: artifact.payload.count,
+                    hint: "waiting for first complete row"
+                )
+            )
+        }
+        return .renderable(prefix)
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
         let hasHeader = (artifact.attributes["hasHeader"] ?? "true") != "false"
-        let rows = CSVParser.parse(artifact.payload)
+        let rows = CSVParser.parse(payload)
         let header: [String]
         let body: [[String]]
         if hasHeader, let first = rows.first {

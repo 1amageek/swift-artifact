@@ -1,8 +1,9 @@
 import SwiftUI
 import ArtifactCore
 
-/// Placeholder shown by `ArtifactView` while a renderer's
-/// `renderingState(for:)` returns `.streaming`.
+/// Placeholder shown by `ArtifactView` while a renderer's `refine(_:)` returns
+/// `.preRenderable` and the renderer has not opted into a type-specific
+/// `preRenderableBody`.
 public struct ArtifactProgressView: View {
     public let artifact: AnyArtifact
 

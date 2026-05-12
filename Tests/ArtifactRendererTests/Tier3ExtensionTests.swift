@@ -52,13 +52,15 @@ struct Tier3ExtensionTests {
     struct StickyNoteRenderer: ArtifactRenderable {
         static let artifactType: ArtifactType = StickyNote.artifactType
 
-        func body(artifact: AnyArtifact) -> some View {
-            Text(artifact.payload)
+        func body(artifact: AnyArtifact, payload: String) -> some View {
+            Text(payload)
         }
 
-        static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-            if artifact.payload.isEmpty { return .empty }
-            return artifact.isComplete ? .complete : .partial
+        static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+            if artifact.payload.isEmpty {
+                return .preRenderable(PreRenderableProgress(receivedCharacters: 0))
+            }
+            return .renderable(artifact.payload)
         }
     }
 
@@ -94,7 +96,7 @@ struct Tier3ExtensionTests {
             payload: "in flight",
             isComplete: false
         )
-        #expect(StickyNoteRenderer.renderingState(for: streaming) == .partial)
+        #expect(StickyNoteRenderer.refine(streaming) == .renderable("in flight"))
     }
 
     @Test func wrongTypeThrows() {

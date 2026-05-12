@@ -16,14 +16,23 @@ public struct GLTFSceneKitRenderer: ArtifactRenderable, Sendable {
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        let url = artifact.payload.trimmingCharacters(in: .whitespacesAndNewlines)
-        if url.isEmpty { return .empty }
-        return artifact.isComplete ? .complete : .streaming
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        // The payload is a URL string. Until the artifact closes we cannot
+        // know whether the URL is complete (no scheme-aware mid-stream cut
+        // is reliable), so wait for `isComplete`.
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for complete URL"
+            )
+        )
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
-        ModelPlaceholderView(payload: artifact.payload, systemImage: "cube.transparent")
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
+        ModelPlaceholderView(payload: payload, systemImage: "cube.transparent")
     }
 }
 

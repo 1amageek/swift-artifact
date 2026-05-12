@@ -14,15 +14,27 @@ public struct GeoJSONMapKitRenderer: ArtifactRenderable, Sendable {
 
     public init() {}
 
-    public static func renderingState(for artifact: AnyArtifact) -> ArtifactRenderingState {
-        if artifact.payload.isEmpty { return .empty }
-        // Partial JSON typically fails to parse, so wait for complete before
-        // attempting to render geometry.
-        return artifact.isComplete ? .complete : .streaming
+    public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {
+        if artifact.isComplete {
+            return .renderable(artifact.payload)
+        }
+        // Only emit when at least one Feature has been completed. Use the
+        // partial JSON scanner to extract a parseable prefix, then verify it
+        // resolves to at least one geometry.
+        if let prefix = PartialJSONScanner.longestValidPrefix(artifact.payload),
+           !GeoJSONParser.parse(prefix).isEmpty {
+            return .renderable(prefix)
+        }
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for first complete Feature"
+            )
+        )
     }
 
-    public func body(artifact: AnyArtifact) -> some View {
-        let features = GeoJSONParser.parse(artifact.payload)
+    public func body(artifact: AnyArtifact, payload: String) -> some View {
+        let features = GeoJSONParser.parse(payload)
         let region = MapRegionResolver.region(for: features, attributes: artifact.attributes)
         let initialPosition: MapCameraPosition = .region(region)
         return Map(initialPosition: initialPosition) {
@@ -233,6 +245,64 @@ enum MapRegionResolver {
     .artifactCardContentInsets(EdgeInsets())
     .padding()
     .frame(width: 480, height: 420)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("geo3"),
+        type: .geoJSON,
+        title: "Route + zone",
+        fullPayload: """
+        {
+          "type": "FeatureCollection",
+          "features": [
+            {
+              "type": "Feature",
+              "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                  [139.7671, 35.6812],
+                  [139.7600, 35.6750],
+                  [139.7500, 35.6700],
+                  [139.7400, 35.6660],
+                  [139.7300, 35.6620],
+                  [139.7200, 35.6600],
+                  [139.7100, 35.6610],
+                  [139.7036, 35.6580],
+                  [139.7006, 35.6717]
+                ]
+              }
+            },
+            {
+              "type": "Feature",
+              "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                  [139.690, 35.660],
+                  [139.700, 35.655],
+                  [139.715, 35.652],
+                  [139.725, 35.660],
+                  [139.728, 35.672],
+                  [139.722, 35.685],
+                  [139.710, 35.692],
+                  [139.695, 35.688],
+                  [139.688, 35.676],
+                  [139.690, 35.660]
+                ]]
+              }
+            }
+          ]
+        }
+        """,
+        chunkSize: 12,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+            .artifactCardContentInsets(EdgeInsets())
+    }
+    .artifactRenderer(GeoJSONMapKitRenderer())
+    .padding()
+    .frame(width: 520, height: 540)
 }
 
 #Preview("Bare — FeatureCollection (line + polygon)") {
