@@ -5,7 +5,7 @@ import ArtifactView
 
 /// Renders CSV payloads as a scrollable `Grid`. `hasHeader` attribute (default
 /// `"true"`) controls whether the first row is treated as column headers.
-public struct CSVNativeRenderer: ArtifactRenderable, Sendable {
+public struct CSVRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .csv
 
     public init() {}
@@ -135,7 +135,7 @@ enum CSVParser {
             """,
             isComplete: true
         ),
-        renderer: CSVNativeRenderer()
+        renderer: CSVRenderer()
     )
     .padding()
     .frame(width: 480)
@@ -151,7 +151,30 @@ enum CSVParser {
             isComplete: true
         )
     )
-    .artifactRenderer(CSVNativeRenderer())
+    .artifactRenderer(CSVRenderer())
     .padding()
     .frame(width: 360)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("csv3"),
+        type: .csv,
+        title: "Quarterly sales",
+        fullPayload: """
+        Region,Q1,Q2,Q3,Q4,YTD
+        North,120,134,148,162,564
+        South,98,110,121,140,469
+        East,75,82,91,99,347
+        West,140,155,170,185,650
+        Central,88,95,102,118,403
+        """,
+        chunkSize: 5,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(CSVRenderer())
+    .padding()
+    .frame(width: 520, height: 460)
 }

@@ -5,7 +5,7 @@ import ArtifactView
 
 /// Renders JSON payloads. Once parseable, the value is pretty-printed; until
 /// then the raw bytes are shown so streaming output is still inspectable.
-public struct JSONNativeRenderer: ArtifactRenderable, Sendable {
+public struct JSONRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .json
 
     public init() {}
@@ -52,7 +52,7 @@ public struct JSONNativeRenderer: ArtifactRenderable, Sendable {
             payload: #"{"name":"Bob","version":"0.1.0","tiers":[1,2,3]}"#,
             isComplete: true
         ),
-        renderer: JSONNativeRenderer()
+        renderer: JSONRenderer()
     )
     .padding()
     .frame(width: 460)
@@ -67,7 +67,40 @@ public struct JSONNativeRenderer: ArtifactRenderable, Sendable {
             isComplete: false
         )
     )
-    .artifactRenderer(JSONNativeRenderer())
+    .artifactRenderer(JSONRenderer())
     .padding()
     .frame(width: 460)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("j3"),
+        type: .json,
+        title: "config.json",
+        fullPayload: #"""
+        {
+          "name": "Bob",
+          "version": "0.1.0",
+          "modules": [
+            "ArtifactCore",
+            "ArtifactRenderer",
+            "ArtifactView",
+            "ArtifactRendererNative",
+            "ArtifactRendererWeb"
+          ],
+          "platforms": {
+            "iOS": 26,
+            "macOS": 26,
+            "visionOS": 26
+          }
+        }
+        """#,
+        chunkSize: 6,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(JSONRenderer())
+    .padding()
+    .frame(width: 480, height: 500)
 }

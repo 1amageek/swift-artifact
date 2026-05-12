@@ -521,11 +521,11 @@ public struct ArtifactCanvas: View {
 
 | Renderer | 対応 Type | 基盤 |
 |----------|---------|------|
-| `MarkdownNativeRenderer` | `.markdown` | swift-markdown-ui |
-| `CodeNativeRenderer` | `.code` | Splash / Highlightr |
-| `SVGNativeRenderer` | `.svg` | SVGView / SwiftDraw |
-| `JSONNativeRenderer` | `.json` | OutlineGroup |
-| `CSVNativeRenderer` | `.csv` | SwiftUI Table |
+| `MarkdownRenderer` | `.markdown` | swift-markdown-ui |
+| `CodeRenderer` | `.code` | Splash / Highlightr |
+| `SVGRenderer` | `.svg` | SVGView / SwiftDraw |
+| `JSONRenderer` | `.json` | OutlineGroup |
+| `CSVRenderer` | `.csv` | SwiftUI Table |
 | `GLTFSceneKitRenderer` | `.gltf`, `.glb` | Model3D / SceneKit |
 | `USDZQuickLookRenderer` | `.usdz` | QuickLook / RealityKit |
 | `GeoJSONMapKitRenderer` | `.geoJSON` | MapKit |
@@ -686,7 +686,7 @@ struct ChatBubble: View {
 ```swift
 let artifact: AnyArtifact = ...
 
-ArtifactView(artifact, renderer: MarkdownNativeRenderer())
+ArtifactView(artifact).artifactRenderer(MarkdownRenderer())
 ```
 
 ### 13.4 カスタムレンダラー差し替え

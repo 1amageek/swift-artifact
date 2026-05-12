@@ -14,7 +14,7 @@ import AppKit
 /// SVG decoder, so the source falls back to a monospaced display. Applications
 /// that need true SVG on iOS should substitute a renderer backed by
 /// `SVGView` / `SwiftDraw`.
-public struct SVGNativeRenderer: ArtifactRenderable, Sendable {
+public struct SVGRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .svg
 
     public init() {}
@@ -78,8 +78,30 @@ private struct SVGBody: View {
             """,
             isComplete: true
         ),
-        renderer: SVGNativeRenderer()
+        renderer: SVGRenderer()
     )
     .padding()
     .frame(width: 360)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("svg2"),
+        type: .svg,
+        title: "Streaming logo",
+        fullPayload: """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 120">
+          <rect x="10" y="10" width="180" height="100" rx="12" fill="#5B8FF9"/>
+          <circle cx="60" cy="60" r="28" fill="#FFD666"/>
+          <text x="120" y="68" fill="white" font-family="-apple-system" font-size="22">Bob</text>
+        </svg>
+        """,
+        chunkSize: 8,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(SVGRenderer())
+    .padding()
+    .frame(width: 420, height: 420)
 }

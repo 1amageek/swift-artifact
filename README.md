@@ -56,11 +56,11 @@ struct ChatBubble: View {
 
     var body: some View {
         ArtifactCanvas(text: message)
-            .artifactRenderer(MarkdownNativeRenderer())
-            .artifactRenderer(CodeNativeRenderer())
-            .artifactRenderer(JSONNativeRenderer())
-            .artifactRenderer(CSVNativeRenderer())
-            .artifactRenderer(SVGNativeRenderer())
+            .artifactRenderer(MarkdownRenderer())
+            .artifactRenderer(CodeRenderer())
+            .artifactRenderer(JSONRenderer())
+            .artifactRenderer(CSVRenderer())
+            .artifactRenderer(SVGRenderer())
             .artifactRenderer(GeoJSONMapKitRenderer())
             .artifactRenderer(MermaidWebViewRenderer())
             .artifactRenderer(LaTeXWebViewRenderer())
@@ -78,7 +78,7 @@ already has its own header (sidebar, document outline, etc.).
 
 ```swift
 ArtifactView(artifact)
-    .artifactRenderer(MarkdownNativeRenderer())
+    .artifactRenderer(MarkdownRenderer())
 ```
 
 `ArtifactCard(_:)` wraps the same thing with a title bar, type badge, streaming

@@ -8,7 +8,7 @@ import ArtifactView
 /// No external highlighter is bundled — this MVP shows uncolored source. Hook a
 /// real highlighter (Splash / Highlightr / tree-sitter) by replacing this
 /// renderer in your application.
-public struct CodeNativeRenderer: ArtifactRenderable, Sendable {
+public struct CodeRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .code
 
     public init() {}
@@ -54,7 +54,7 @@ public struct CodeNativeRenderer: ArtifactRenderable, Sendable {
             """,
             isComplete: true
         ),
-        renderer: CodeNativeRenderer()
+        renderer: CodeRenderer()
     )
     .padding()
     .frame(width: 460)
@@ -70,7 +70,37 @@ public struct CodeNativeRenderer: ArtifactRenderable, Sendable {
             isComplete: true
         )
     )
-    .artifactRenderer(CodeNativeRenderer())
+    .artifactRenderer(CodeRenderer())
     .padding()
     .frame(width: 460)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("c3"),
+        type: .code,
+        title: "fizzbuzz.swift",
+        attributes: ["language": "swift"],
+        fullPayload: """
+        func fizzbuzz(upTo limit: Int) {
+            for n in 1...limit {
+                switch (n % 3, n % 5) {
+                case (0, 0): print("FizzBuzz")
+                case (0, _): print("Fizz")
+                case (_, 0): print("Buzz")
+                default:     print(n)
+                }
+            }
+        }
+
+        fizzbuzz(upTo: 30)
+        """,
+        chunkSize: 6,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(CodeRenderer())
+    .padding()
+    .frame(width: 480, height: 480)
 }

@@ -91,3 +91,26 @@ public enum MermaidValidator {
     .padding()
     .frame(width: 420)
 }
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("md3"),
+        type: .mermaid,
+        title: "Pipeline",
+        fullPayload: """
+        flowchart LR
+            A[Source] --> B[Compile]
+            B --> C{Tests pass?}
+            C -- yes --> D[Ship]
+            C -- no --> E[Fix]
+            E --> B
+        """,
+        chunkSize: 4,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(MermaidWebViewRenderer())
+    .padding()
+    .frame(width: 520, height: 460)
+}
