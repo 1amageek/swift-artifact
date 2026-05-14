@@ -24,7 +24,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.6.3"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.6.4"),
 ]
 ```
 
@@ -153,7 +153,7 @@ ArtifactCard(artifact)
 
 Earlier versions imposed an internal 240–360pt cap on these renderers,
 which silently overrode caller-supplied `.frame(height:)`. That cap was
-removed in 0.6.3 — the library no longer second-guesses your layout.
+removed in 0.6.4 — the library no longer second-guesses your layout.
 
 ## Partial rendering
 
