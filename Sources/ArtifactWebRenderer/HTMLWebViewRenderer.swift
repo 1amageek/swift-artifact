@@ -46,7 +46,18 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
             payload: """
             <!doctype html>
             <html>
-              <body style="font-family:-apple-system;padding:24px;">
+              <head>
+                <style>
+                  :root { color-scheme: light dark; }
+                  html, body { margin: 0; }
+                  body {
+                    font-family: -apple-system;
+                    padding: 24px;
+                    background: light-dark(#fff3e0, #3b2410);
+                  }
+                </style>
+              </head>
+              <body>
                 <h1>Hello from artifact</h1>
                 <p>This document is rendered inside a pooled <code>WKWebView</code>.</p>
                 <ul>
@@ -80,9 +91,14 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
           <head>
             <style>
               :root { color-scheme: light dark; }
-              body { font-family: -apple-system; padding: 24px; }
+              html, body { margin: 0; }
+              body {
+                font-family: -apple-system;
+                padding: 24px;
+                background: light-dark(#e3f2fd, #0f2742);
+              }
               h1 { color: light-dark(#1a73e8, #8ab4f8); }
-              .pill { background: light-dark(#eef, #224); border-radius: 999px; padding: 2px 10px; }
+              .pill { background: light-dark(#cfe3f7, #143a64); border-radius: 999px; padding: 2px 10px; }
             </style>
           </head>
           <body>
