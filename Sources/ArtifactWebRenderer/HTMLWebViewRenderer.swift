@@ -57,6 +57,7 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: HTMLWebViewRenderer()
     )
+    .artifactCardContentInsets(EdgeInsets())
     .padding()
     .frame(width: 480, height: 420)
 }
@@ -100,6 +101,7 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         interval: .milliseconds(300)
     ) { artifact in
         ArtifactCard(artifact)
+            .artifactCardContentInsets(EdgeInsets())
     }
     .artifactRenderer(HTMLWebViewRenderer())
     .padding()
