@@ -26,6 +26,14 @@ public protocol ArtifactRenderable {
     /// route artifacts to the correct renderer.
     static var artifactType: ArtifactType { get }
 
+    /// Optional preferred content insets for hosting cards. When no explicit
+    /// `.artifactCardContentInsets(_:)` is set in the environment, the card
+    /// uses this value. Renderers whose body fills their frame edge-to-edge
+    /// (Map, WebView surfaces) typically return `EdgeInsets()`. Returning
+    /// `nil` (the default) leaves the package-level fallback in place, which
+    /// is sized for textual bodies.
+    static var preferredContentInsets: EdgeInsets? { get }
+
     /// Reduce `artifact.payload` to a renderer-valid subset, or report that
     /// nothing is renderable yet.
     static func refine(_ artifact: AnyArtifact) -> RefinedPayload
@@ -53,6 +61,10 @@ extension ArtifactRenderable {
             PreRenderableProgress(receivedCharacters: artifact.payload.count)
         )
     }
+
+    /// Default: no preference, host card falls back to its package-level
+    /// content insets.
+    public static var preferredContentInsets: EdgeInsets? { nil }
 }
 
 extension ArtifactRenderable where PreRenderableBody == EmptyView {

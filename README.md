@@ -116,9 +116,14 @@ ArtifactCard(artifact) {
 The card respects two environment modifiers:
 
 ```swift
-.artifactCardContentInsets(EdgeInsets())    // remove inner padding
+.artifactCardContentInsets(EdgeInsets())    // override inner padding
 .artifactCardDisclosure(.hidden)            // hide the expand/collapse button
 ```
+
+If the environment override is not set, the card consults the resolved
+renderer's `preferredContentInsets`. Bundled renderers that fill their frame
+(HTML, Map, Mermaid, Code) opt out of card padding by default; textual
+renderers (Markdown, JSON, CSV) keep the package-level default.
 
 ## Partial rendering
 
@@ -189,6 +194,13 @@ struct MyJSONRenderer: ArtifactRenderable, Sendable {
         Text(payload).font(.system(.callout, design: .monospaced))
     }
 }
+```
+
+To make the hosting card fill its chrome edge-to-edge (Map / WebView / Code
+style), override `preferredContentInsets`:
+
+```swift
+static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 ```
 
 For a type-specific waiting state, add `preRenderableBody`:

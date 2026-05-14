@@ -14,8 +14,13 @@ public struct ArtifactCard<Content: View, Actions: View>: View {
     public let content: Content
     public let actions: Actions
     private let isEmpty: Bool
+    /// Set by the typed-renderer init so the card can honour
+    /// `R.preferredContentInsets` without a registry lookup. `nil` means the
+    /// card must consult the env-resolved registry instead.
+    private let capturedRendererPreference: EdgeInsets?
 
-    @Environment(\.artifactCardContentInsets) private var contentInsets
+    @Environment(\.artifactCardContentInsets) private var explicitInsets
+    @Environment(\.artifactRenderers) private var renderers
     @Environment(\.artifactCardDisclosureVisibility) private var disclosureVisibility
     @State private var isExpanded: Bool = true
 
@@ -28,18 +33,21 @@ public struct ArtifactCard<Content: View, Actions: View>: View {
         self.content = content()
         self.actions = actions()
         self.isEmpty = false
+        self.capturedRendererPreference = nil
     }
 
     fileprivate init(
         artifact: AnyArtifact,
         content: Content,
         actions: Actions,
-        isEmpty: Bool
+        isEmpty: Bool,
+        capturedRendererPreference: EdgeInsets? = nil
     ) {
         self.artifact = artifact
         self.content = content
         self.actions = actions
         self.isEmpty = isEmpty
+        self.capturedRendererPreference = capturedRendererPreference
     }
 
     public var body: some View {
@@ -57,7 +65,7 @@ public struct ArtifactCard<Content: View, Actions: View>: View {
             if showsBody {
                 content
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(contentInsets)
+                    .padding(resolvedContentInsets)
             }
         }
         .background(
@@ -116,6 +124,15 @@ public struct ArtifactCard<Content: View, Actions: View>: View {
     private var displayTitle: String {
         artifact.title.isEmpty ? "Artifact" : artifact.title
     }
+
+    private var resolvedContentInsets: EdgeInsets {
+        if let explicitInsets { return explicitInsets }
+        if let captured = capturedRendererPreference { return captured }
+        if let preferred = renderers[artifact.type]?.preferredContentInsets {
+            return preferred
+        }
+        return defaultArtifactCardContentInsets
+    }
 }
 
 extension ArtifactCard where Actions == EmptyView {
@@ -142,7 +159,8 @@ extension ArtifactCard {
             artifact: artifact,
             content: _ArtifactView(artifact, renderer: renderer),
             actions: actions(),
-            isEmpty: hideCard
+            isEmpty: hideCard,
+            capturedRendererPreference: R.preferredContentInsets
         )
     }
 }

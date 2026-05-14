@@ -32,8 +32,9 @@ public struct ArtifactProgressView: View {
                 .fill(.quaternary)
         )
         // Self-pad so the indicator keeps breathing room even when the
-        // hosting card opts into edge-to-edge content via
-        // `.artifactCardContentInsets(EdgeInsets())` (Map, Mermaid).
+        // hosting card runs with zero content insets (Map, Mermaid,
+        // HTML, Code renderers all declare `preferredContentInsets ==
+        // .zero`).
         .padding(12)
     }
 
