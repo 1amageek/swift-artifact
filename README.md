@@ -131,6 +131,7 @@ waiting state (`.preRenderable`) or whatever the renderer says is safe to draw
 |---|---|
 | JSON / GeoJSON | longest valid prefix down to the deepest open frame |
 | SVG | element-level boundary tracking, last unclosed element dropped |
+| HTML | token-level trim — half-typed tag dropped, `<script>` / `<style>` blocks withheld until their close tag arrives |
 | Mermaid | last incomplete line dropped + brace / quote balance check |
 | LaTeX | dangling `\command` and unbalanced braces trimmed back |
 | CSV | drops the last in-flight row |

@@ -13,12 +13,19 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         if artifact.isComplete {
             return .renderable(artifact.payload)
         }
-        // Browsers tolerate partial HTML — feed everything once any byte has
-        // arrived.
-        if artifact.payload.isEmpty {
-            return .preRenderable(PreRenderableProgress(receivedCharacters: 0))
+        // Trim any half-typed tag / raw-text block off the tail before
+        // handing the snapshot to `WKWebView`. A bisected `<script>` would
+        // otherwise put the parser into raw-text mode and swallow every
+        // subsequent token in the document.
+        if let prefix = PartialHTMLScanner.longestValidPrefix(artifact.payload) {
+            return .renderable(prefix)
         }
-        return .renderable(artifact.payload)
+        return .preRenderable(
+            PreRenderableProgress(
+                receivedCharacters: artifact.payload.count,
+                hint: "waiting for first complete tag"
+            )
+        )
     }
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
@@ -55,6 +62,11 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
 }
 
 #Preview("Streaming — chunked at 0.3s") {
+    // The refiner trims half-typed tags off the tail and withholds
+    // `<script>` / `<style>` blocks until their close tag arrives. The
+    // `<style>` block in this preview is dropped entirely while it is
+    // mid-stream, then appears whole as soon as `</style>` lands —
+    // demonstrating the raw-text guard.
     StreamingPreviewHarness(
         id: ArtifactIdentifier("h2"),
         type: .html,
@@ -62,10 +74,20 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         fullPayload: """
         <!doctype html>
         <html>
-          <body style="font-family:-apple-system;padding:24px;">
+          <head>
+            <style>
+              :root { color-scheme: light dark; }
+              body { font-family: -apple-system; padding: 24px; }
+              h1 { color: light-dark(#1a73e8, #8ab4f8); }
+              .pill { background: light-dark(#eef, #224); border-radius: 999px; padding: 2px 10px; }
+            </style>
+          </head>
+          <body>
             <h1>Streaming HTML</h1>
-            <p>Bytes arrive every 0.3 seconds. The browser tolerates partial
-            markup, so the refiner forwards every chunk as soon as it lands.</p>
+            <p>Bytes arrive every 0.3 seconds. The refiner trims any half-typed
+            tag off the tail and holds back <span class="pill">script</span>
+            and <span class="pill">style</span> blocks until they finish, so the
+            WebView never enters raw-text mode mid-stream.</p>
             <ul>
               <li>First item</li>
               <li>Second item</li>
@@ -81,5 +103,5 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
     }
     .artifactRenderer(HTMLWebViewRenderer())
     .padding()
-    .frame(width: 480, height: 500)
+    .frame(width: 480, height: 560)
 }

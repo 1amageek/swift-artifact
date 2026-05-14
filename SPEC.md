@@ -573,7 +573,7 @@ public enum ArtifactRenderingState {
 
 | ArtifactType | Partial 戦略 |
 |--------------|-----------|
-| `.html` | ブラウザの寛容パーサーに任せる |
+| `.html` | トークン境界で末尾を切り詰める。`<script>` / `<style>` のような raw-text 要素は終端タグが揃うまでブロックごと退避し、それ以外のタグはブラウザの寛容パーサーに委ねる |
 | `.react` | 完成までソースコードハイライト表示 → 完成後 mount |
 | `.svg` | 末端タグ補完で随時描画 |
 | `.mermaid` | パース成功時のみ更新、失敗時は Progress |
