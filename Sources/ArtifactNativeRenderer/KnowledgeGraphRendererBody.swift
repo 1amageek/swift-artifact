@@ -43,7 +43,7 @@ struct KnowledgeGraphRendererBody: View {
             case .pending:
                 ProgressView()
                     .controlSize(.small)
-                    .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 360)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .success(let graph):
                 KnowledgeGraphView(graph: graph)
             case .failure(let error):

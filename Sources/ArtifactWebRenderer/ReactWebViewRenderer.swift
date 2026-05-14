@@ -27,7 +27,7 @@ public struct ReactWebViewRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         ArtifactWebView(html: WebRendererShells.react(payload: payload))
-            .frame(minHeight: 320)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

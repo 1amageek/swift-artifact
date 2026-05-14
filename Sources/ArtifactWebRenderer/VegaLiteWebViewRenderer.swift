@@ -24,7 +24,7 @@ public struct VegaLiteWebViewRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         ArtifactWebView(html: WebRendererShells.vegaLite(payload: payload))
-            .frame(minHeight: 320)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

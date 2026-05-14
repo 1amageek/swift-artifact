@@ -147,7 +147,7 @@ private struct MermaidBody: View {
                 diagramScroller
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 360)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var diagramScroller: some View {

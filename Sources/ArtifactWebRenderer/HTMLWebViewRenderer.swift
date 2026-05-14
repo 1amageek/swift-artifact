@@ -33,7 +33,7 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         ArtifactWebView(html: WebRendererShells.html(payload: payload))
-            .frame(minHeight: 280)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

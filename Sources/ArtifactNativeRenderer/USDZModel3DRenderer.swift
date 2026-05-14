@@ -1,5 +1,6 @@
 import SwiftUI
 import RealityKit
+import _RealityKit_SwiftUI
 import simd
 import ArtifactCore
 import ArtifactRenderer
@@ -62,7 +63,7 @@ private struct USDZModel3DView: View {
                         apply(to: pivot)
                     }
                 }
-                .frame(minHeight: 240, maxHeight: 360)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .gesture(rotateGesture())
                 .simultaneousGesture(zoomGesture())
                 .onTapGesture(count: 2) { resetTransform() }

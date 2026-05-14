@@ -24,7 +24,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.6.2"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.6.3"),
 ]
 ```
 
@@ -130,6 +130,30 @@ If the environment override is not set, the card consults the resolved
 renderer's `preferredContentInsets`. Bundled renderers that fill their frame
 (HTML, Map, Mermaid, Code) opt out of card padding by default; textual
 renderers (Markdown, JSON, CSV) keep the package-level default.
+
+## Sizing policy
+
+Renderers split into two groups:
+
+- **Content-driven** (Markdown, JSON, CSV, Code, SVG) — height follows the
+  payload. The optional `artifactContentHeightLimit()` modifier scrolls
+  content above a configurable cap (`artifactContentMaxHeight`, default
+  360pt) so a long Markdown doc doesn't grow a chat bubble unboundedly.
+- **Fill-frame** (HTML, React, Mermaid, LaTeX, Vega-Lite, GeoJSON, USDZ,
+  Turtle / TriG / N-Quads / RDF/XML / JSON-LD) — these have no intrinsic
+  height because they render into a WebView / Map / RealityView / Canvas.
+  They expand to fill whatever frame the caller provides. **You are
+  expected to wrap them with `.frame(...)`** at the call site:
+
+```swift
+ArtifactCard(artifact)
+    .frame(height: 480)         // chat-bubble use: fixed height
+    .artifactRenderer(GeoJSONMapKitRenderer())
+```
+
+Earlier versions imposed an internal 240–360pt cap on these renderers,
+which silently overrode caller-supplied `.frame(height:)`. That cap was
+removed in 0.6.3 — the library no longer second-guesses your layout.
 
 ## Partial rendering
 

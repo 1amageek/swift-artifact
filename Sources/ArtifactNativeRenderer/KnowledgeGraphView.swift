@@ -43,7 +43,7 @@ struct KnowledgeGraphView: View {
                     "Empty graph",
                     systemImage: "point.3.connected.trianglepath.dotted"
                 )
-                .frame(minHeight: 240, maxHeight: 360)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let layout {
                 scrollable(layout: layout)
                     .overlay(alignment: .bottomLeading) {
@@ -53,7 +53,7 @@ struct KnowledgeGraphView: View {
             } else {
                 ProgressView()
                     .controlSize(.small)
-                    .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 360)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onGeometryChange(for: CGSize.self) { proxy in
@@ -184,7 +184,7 @@ struct KnowledgeGraphView: View {
             .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .frame(minHeight: 280, maxHeight: 520)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         #if targetEnvironment(macCatalyst)
         .simultaneousGesture(zoomGesture)
         #else
