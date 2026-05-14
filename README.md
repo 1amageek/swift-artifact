@@ -11,8 +11,9 @@ rendering** while a model is still streaming.
 - **Two-stage rendering model**: every renderer declares a `refine(_:)` step that
   reduces the in-flight payload to a renderer-valid subset, so the `body` never sees
   half-formed input
-- **Streaming-aware refiners** for JSON, SVG, Mermaid, LaTeX, CSV, Markdown, and
-  GeoJSON — partial output is drawn as it arrives, not after the final token
+- **Streaming-aware refiners** for JSON, SVG, Mermaid, LaTeX, CSV, Markdown, GeoJSON,
+  Turtle, TriG, N-Quads, RDF/XML, and JSON-LD — partial output is drawn as it
+  arrives, not after the final token
 - Environment-driven renderer registry — call `.artifactRenderer(_:)` once at the top
   of your view tree and let `ArtifactView` resolve the right renderer
 
@@ -23,7 +24,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.6.1"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.6.2"),
 ]
 ```
 
@@ -58,7 +59,7 @@ want WebKit in your binary), depend on individual products instead:
 | `ArtifactCore` | — | `ArtifactType`, `AnyArtifact`, parsing |
 | `ArtifactRenderer` | Core | `ArtifactRenderable` protocol, `RefinedPayload`, `AnyArtifactRenderer` |
 | `ArtifactView` | Core + Renderer | `ArtifactView`, `ArtifactCard`, `ArtifactCanvas`, env registry |
-| `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) |
+| `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) / Turtle / TriG / N-Quads / RDF/XML / JSON-LD |
 | `ArtifactWebRenderer` | View | HTML / React / Mermaid / LaTeX (KaTeX) / Vega-Lite via `WKWebView` |
 
 `ArtifactNativeRenderer` pulls in [`swift-markdown-ui`](https://github.com/1amageek/swift-markdown-ui)
@@ -84,6 +85,11 @@ struct ChatBubble: View {
             .artifactRenderer(SVGRenderer())
             .artifactRenderer(GeoJSONMapKitRenderer())
             .artifactRenderer(USDZModel3DRenderer())
+            .artifactRenderer(TurtleRenderer())
+            .artifactRenderer(TriGRenderer())
+            .artifactRenderer(NQuadsRenderer())
+            .artifactRenderer(RDFXMLRenderer())
+            .artifactRenderer(JSONLDRenderer())
             .artifactRenderer(MermaidWebViewRenderer())
             .artifactRenderer(LaTeXWebViewRenderer())
             .artifactRenderer(HTMLWebViewRenderer())
@@ -141,6 +147,10 @@ waiting state (`.preRenderable`) or whatever the renderer says is safe to draw
 | LaTeX | dangling `\command` and unbalanced braces trimmed back |
 | CSV | drops the last in-flight row |
 | Markdown | drops the last in-flight block |
+| Turtle / TriG | truncated to the last statement-terminating `.` outside strings, IRIs, and comments |
+| N-Quads | truncated to the last newline (each line is a self-contained quad) |
+| RDF/XML | framing pass collects every fully-closed top-level element under `<rdf:RDF>` |
+| JSON-LD | tolerant JSON AST emits triples for every fully-typed property pair, including pre-`@context` |
 
 Renderers without an incremental strategy fall back to the default refiner, which
 waits for `artifact.isComplete`.
@@ -152,13 +162,50 @@ streaming. If a renderer doesn't override it, the view layer falls back to
 
 ## Supported artifact types
 
+The framework keys every artifact on its MIME type. The extension column
+lists the canonical file suffix(es) for that format — useful when ingesting
+files from disk or routing on an upload's filename. Extensions are advisory
+metadata; the renderer registry resolves on `ArtifactType` (i.e. the MIME)
+alone.
+
 ### Tier 1 — Claude-compatible
 
-`text/html` · `application/vnd.ant.react` · `image/svg+xml` · `application/vnd.ant.mermaid` · `text/markdown` · `application/vnd.ant.code`
+| Format | MIME | Extensions | Renderer |
+|---|---|---|---|
+| HTML | `text/html` | `.html`, `.htm` | `HTMLWebViewRenderer` |
+| React | `application/vnd.ant.react` | `.jsx`, `.tsx` | `ReactWebViewRenderer` |
+| SVG | `image/svg+xml` | `.svg` | `SVGRenderer` |
+| Mermaid | `application/vnd.ant.mermaid` | `.mmd`, `.mermaid` | `MermaidWebViewRenderer` |
+| Markdown | `text/markdown` | `.md`, `.markdown` | `MarkdownRenderer` |
+| Code | `application/vnd.ant.code` | — (language carried in attributes) | `CodeRenderer` |
 
 ### Tier 2 — Common agent output
 
-`application/json` · `text/csv` · `application/vnd.ant.vega-lite` · `application/geo+json` · `application/vnd.ant.latex` · `model/gltf+json` · `model/vnd.usdz+zip`
+| Format | MIME | Extensions | Renderer |
+|---|---|---|---|
+| JSON | `application/json` | `.json` | `JSONRenderer` |
+| CSV | `text/csv` | `.csv` | `CSVRenderer` |
+| Vega-Lite | `application/vnd.vegalite.v5+json` | `.vl.json` | `VegaLiteWebViewRenderer` |
+| GeoJSON | `application/geo+json` | `.geojson` | `GeoJSONMapKitRenderer` |
+| LaTeX | `application/x-latex` | `.tex`, `.latex` | `LaTeXWebViewRenderer` |
+| glTF (JSON) | `model/gltf+json` | `.gltf` | `GLTFSceneKitRenderer` |
+| USDZ | `model/vnd.usdz+zip` | `.usdz` | `USDZModel3DRenderer` |
+
+### Knowledge graph (W3C RDF)
+
+All five RDF renderers share a force-directed layout, blank-node-stable
+identifiers across re-renders, and progressive partial rendering. JSON-LD
+and RDF/XML use bespoke partial processors so the diagram appears as
+triples become derivable from the prefix — not when the closing `}` or
+`</rdf:RDF>` arrives.
+
+| Format | MIME | Extensions | Renderer |
+|---|---|---|---|
+| Turtle | `text/turtle` | `.ttl` | `TurtleRenderer` |
+| TriG | `application/trig` | `.trig` | `TriGRenderer` |
+| N-Quads | `application/n-quads` | `.nq` | `NQuadsRenderer` |
+| RDF/XML | `application/rdf+xml` | `.rdf`, `.owl` | `RDFXMLRenderer` |
+| JSON-LD | `application/ld+json` | `.jsonld` | `JSONLDRenderer` |
 
 ### Tier 3 — User-defined
 
