@@ -25,6 +25,18 @@ struct KnowledgeGraphRendererBody: View {
         case failure(Error)
     }
 
+    private var parseKey: String {
+        // The task id mixes the completion flag in so that the final
+        // (complete) parse re-runs after streaming concludes, even when the
+        // payload byte sequence happens to match a previous partial snapshot.
+        "\(artifact.isComplete ? "F" : "P")\u{0001}\(payload)"
+    }
+
+    private var currentGraph: KnowledgeGraph? {
+        if case .success(let graph) = parseResult { return graph }
+        return nil
+    }
+
     var body: some View {
         Group {
             switch parseResult {
@@ -38,18 +50,31 @@ struct KnowledgeGraphRendererBody: View {
                 KnowledgeGraphErrorView(error: error, source: payload)
             }
         }
-        .task(id: payload) {
+        .task(id: parseKey) {
             let captured = payload
             let captureFormat = format
+            let isComplete = artifact.isComplete
             let scope = artifact.id.rawValue
             let baseIRI = artifact.attributes["base"]
+            let previousGraph = currentGraph
             let result: ParseResult = await Task.detached(priority: .userInitiated) {
-                do {
-                    let graph = try captureFormat.parse(captured, scope: scope, baseIRI: baseIRI)
-                    return .success(graph)
-                } catch {
-                    return .failure(error)
+                if isComplete {
+                    do {
+                        let graph = try captureFormat.parse(captured, scope: scope, baseIRI: baseIRI)
+                        return .success(graph)
+                    } catch {
+                        return .failure(error)
+                    }
                 }
+                let outcome = captureFormat.parsePartial(captured, scope: scope, baseIRI: baseIRI)
+                if outcome.graph.nodes.isEmpty, let previousGraph {
+                    // Underlying parser rejected the current prefix outright.
+                    // Hold the previous valid snapshot so the diagram stays
+                    // stable across snapshots — the next chunk usually
+                    // resolves the issue.
+                    return .success(previousGraph)
+                }
+                return .success(outcome.graph)
             }.value
             if Task.isCancelled { return }
             parseResult = result

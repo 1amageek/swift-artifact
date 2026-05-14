@@ -22,7 +22,10 @@ public struct TurtleRenderer: ArtifactRenderable, Sendable {
         if artifact.isComplete {
             return .renderable(artifact.payload)
         }
-        if parseSucceeds(artifact.payload, baseIRI: artifact.attributes["base"]) {
+        if KnowledgeGraphFormat.turtle.hasRenderablePartial(
+            artifact.payload,
+            baseIRI: artifact.attributes["base"]
+        ) {
             return .renderable(artifact.payload)
         }
         return .preRenderable(
@@ -35,15 +38,6 @@ public struct TurtleRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         KnowledgeGraphRendererBody(artifact: artifact, payload: payload, format: .turtle)
-    }
-
-    private static func parseSucceeds(_ source: String, baseIRI: String?) -> Bool {
-        do {
-            _ = try KnowledgeGraphFormat.turtle.parse(source, scope: "preview", baseIRI: baseIRI)
-            return true
-        } catch {
-            return false
-        }
     }
 }
 
@@ -83,4 +77,27 @@ public struct TurtleRenderer: ArtifactRenderable, Sendable {
     .artifactRenderer(TurtleRenderer())
     .padding()
     .frame(width: 420, height: 360)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("t3"),
+        type: .turtle,
+        title: "Streaming people",
+        fullPayload: """
+        @prefix ex: <http://example.org/> .
+        @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+        ex:alice foaf:name "Alice" ; foaf:knows ex:bob .
+        ex:bob foaf:name "Bob" ; foaf:knows ex:carol .
+        ex:carol foaf:name "Carol" ; foaf:knows ex:dave .
+        ex:dave foaf:name "Dave" .
+        """,
+        chunkSize: 8,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(TurtleRenderer())
+    .padding()
+    .frame(width: 520, height: 460)
 }

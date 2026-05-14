@@ -18,7 +18,10 @@ public struct TriGRenderer: ArtifactRenderable, Sendable {
         if artifact.isComplete {
             return .renderable(artifact.payload)
         }
-        if parseSucceeds(artifact.payload, baseIRI: artifact.attributes["base"]) {
+        if KnowledgeGraphFormat.trig.hasRenderablePartial(
+            artifact.payload,
+            baseIRI: artifact.attributes["base"]
+        ) {
             return .renderable(artifact.payload)
         }
         return .preRenderable(
@@ -31,15 +34,6 @@ public struct TriGRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         KnowledgeGraphRendererBody(artifact: artifact, payload: payload, format: .trig)
-    }
-
-    private static func parseSucceeds(_ source: String, baseIRI: String?) -> Bool {
-        do {
-            _ = try KnowledgeGraphFormat.trig.parse(source, scope: "preview", baseIRI: baseIRI)
-            return true
-        } catch {
-            return false
-        }
     }
 }
 
@@ -65,4 +59,48 @@ public struct TriGRenderer: ArtifactRenderable, Sendable {
     )
     .padding()
     .frame(width: 520, height: 420)
+}
+
+#Preview("Bare — malformed TriG → error") {
+    ArtifactView(
+        AnyArtifact(
+            id: ArtifactIdentifier("tg2"),
+            type: .trig,
+            payload: """
+            @prefix ex: <http://example.org/> .
+            ex:g1 { ex:s ex:p
+            """,
+            isComplete: true
+        )
+    )
+    .artifactRenderer(TriGRenderer())
+    .padding()
+    .frame(width: 420, height: 360)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("tg3"),
+        type: .trig,
+        title: "Streaming named graphs",
+        fullPayload: """
+        @prefix ex: <http://example.org/> .
+        ex:friends {
+            ex:alice ex:knows ex:bob .
+            ex:bob ex:knows ex:carol .
+            ex:carol ex:knows ex:dave .
+        }
+        ex:facts {
+            ex:alice ex:name "Alice" .
+            ex:bob ex:name "Bob" .
+        }
+        """,
+        chunkSize: 8,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(TriGRenderer())
+    .padding()
+    .frame(width: 520, height: 460)
 }

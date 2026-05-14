@@ -18,8 +18,11 @@ public struct NQuadsRenderer: ArtifactRenderable, Sendable {
         if artifact.isComplete {
             return .renderable(artifact.payload)
         }
-        if let prefix = longestParseablePrefix(of: artifact.payload, baseIRI: artifact.attributes["base"]) {
-            return .renderable(prefix)
+        if KnowledgeGraphFormat.nQuads.hasRenderablePartial(
+            artifact.payload,
+            baseIRI: artifact.attributes["base"]
+        ) {
+            return .renderable(artifact.payload)
         }
         return .preRenderable(
             PreRenderableProgress(
@@ -31,21 +34,6 @@ public struct NQuadsRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         KnowledgeGraphRendererBody(artifact: artifact, payload: payload, format: .nQuads)
-    }
-
-    /// Largest prefix terminating on a `\n` boundary that parses cleanly.
-    /// Each line ends with `.\n` in N-Quads, so cutting at the last newline
-    /// gives a complete-quad prefix without needing a tokenizer.
-    private static func longestParseablePrefix(of source: String, baseIRI: String?) -> String? {
-        guard let lastNewline = source.range(of: "\n", options: .backwards) else { return nil }
-        let prefix = String(source[..<lastNewline.upperBound])
-        guard !prefix.isEmpty else { return nil }
-        do {
-            _ = try KnowledgeGraphFormat.nQuads.parse(prefix, scope: "preview", baseIRI: baseIRI)
-            return prefix
-        } catch {
-            return nil
-        }
     }
 }
 
@@ -67,4 +55,44 @@ public struct NQuadsRenderer: ArtifactRenderable, Sendable {
     )
     .padding()
     .frame(width: 520, height: 420)
+}
+
+#Preview("Bare — malformed N-Quads → error") {
+    ArtifactView(
+        AnyArtifact(
+            id: ArtifactIdentifier("nq2"),
+            type: .nQuads,
+            payload: """
+            <http://example.org/alice> <http://example.org/knows>
+            """,
+            isComplete: true
+        )
+    )
+    .artifactRenderer(NQuadsRenderer())
+    .padding()
+    .frame(width: 420, height: 360)
+}
+
+#Preview("Streaming — chunked at 0.3s") {
+    StreamingPreviewHarness(
+        id: ArtifactIdentifier("nq3"),
+        type: .nQuads,
+        title: "Streaming quads",
+        fullPayload: """
+        <http://example.org/alice> <http://example.org/knows> <http://example.org/bob> <http://example.org/g1> .
+        <http://example.org/bob> <http://example.org/knows> <http://example.org/carol> <http://example.org/g1> .
+        <http://example.org/carol> <http://example.org/knows> <http://example.org/dave> <http://example.org/g1> .
+        <http://example.org/alice> <http://example.org/name> "Alice" .
+        <http://example.org/bob> <http://example.org/name> "Bob" .
+        <http://example.org/carol> <http://example.org/name> "Carol" .
+
+        """,
+        chunkSize: 12,
+        interval: .milliseconds(300)
+    ) { artifact in
+        ArtifactCard(artifact)
+    }
+    .artifactRenderer(NQuadsRenderer())
+    .padding()
+    .frame(width: 520, height: 460)
 }
