@@ -47,6 +47,22 @@ public enum PartialHTMLScanner {
                 continue
             }
 
+            // HTML5 tokenizer disambiguation: a `<` only opens a tag when
+            // the very next character is an ASCII letter, `/`, `!`, or
+            // `?`. Anything else (a digit, space, punctuation) is a data
+            // character. Without this gate, payloads like `Less than < 5`
+            // would block forever waiting for a non-existent `>`.
+            let next = source.index(after: i)
+            if next < source.endIndex {
+                let nc = source[next]
+                let isTagStart = nc.isLetter || nc == "/" || nc == "!" || nc == "?"
+                if !isTagStart {
+                    i = next
+                    lastCompleted = i
+                    continue
+                }
+            }
+
             let remaining = source[i...]
 
             // <!-- comment -->
@@ -151,11 +167,23 @@ public enum PartialHTMLScanner {
 
     // MARK: - Constants
 
-    /// Elements whose content is parsed as raw text rather than as HTML.
-    /// `textarea` and `title` are intentionally omitted from the MVP — a
-    /// half-streamed text area renders as visible literal text rather than
-    /// hijacking the parser, so it is not a correctness hazard.
-    private static let rawTextElements: Set<String> = ["script", "style"]
+    /// Elements whose content is parsed as raw text (or escapable raw
+    /// text) rather than as HTML. While such an element is open, the
+    /// browser tokenizer ignores any nested `<tag>` and waits for the
+    /// matching end tag. Letting a half-streamed opening tag through
+    /// would either swallow all subsequent markup (`<script>`, `<style>`,
+    /// `<noscript>`, `<iframe>`) or render later tags as visible plain
+    /// text inside the element (`<textarea>`, `<title>`). The scanner
+    /// therefore withholds the entire block until its end tag arrives.
+    ///
+    /// `<xmp>`, `<noembed>`, `<noframes>` are spec'd raw-text elements
+    /// too but are legacy/rare in modern LLM output; they can be added
+    /// without changing the algorithm.
+    private static let rawTextElements: Set<String> = [
+        "script", "style",
+        "textarea", "title",
+        "noscript", "iframe",
+    ]
 
     // MARK: - Helpers
 

@@ -273,6 +273,157 @@ struct HTMLRefinerTests {
         }
     }
 
+    // MARK: - `<` data-character disambiguation
+
+    @Test func lessThanFollowedByDigitIsTreatedAsText() {
+        // HTML5 tokenizer: `<` only opens a tag when the next char is an
+        // ASCII letter, `/`, `!`, or `?`. `<5` is plain data, so the
+        // scanner must not block waiting for a non-existent `>`.
+        let payload = "x < 5 things"
+        let result = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        )
+        #expect(result == .renderable(payload))
+    }
+
+    @Test func lessThanFollowedBySpaceIsTreatedAsText() {
+        let payload = "a < b"
+        let result = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        )
+        #expect(result == .renderable(payload))
+    }
+
+    @Test func lessThanAtEndOfBufferIsTreatedAsText() {
+        // EOF after `<` — we can't yet tell whether it'll be a tag or
+        // data. Stay conservative: keep what we have and stop walking.
+        let payload = "before <"
+        guard case let .renderable(prefix) = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        ) else {
+            Issue.record("Expected .renderable")
+            return
+        }
+        #expect(payload.hasPrefix(prefix))
+    }
+
+    @Test func lessThanFollowedByLetterStillBlocksUntilClose() {
+        // The disambiguation must NOT mistakenly treat `<a` as data; an
+        // ASCII letter is a real tag-open trigger, so the half-typed tag
+        // is dropped from the tail.
+        let payload = "ok <a"
+        guard case let .renderable(prefix) = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        ) else {
+            Issue.record("Expected .renderable")
+            return
+        }
+        #expect(prefix == "ok ")
+    }
+
+    // MARK: - Expanded raw-text element coverage
+
+    @Test func unclosedTextareaIsDroppedEntirely() {
+        let payload = "<p>before</p><textarea>still typing"
+        guard case let .renderable(prefix) = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        ) else {
+            Issue.record("Expected .renderable")
+            return
+        }
+        #expect(prefix == "<p>before</p>")
+    }
+
+    @Test func closedTextareaIsRetained() {
+        let payload = "<textarea>hello</textarea><p>Hi</p>"
+        let result = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        )
+        #expect(result == .renderable(payload))
+    }
+
+    @Test func unclosedTitleIsDroppedEntirely() {
+        let payload = "<head><title>Streaming"
+        guard case let .renderable(prefix) = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        ) else {
+            Issue.record("Expected .renderable")
+            return
+        }
+        #expect(prefix == "<head>")
+    }
+
+    @Test func unclosedNoscriptIsDroppedEntirely() {
+        let payload = "<p>ok</p><noscript>fallback <a href"
+        guard case let .renderable(prefix) = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        ) else {
+            Issue.record("Expected .renderable")
+            return
+        }
+        #expect(prefix == "<p>ok</p>")
+    }
+
+    @Test func unclosedIframeIsDroppedEntirely() {
+        let payload = #"<p>ok</p><iframe src="a.html">"#
+        guard case let .renderable(prefix) = HTMLWebViewRenderer.refine(
+            artifact(payload: payload, isComplete: false)
+        ) else {
+            Issue.record("Expected .renderable")
+            return
+        }
+        #expect(prefix == "<p>ok</p>")
+    }
+
+    // MARK: - Property-based termination + invariants
+
+    @Test func scannerTerminatesOnEveryPrefixOfAComplexDocument() {
+        // For every truncation of a complex document, the scanner must
+        // (1) terminate, (2) return a literal prefix of the input, and
+        // (3) never produce output longer than the input.
+        let docs = [
+            """
+            <!DOCTYPE html>
+            <html>
+              <head>
+                <title>Demo</title>
+                <style>p { color: red; }</style>
+              </head>
+              <body>
+                <h1 class="big">Hello &amp; world</h1>
+                <p>3 &lt; 5 and 5 > 3</p>
+                <script>console.log("ok < /not-a-close")</script>
+                <textarea>raw <b>not bold</b></textarea>
+                <!-- a comment with </fake> inside -->
+                <![CDATA[ raw <data/> ]]>
+                <a title="x > y" href='a > b'>link</a>
+              </body>
+            </html>
+            """,
+            "Hello <world without> tags and stray < signs >",
+            "<p>line 1</p>\n<p>line 2</p>\n<scr",
+            "",
+        ]
+        for doc in docs {
+            for endIndex in 0...doc.count {
+                let chunk = String(doc.prefix(endIndex))
+                let result = HTMLWebViewRenderer.refine(
+                    artifact(payload: chunk, isComplete: false)
+                )
+                switch result {
+                case let .renderable(prefix):
+                    #expect(
+                        chunk.hasPrefix(prefix),
+                        "renderable output is not a prefix of input at len \(endIndex): \(prefix)"
+                    )
+                    #expect(prefix.count <= chunk.count)
+                case .preRenderable:
+                    break
+                }
+            }
+        }
+    }
+
     @Test func prefixLengthGrowsMonotonicallyDuringStreaming() {
         // Replay a complete document one character at a time. The
         // renderable prefix's length must never regress as the stream
