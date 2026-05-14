@@ -49,7 +49,7 @@ private struct SVGBody: View {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFit()
-                .frame(maxHeight: 360)
+                .artifactContentHeightLimit()
         } else {
             fallback
         }
@@ -68,7 +68,7 @@ private struct SVGBody: View {
                     .font(.system(.callout, design: .monospaced))
                     .textSelection(.enabled)
             }
-            .frame(maxHeight: 240)
+            .artifactContentHeightLimit()
         }
     }
 }

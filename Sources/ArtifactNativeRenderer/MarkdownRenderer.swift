@@ -44,7 +44,7 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
             MarkdownView(payload)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxHeight: 360)
+        .artifactContentHeightLimit()
     }
 }
 

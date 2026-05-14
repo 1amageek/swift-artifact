@@ -29,9 +29,9 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         // Layout strategy:
         // - Vertical-only `ScrollView` so the container's intrinsic
         //   vertical size equals the content's height. Combined with
-        //   `.fixedSize(horizontal: false, vertical: true)` and
-        //   `.frame(maxHeight: 360)`, the height hugs the content until
-        //   it would exceed 360pt, then caps and starts scrolling.
+        //   `.fixedSize(horizontal: false, vertical: true)` and the
+        //   environment-driven artifact content height limit, the height hugs
+        //   the content until it exceeds the configured cap, then scrolls.
         //   A horizontal+vertical scroll view would have proposed
         //   infinity on both axes and forced us to drive width with a
         //   `GeometryReader`, which is greedy on height and would always
@@ -64,7 +64,7 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
             .font(.system(.callout, design: .monospaced))
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .frame(maxHeight: 360)
+        .artifactContentHeightLimit()
         .fixedSize(horizontal: false, vertical: true)
         .contentMargins(12)
         .overlay(alignment: .topTrailing) {

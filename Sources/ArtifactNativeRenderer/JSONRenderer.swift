@@ -32,7 +32,7 @@ public struct JSONRenderer: ArtifactRenderable, Sendable {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxHeight: 360)
+        .artifactContentHeightLimit()
     }
 
     private func prettyPrint(_ source: String) -> String {
