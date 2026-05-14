@@ -23,7 +23,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.5.0"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.6.0"),
 ]
 ```
 
