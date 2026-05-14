@@ -29,6 +29,9 @@ import UIKit
 /// (gantt, pie, journey, mindmap, …) surface as a parse error.
 public struct MermaidRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .mermaid
+    /// The diagram fills its scroll container; default card padding would
+    /// leave a visible margin around the canvas.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     /// Maximum number of trailing complete lines to drop when looking for a
     /// parseable prefix during streaming. Bounded so each `refine` call runs
@@ -346,7 +349,6 @@ private struct MermaidErrorView: View {
         ),
         renderer: MermaidRenderer()
     )
-    .artifactCardContentInsets(EdgeInsets())
     .padding()
     .frame(width: 520, height: 420)
 }
@@ -372,7 +374,6 @@ private struct MermaidErrorView: View {
         ),
         renderer: MermaidRenderer()
     )
-    .artifactCardContentInsets(EdgeInsets())
     .padding()
     .frame(width: 520, height: 420)
 }
@@ -413,7 +414,6 @@ private struct MermaidErrorView: View {
         interval: .milliseconds(300)
     ) { artifact in
         ArtifactCard(artifact)
-            .artifactCardContentInsets(EdgeInsets())
     }
     .artifactRenderer(MermaidRenderer())
     .padding()

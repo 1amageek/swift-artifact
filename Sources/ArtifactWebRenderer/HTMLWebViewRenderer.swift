@@ -6,6 +6,9 @@ import ArtifactView
 /// Renders an HTML document by handing the payload directly to `WKWebView`.
 public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .html
+    /// HTML payloads carry their own body padding; stacking the card's
+    /// default insets on top leaves a visible margin. Fill the chrome.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -57,7 +60,6 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: HTMLWebViewRenderer()
     )
-    .artifactCardContentInsets(EdgeInsets())
     .padding()
     .frame(width: 480, height: 420)
 }
@@ -101,7 +103,6 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         interval: .milliseconds(300)
     ) { artifact in
         ArtifactCard(artifact)
-            .artifactCardContentInsets(EdgeInsets())
     }
     .artifactRenderer(HTMLWebViewRenderer())
     .padding()

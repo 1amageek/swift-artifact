@@ -10,6 +10,9 @@ import ArtifactView
 /// renderer in your application.
 public struct CodeRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .code
+    /// The code container provides its own gutter, padding, and language
+    /// pill, so the card's default padding would stack as an outer margin.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -134,7 +137,6 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: CodeRenderer()
     )
-    .artifactCardContentInsets(EdgeInsets())
     .padding()
     .frame(width: 460)
 }
@@ -178,7 +180,6 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         interval: .milliseconds(300)
     ) { artifact in
         ArtifactCard(artifact)
-            .artifactCardContentInsets(EdgeInsets())
     }
     .artifactRenderer(CodeRenderer())
     .padding()

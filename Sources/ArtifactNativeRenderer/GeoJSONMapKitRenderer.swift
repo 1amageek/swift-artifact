@@ -11,6 +11,9 @@ import ArtifactView
 /// constituent parts.
 public struct GeoJSONMapKitRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .geoJSON
+    /// The map fills its frame; default card padding would leave a visible
+    /// margin around the map view.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -242,7 +245,6 @@ enum MapRegionResolver {
         ),
         renderer: GeoJSONMapKitRenderer()
     )
-    .artifactCardContentInsets(EdgeInsets())
     .padding()
     .frame(width: 480, height: 420)
 }
@@ -298,7 +300,6 @@ enum MapRegionResolver {
         interval: .milliseconds(300)
     ) { artifact in
         ArtifactCard(artifact)
-            .artifactCardContentInsets(EdgeInsets())
     }
     .artifactRenderer(GeoJSONMapKitRenderer())
     .padding()
