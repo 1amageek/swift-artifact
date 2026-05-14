@@ -20,6 +20,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/1amageek/swift-markdown-ui.git", from: "0.2.0"),
         .package(url: "https://github.com/lukilabs/beautiful-mermaid-swift.git", from: "1.0.4"),
+        .package(url: "https://github.com/1amageek/swift-knowledge-graph.git", from: "0.1.0"),
     ],
     targets: [
         .target(
@@ -41,6 +42,8 @@ let package = Package(
                 "ArtifactView",
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
+                .product(name: "KnowledgeGraph", package: "swift-knowledge-graph"),
+                .product(name: "KnowledgeGraphParsers", package: "swift-knowledge-graph"),
             ]
         ),
         .target(
