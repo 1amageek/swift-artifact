@@ -21,11 +21,12 @@ struct KnowledgeGraphLayoutCalibrationTests {
     private static func edge(
         from: NodeIdentifier,
         to: NodeIdentifier,
+        predicate: String = knows,
         namedGraph: String? = nil
     ) -> Edge {
         Edge(id: EdgeIdentifier(
             source: from,
-            predicate: knows,
+            predicate: predicate,
             target: to,
             namedGraph: namedGraph
         ))
@@ -106,6 +107,102 @@ struct KnowledgeGraphLayoutCalibrationTests {
         #expect(ratio < 0.90)
     }
 
+    // MARK: - Edge angle relaxation
+
+    @Test
+    func edgeAnglesConvergeTowardCardinalAxes() throws {
+        // A branched graph has competing incident edges, so this validates the
+        // angle-only relaxation as a compromise across multiple neighbours
+        // rather than a trivial single-edge alignment.
+        let nodes = (0..<6).map { Self.iri("angle\($0)") }
+        let edges = [
+            Self.edge(from: nodes[0], to: nodes[1], namedGraph: "g"),
+            Self.edge(from: nodes[0], to: nodes[2], namedGraph: "g"),
+            Self.edge(from: nodes[0], to: nodes[3], namedGraph: "g"),
+            Self.edge(from: nodes[3], to: nodes[4], namedGraph: "g"),
+            Self.edge(from: nodes[3], to: nodes[5], namedGraph: "g")
+        ]
+        let graph = KnowledgeGraph(
+            nodes: nodes.map { Node(id: $0) },
+            edges: edges,
+            namedGraphs: [NamedGraph(id: "g", nodes: nodes)]
+        )
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        var totalDeviation = 0.0
+        var measuredCount = 0
+        for edge in result.compoundGraph.edges {
+            guard
+                let sourceOrigin = result.cardPositions[edge.source],
+                let targetOrigin = result.cardPositions[edge.target],
+                let sourceCard = result.compoundGraph.cardByID[edge.source],
+                let targetCard = result.compoundGraph.cardByID[edge.target]
+            else { continue }
+            let sourceCenter = CGPoint(
+                x: sourceOrigin.x + sourceCard.size.width / 2,
+                y: sourceOrigin.y + sourceCard.size.height / 2
+            )
+            let targetCenter = CGPoint(
+                x: targetOrigin.x + targetCard.size.width / 2,
+                y: targetOrigin.y + targetCard.size.height / 2
+            )
+            let angle = atan2(
+                Double(targetCenter.y - sourceCenter.y),
+                Double(targetCenter.x - sourceCenter.x)
+            )
+            totalDeviation += cardinalDeviation(angle)
+            measuredCount += 1
+        }
+        try #require(measuredCount == edges.count)
+        let averageDeviation = totalDeviation / Double(measuredCount)
+        #expect(averageDeviation < 0.22)
+    }
+
+    @Test
+    func bridgeOwnedEdgeDoesNotInflateAdjacentGroupGap() throws {
+        let bridgePredicate = "http://example/bridge"
+        let alice = Self.iri("alice")
+        let bob = Self.iri("bob")
+        let carol = Self.iri("carol")
+        let dave = Self.iri("dave")
+        let eve = Self.iri("eve")
+        let frank = Self.iri("frank")
+        let graph = KnowledgeGraph(
+            nodes: [alice, bob, carol, dave, eve, frank].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: alice, to: bob, namedGraph: "left"),
+                Self.edge(from: bob, to: carol, namedGraph: "left"),
+                Self.edge(from: alice, to: carol, namedGraph: "left"),
+                Self.edge(from: dave, to: eve, namedGraph: "right"),
+                Self.edge(from: eve, to: frank, namedGraph: "right"),
+                Self.edge(from: dave, to: frank, namedGraph: "right"),
+                Self.edge(from: carol, to: dave, predicate: bridgePredicate, namedGraph: "bridge")
+            ],
+            namedGraphs: [
+                NamedGraph(id: "left", nodes: [alice, bob, carol]),
+                NamedGraph(id: "right", nodes: [dave, eve, frank]),
+                NamedGraph(id: "bridge", nodes: [carol, dave])
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let lengths = try edgeCenterLengths(result: result)
+        let bridgeEdge = try #require(
+            result.compoundGraph.edges.first { $0.predicate == "bridge" }
+        )
+        let bridgeLength = try #require(lengths[bridgeEdge.id])
+        let regularLengths = result.compoundGraph.edges.compactMap { edge -> Double? in
+            guard edge.predicate == "knows" else { return nil }
+            return lengths[edge.id]
+        }
+        try #require(!regularLengths.isEmpty)
+        let averageRegularLength = regularLengths.reduce(0, +) / Double(regularLengths.count)
+        #expect(bridgeLength < averageRegularLength * 1.8)
+
+        let leftBox = try #require(groupBoundingBox(label: "left", result: result))
+        let rightBox = try #require(groupBoundingBox(label: "right", result: result))
+        #expect(rightBox.midX > leftBox.midX + 125)
+    }
+
     // MARK: - Helpers
 
     private func bboxToCanvasAreaRatio(
@@ -118,5 +215,47 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let canvasArea = Double(result.canvasSize.width * result.canvasSize.height)
         try #require(canvasArea > 0)
         return bboxArea / canvasArea
+    }
+
+    private func cardinalDeviation(_ angle: Double) -> Double {
+        let quarterTurn = Double.pi / 2
+        let remainder = abs(angle.truncatingRemainder(dividingBy: quarterTurn))
+        return min(remainder, quarterTurn - remainder)
+    }
+
+    private func edgeCenterLengths(
+        result: KnowledgeGraphLayout.Result
+    ) throws -> [EdgeIdentifier: Double] {
+        var lengths: [EdgeIdentifier: Double] = [:]
+        for edge in result.compoundGraph.edges {
+            let source = try center(of: edge.source, in: result)
+            let target = try center(of: edge.target, in: result)
+            let dx = Double(target.x - source.x)
+            let dy = Double(target.y - source.y)
+            lengths[edge.id] = sqrt(dx * dx + dy * dy)
+        }
+        return lengths
+    }
+
+    private func center(
+        of id: CompoundGraph.Card.ID,
+        in result: KnowledgeGraphLayout.Result
+    ) throws -> CGPoint {
+        let origin = try #require(result.cardPositions[id])
+        let card = try #require(result.compoundGraph.cardByID[id])
+        return CGPoint(
+            x: origin.x + card.size.width / 2,
+            y: origin.y + card.size.height / 2
+        )
+    }
+
+    private func groupBoundingBox(
+        label: String,
+        result: KnowledgeGraphLayout.Result
+    ) -> CGRect? {
+        guard let group = result.compoundGraph.groups.first(where: { $0.label == label }) else {
+            return nil
+        }
+        return result.groupBoundingBoxes[group.id]
     }
 }

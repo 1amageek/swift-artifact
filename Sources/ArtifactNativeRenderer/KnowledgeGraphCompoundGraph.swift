@@ -207,14 +207,37 @@ extension CompoundGraph {
         }
 
         // Step 4–5: build inter-card edges with parallel numbering.
+        //
+        // The pair key is *unordered*: edges between the same two cards
+        // share a bucket regardless of direction. This is required so
+        // that a pair of mutual edges (e.g. `A → bridge → B` paired
+        // with `B → knows → A`) is recognised as two parallel edges
+        // and rendered with curvature; otherwise each edge sits as
+        // `parallelCount: 1` in its own one-element bucket and the
+        // two routes draw on top of each other.
+        //
+        // Canonical ordering is by `kind` then `key` — both are stable
+        // properties of a `NodeIdentifier`, so the bucketing is
+        // deterministic across runs.
         struct PairKey: Hashable {
-            let source: NodeIdentifier
-            let target: NodeIdentifier
+            let a: NodeIdentifier
+            let b: NodeIdentifier
+            init(_ s: NodeIdentifier, _ t: NodeIdentifier) {
+                let sKey = "\(s.kind):\(s.key)"
+                let tKey = "\(t.kind):\(t.key)"
+                if sKey <= tKey {
+                    self.a = s
+                    self.b = t
+                } else {
+                    self.a = t
+                    self.b = s
+                }
+            }
         }
         var bucketed: [PairKey: [Edge]] = [:]
         for edge in graph.edges where !foldedEdgeIDs.contains(edge.id) {
             // Skip self-edges to a folded literal (already absorbed).
-            bucketed[PairKey(source: edge.source, target: edge.target), default: []].append(edge)
+            bucketed[PairKey(edge.source, edge.target), default: []].append(edge)
         }
 
         var cardEdges: [CardEdge] = []
@@ -222,7 +245,7 @@ extension CompoundGraph {
         let validIDs = Set(cards.map { $0.id.nodeID })
         for edge in graph.edges where !foldedEdgeIDs.contains(edge.id) {
             guard validIDs.contains(edge.source), validIDs.contains(edge.target) else { continue }
-            let pair = PairKey(source: edge.source, target: edge.target)
+            let pair = PairKey(edge.source, edge.target)
             let siblings = bucketed[pair] ?? [edge]
             let index = siblings.firstIndex(where: { $0.id == edge.id }) ?? 0
             cardEdges.append(CardEdge(
