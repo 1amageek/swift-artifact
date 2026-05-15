@@ -22,14 +22,41 @@ struct CompoundGraph: Sendable {
     let cards: [Card]
     let edges: [CardEdge]
     let cardByID: [Card.ID: Card]
+    /// Visual groups computed from a `GroupingStrategy`. Empty when the
+    /// strategy is `.none` or every derived group lost all its members to
+    /// literal folding.
+    let groups: [Group]
+    /// Index of `groups` by `Group.ID` for O(1) lookups.
+    let groupByID: [Group.ID: Group]
+    /// Reverse map: for each `Card.ID` lists the groups that include it.
+    /// `nil` — not `[]` — when the card belongs to no group, so callers can
+    /// distinguish "unassigned" from "assigned to zero groups by accident".
+    let groupsByCard: [Card.ID: [Group.ID]]
 
-    init(cards: [Card], edges: [CardEdge]) {
+    init(
+        cards: [Card],
+        edges: [CardEdge],
+        groups: [Group] = []
+    ) {
         self.cards = cards
         self.edges = edges
         var byID: [Card.ID: Card] = [:]
         byID.reserveCapacity(cards.count)
         for card in cards { byID[card.id] = card }
         self.cardByID = byID
+
+        self.groups = groups
+        var groupIndex: [Group.ID: Group] = [:]
+        groupIndex.reserveCapacity(groups.count)
+        var reverse: [Card.ID: [Group.ID]] = [:]
+        for group in groups {
+            groupIndex[group.id] = group
+            for member in group.members {
+                reverse[member, default: []].append(group.id)
+            }
+        }
+        self.groupByID = groupIndex
+        self.groupsByCard = reverse
     }
 
     /// A single rendered unit: either an IRI / blank node with its inline
@@ -98,7 +125,10 @@ extension CompoundGraph {
     ///    were absorbed as attributes are dropped.
     /// 5. Parallel edges (same `(source, target)` pair, multiple predicates)
     ///    are numbered so the renderer can offset them.
-    static func decompose(_ graph: KnowledgeGraph) -> CompoundGraph {
+    static func decompose(
+        _ graph: KnowledgeGraph,
+        groupingStrategy: GroupingStrategy = .namedGraphs()
+    ) -> CompoundGraph {
         let shortener = LabelShortener(namespaces: graph.namespaces)
 
         let nodeByID: [NodeIdentifier: Node] = Dictionary(
@@ -205,7 +235,23 @@ extension CompoundGraph {
             ))
         }
 
-        return CompoundGraph(cards: cards, edges: cardEdges)
+        // Build the node→card lookup used by every grouping strategy so we
+        // can drop members that did not survive literal folding.
+        var cardIDsByNodeID: [NodeIdentifier: Card.ID] = [:]
+        cardIDsByNodeID.reserveCapacity(cards.count)
+        for card in cards { cardIDsByNodeID[card.id.nodeID] = card.id }
+
+        let derived = groupingStrategy.deriveGroups(
+            graph: graph,
+            cardIDsByNodeID: cardIDsByNodeID
+        )
+        let filtered = derived.filter { !$0.members.isEmpty }
+
+        return CompoundGraph(
+            cards: cards,
+            edges: cardEdges,
+            groups: filtered
+        )
     }
 }
 

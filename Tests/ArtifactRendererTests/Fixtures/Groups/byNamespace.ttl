@@ -1,0 +1,22 @@
+@prefix foaf:  <http://xmlns.com/foaf/0.1/> .
+@prefix org:   <http://example.org/org/> .
+@prefix orgHR: <http://example.org/org/hr/> .
+@prefix prod:  <http://example.org/product/> .
+@prefix ex:    <http://example.org/> .
+
+ex:alice  foaf:knows ex:bob .
+ex:bob    foaf:knows ex:carol .
+
+org:engineering   ex:label   "Engineering" .
+org:sales         ex:label   "Sales" .
+orgHR:recruiting  ex:label   "Recruiting" .
+orgHR:payroll     ex:label   "Payroll" .
+
+prod:widget       ex:label   "Widget" .
+prod:gadget       ex:label   "Gadget" .
+
+ex:alice  ex:memberOf  org:engineering .
+ex:bob    ex:memberOf  orgHR:recruiting .
+ex:carol  ex:memberOf  org:sales .
+ex:alice  ex:builds    prod:widget .
+ex:bob    ex:reviews   prod:gadget .

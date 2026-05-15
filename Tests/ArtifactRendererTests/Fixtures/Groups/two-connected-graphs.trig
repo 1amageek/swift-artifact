@@ -1,0 +1,15 @@
+@prefix ex: <http://example.org/> .
+
+ex:g1 {
+    ex:alice ex:knows ex:bob .
+    ex:bob ex:knows ex:carol .
+}
+
+ex:g2 {
+    ex:carol ex:knows ex:dave .
+    ex:dave ex:knows ex:eve .
+}
+
+ex:bridge {
+    ex:carol ex:bridge ex:dave .
+}

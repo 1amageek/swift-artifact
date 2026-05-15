@@ -59,6 +59,9 @@ struct KnowledgeGraphLayout: Sendable {
         let edgeRoutes: [EdgeIdentifier: EdgeRoute]
         /// Position of every edge label, post collision avoidance.
         let edgeLabelPositions: [EdgeIdentifier: CGPoint]
+        /// Padded bounding box for each group, ready to draw. Empty when the
+        /// strategy produced no groups.
+        let groupBoundingBoxes: [CompoundGraph.Group.ID: CGRect]
         let canvasSize: CGSize
     }
 
@@ -95,15 +98,17 @@ struct KnowledgeGraphLayout: Sendable {
     static func compute(
         graph: KnowledgeGraph,
         iterations: Int = defaultIterations,
-        initial: [NodeIdentifier: CGPoint] = [:]
+        initial: [NodeIdentifier: CGPoint] = [:],
+        groupingStrategy: GroupingStrategy = .namedGraphs()
     ) -> Result {
-        let compound = CompoundGraph.decompose(graph)
+        let compound = CompoundGraph.decompose(graph, groupingStrategy: groupingStrategy)
         guard !compound.cards.isEmpty else {
             return Result(
                 compoundGraph: compound,
                 cardPositions: [:],
                 edgeRoutes: [:],
                 edgeLabelPositions: [:],
+                groupBoundingBoxes: [:],
                 canvasSize: CGSize(width: 420, height: 280)
             )
         }
@@ -128,12 +133,16 @@ struct KnowledgeGraphLayout: Sendable {
         let sizes = compound.cards.map { $0.size }
         let radii = sizes.map { Double(hypot($0.width, $0.height)) / 2.0 }
 
-        // Step 3: Fruchterman–Reingold relaxation with size-aware springs.
+        // Step 3: Fruchterman–Reingold relaxation with size-aware springs
+        // and an optional cohesion pull toward the centroid of each card's
+        // groups. Cohesion is per-group so a card in two groups feels both
+        // pulls — visually they overlap, which matches the rendering model.
         fruchtermanReingold(
             positions: &positions,
             radii: radii,
             edges: compound.edges,
             indexByID: indexByID,
+            groups: compound.groups,
             iterations: iterations
         )
 
@@ -146,10 +155,13 @@ struct KnowledgeGraphLayout: Sendable {
         )
 
         // Translate to a non-negative coordinate space and finalise canvas.
+        // Groups need extra slack so their padded bbox + outside-top label
+        // fit inside the canvas without clipping.
+        let canvasPadding: CGFloat = compound.groups.isEmpty ? 36 : 64
         let (cardPositions, canvasSize) = anchorAndCanvas(
             cards: compound.cards,
             centerPositions: positions,
-            padding: 36
+            padding: canvasPadding
         )
 
         // Step 5 & 6: edge routes and label slotting.
@@ -159,11 +171,13 @@ struct KnowledgeGraphLayout: Sendable {
             indexByID: indexByID,
             cardPositions: cardPositions
         )
-        let cardRects = compound.cards.map { card in
-            CGRect(
-                origin: cardPositions[card.id] ?? .zero,
-                size: card.size
-            )
+        let cardRects = compound.cards.map { card -> CGRect in
+            // anchorAndCanvas produces an origin for every card, so a missing
+            // lookup here would mean the pipeline desynced — fail loudly.
+            guard let origin = cardPositions[card.id] else {
+                preconditionFailure("Card \(card.id) missing from cardPositions")
+            }
+            return CGRect(origin: origin, size: card.size)
         }
         let labels = placeEdgeLabels(
             edges: compound.edges,
@@ -171,13 +185,66 @@ struct KnowledgeGraphLayout: Sendable {
             cardRects: cardRects
         )
 
+        let groupBoxes = computeGroupBoundingBoxes(
+            groups: compound.groups,
+            cards: compound.cards,
+            indexByID: indexByID,
+            cardPositions: cardPositions
+        )
+
         return Result(
             compoundGraph: compound,
             cardPositions: cardPositions,
             edgeRoutes: routes,
             edgeLabelPositions: labels,
+            groupBoundingBoxes: groupBoxes,
             canvasSize: canvasSize
         )
+    }
+
+    // MARK: - Group bounding boxes
+
+    /// Compute the padded bounding box for each group. Cards already settled
+    /// in `cardPositions`; we union their rectangles and inset by negative
+    /// `style.padding` so the box sits a uniform distance outside its members.
+    ///
+    /// Invariants enforced via precondition:
+    ///   - `decompose` drops empty groups, so `group.members` is non-empty.
+    ///   - Every member of every group is also in `cards` and `cardPositions`.
+    /// A violation indicates a pipeline desync and must crash rather than
+    /// silently produce a missing bbox (silent fallback is banned).
+    private static func computeGroupBoundingBoxes(
+        groups: [CompoundGraph.Group],
+        cards: [CompoundGraph.Card],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardPositions: [CompoundGraph.Card.ID: CGPoint]
+    ) -> [CompoundGraph.Group.ID: CGRect] {
+        var result: [CompoundGraph.Group.ID: CGRect] = [:]
+        result.reserveCapacity(groups.count)
+        for group in groups {
+            precondition(
+                !group.members.isEmpty,
+                "Group \(group.id) is empty — decompose should have dropped it"
+            )
+            var bbox: CGRect = .null
+            for memberID in group.members {
+                guard let index = indexByID[memberID] else {
+                    preconditionFailure(
+                        "Group \(group.id) member \(memberID) missing from cards"
+                    )
+                }
+                guard let origin = cardPositions[memberID] else {
+                    preconditionFailure(
+                        "Group \(group.id) member \(memberID) missing from cardPositions"
+                    )
+                }
+                let rect = CGRect(origin: origin, size: cards[index].size)
+                bbox = bbox.isNull ? rect : bbox.union(rect)
+            }
+            let pad = group.style.padding
+            result[group.id] = bbox.insetBy(dx: -pad, dy: -pad)
+        }
+        return result
     }
 
     // MARK: - Seeding
@@ -253,6 +320,7 @@ struct KnowledgeGraphLayout: Sendable {
         radii: [Double],
         edges: [CompoundGraph.CardEdge],
         indexByID: [CompoundGraph.Card.ID: Int],
+        groups: [CompoundGraph.Group],
         iterations: Int
     ) {
         let n = positions.count
@@ -284,6 +352,29 @@ struct KnowledgeGraphLayout: Sendable {
             if !seenPairs.insert(key).inserted { continue }
             let ideal = radii[i] + radii[j] + defaultEdgeGap
             springs.append(Spring(i: i, j: j, ideal: ideal))
+        }
+
+        // Pre-compute the per-group member index list. Singletons contribute
+        // no cohesion force (the centroid would be the member itself, which
+        // is a no-op pull and also avoids any divide-by-zero risk). Groups
+        // whose `cohesionStrength` is zero are also skipped, which is the
+        // configured opt-out path callers use to disable the force per-group.
+        struct GroupForce { let indices: [Int]; let strength: Double }
+        var groupForces: [GroupForce] = []
+        groupForces.reserveCapacity(groups.count)
+        for group in groups where group.cohesionStrength > 0 {
+            var indices: [Int] = []
+            indices.reserveCapacity(group.members.count)
+            for member in group.members {
+                if let index = indexByID[member] {
+                    indices.append(index)
+                }
+            }
+            guard indices.count > 1 else { continue }
+            groupForces.append(GroupForce(
+                indices: indices,
+                strength: group.cohesionStrength
+            ))
         }
 
         var working = positions
@@ -335,6 +426,33 @@ struct KnowledgeGraphLayout: Sendable {
                 dispY[i] -= uy * force
                 dispX[j] += ux * force
                 dispY[j] += uy * force
+            }
+
+            // Group cohesion: linear Hookean pull toward the group centroid.
+            //   `F = strength · (centroid − position)`.
+            // With `strength = 0.05` a card 200 pt off centroid feels a 10 pt
+            // pull while the FR spring at the same distance is ≈ 200 pt — so
+            // cohesion is a few-percent bias, not a dominant force, which is
+            // what we want for a *grouping hint*. Multi-member groups only —
+            // singletons would have `centroid == position` and contribute
+            // nothing.
+            for group in groupForces {
+                var cx = 0.0
+                var cy = 0.0
+                for idx in group.indices {
+                    cx += Double(working[idx].x)
+                    cy += Double(working[idx].y)
+                }
+                let invCount = 1.0 / Double(group.indices.count)
+                cx *= invCount
+                cy *= invCount
+                let weight = group.strength
+                for idx in group.indices {
+                    let dx = cx - Double(working[idx].x)
+                    let dy = cy - Double(working[idx].y)
+                    dispX[idx] += dx * weight
+                    dispY[idx] += dy * weight
+                }
             }
 
             // Cool the temperature so movement shrinks as we approach the

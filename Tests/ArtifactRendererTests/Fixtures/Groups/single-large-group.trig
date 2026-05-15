@@ -1,0 +1,12 @@
+@prefix ex: <http://example.org/> .
+
+ex:team {
+    ex:alice ex:knows ex:bob .
+    ex:bob ex:knows ex:carol .
+    ex:carol ex:knows ex:dave .
+    ex:dave ex:knows ex:eve .
+    ex:eve ex:knows ex:frank .
+    ex:frank ex:knows ex:grace .
+    ex:grace ex:knows ex:henry .
+    ex:alice ex:knows ex:henry .
+}

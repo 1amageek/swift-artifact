@@ -75,6 +75,9 @@ let package = Package(
                 "ArtifactView",
                 "ArtifactNativeRenderer",
                 "ArtifactWebRenderer",
+            ],
+            resources: [
+                .copy("Fixtures")
             ]
         ),
     ],

@@ -1,0 +1,20 @@
+@prefix ex:   <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+ex:engineering {
+    ex:alice  a foaf:Person, ex:Engineer .
+    ex:bob    a foaf:Person, ex:Engineer .
+    ex:alice  foaf:knows ex:bob .
+}
+
+ex:sales {
+    ex:carol  a foaf:Person, ex:Salesperson .
+    ex:dave   a foaf:Person, ex:Salesperson .
+    ex:carol  foaf:knows ex:dave .
+}
+
+ex:management {
+    ex:eve    a foaf:Person, ex:Manager .
+    ex:eve    foaf:knows ex:alice .
+    ex:eve    foaf:knows ex:carol .
+}

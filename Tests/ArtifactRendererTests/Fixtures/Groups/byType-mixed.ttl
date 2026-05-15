@@ -1,0 +1,22 @@
+@prefix ex:   <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+ex:alice   a foaf:Person .
+ex:bob     a foaf:Person .
+ex:carol   a foaf:Person .
+
+ex:acme    a ex:Company .
+ex:globex  a ex:Company .
+
+ex:laptop  a ex:Device .
+ex:phone   a ex:Device .
+ex:tablet  a ex:Device .
+
+ex:alice  foaf:knows ex:bob .
+ex:bob    foaf:knows ex:carol .
+ex:alice  ex:worksAt ex:acme .
+ex:bob    ex:worksAt ex:globex .
+ex:carol  ex:owns    ex:laptop .
+ex:bob    ex:owns    ex:phone .
+ex:alice  ex:owns    ex:tablet .
