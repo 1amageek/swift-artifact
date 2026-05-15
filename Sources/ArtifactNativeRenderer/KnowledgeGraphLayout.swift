@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import KnowledgeGraph
 
-/// Constraint-aware layout for a `KnowledgeGraph`.
+/// Force-directed layout for a `KnowledgeGraph`.
 ///
 /// The pipeline is:
 ///
@@ -11,25 +11,29 @@ import KnowledgeGraph
 ///    rather than raw nodes, which eliminates the foaf:name "Alice" pattern
 ///    as an independent vertex.
 ///
-/// 2. **All-pairs shortest path** (Floyd-Warshall) over the card adjacency.
-///    `n < 200` so the O(n³) cost is in the milliseconds. Disconnected pairs
-///    receive a finite fallback distance so the components stay on the same
-///    canvas without unbounded repulsion.
+/// 2. **Golden-angle seeding** — newcomer cards are placed on a Vogel spiral
+///    (`angle = i · 137.5°`, `radius ∝ √i`) around the warm-restart centroid.
+///    Spiral seeding gives every card a roughly equal share of canvas area
+///    at the start, which avoids the "all on one ring" collapse that
+///    same-radius seeding produced when many cards shared an initial angle.
 ///
-/// 3. **Stress majorization** (Gansner–Koren–North, "Graph drawing by stress
-///    majorization", 2004). For each iteration and each card `i` we move
-///    `p_i` toward the weighted mean of the contributions
-///        `p_j + δ_ij · (p_i − p_j) / ‖p_i − p_j‖`
-///    with weight `w_ij = 1 / d_ij²`. The objective is the global stress
-///    `Σ w_ij (‖p_i − p_j‖ − δ_ij)²` where `δ_ij` is the desired Euclidean
-///    distance. We make `δ_ij` *size-aware* —
-///        `δ_ij = radius(i) + radius(j) + gap · graphDistance(i, j)`
-///    so larger cards get proportionally more room and adjacent cards
-///    always end up with a fixed empty space between their boundaries.
+/// 3. **Fruchterman–Reingold** force-directed relaxation. Each iteration
+///    accumulates two forces per card:
+///      - **Coulomb repulsion** between every pair, magnitude `k² / d`
+///        where `k = avgRadius·2 + gap`. A `5k` cutoff bounds the influence
+///        of disconnected components so they do not drift to infinity.
+///      - **Spring attraction** along each direct graph edge, magnitude
+///        `d² / ideal_ij` where `ideal_ij = radius(i) + radius(j) + gap`.
+///        Attraction is therefore *size-aware*: hubs with large children
+///        anchor their orbit at a distance that matches the actual radii.
+///    Per-iteration movement is capped by a temperature that cools as
+///    `t₀ · (1 - i/N)^1.3`, so the layout settles smoothly without
+///    oscillating across the final iterations.
 ///
-/// 4. **Separation constraints**. After stress converges we run a fixed
-///    number of overlap-removal passes: any pair whose padded rectangles
-///    overlap is projected apart along the axis of smaller penetration.
+/// 4. **Separation constraints**. After FR converges we run overlap-removal
+///    passes: any pair whose padded rectangles overlap is projected apart
+///    along the axis of smaller penetration. This corrects the residual
+///    near-overlaps that a continuous force model alone cannot eliminate.
 ///
 /// 5. **Edge routing**. Each edge anchors on the boundary of its source and
 ///    target rectangles, biased perpendicularly for parallel edges. Bezier
@@ -71,22 +75,23 @@ struct KnowledgeGraphLayout: Sendable {
         let isCurved: Bool
     }
 
-    static let defaultIterations = 80
-    /// Desired empty space between adjacent card boundaries, scaled by graph
-    /// distance. The actual centre-to-centre target adds the two cards'
-    /// bounding radii on top of this, so cards never overlap regardless of
-    /// their individual sizes.
+    static let defaultIterations = 200
+    /// Desired empty space between adjacent card boundaries. The actual
+    /// centre-to-centre target for a graph edge adds the two cards' bounding
+    /// radii on top of this, so cards never overlap regardless of their
+    /// individual sizes.
     static let defaultEdgeGap: Double = 140
 
     /// Compute the layout for `graph`.
     ///
     /// - Parameters:
     ///   - graph: The graph to lay out.
-    ///   - iterations: Number of stress-majorization iterations. 80 is
+    ///   - iterations: Number of Fruchterman–Reingold iterations. 200 is
     ///     sufficient for `n < 200`.
     ///   - initial: Warm-restart positions keyed by `NodeIdentifier`. Cards
     ///     whose underlying node has a warm-start position use it; newcomers
-    ///     are seeded around the centroid of warm positions.
+    ///     are seeded on a golden-angle spiral around the centroid of warm
+    ///     positions.
     static func compute(
         graph: KnowledgeGraph,
         iterations: Int = defaultIterations,
@@ -106,17 +111,9 @@ struct KnowledgeGraphLayout: Sendable {
         let indexByID = Dictionary(uniqueKeysWithValues:
             compound.cards.enumerated().map { ($0.element.id, $0.offset) }
         )
-        let n = compound.cards.count
 
-        // Step 2: all-pairs shortest path on the undirected adjacency.
-        let distances = allPairsShortestPaths(
-            cardCount: n,
-            edges: compound.edges,
-            indexByID: indexByID
-        )
-
-        // Estimate canvas size from the diameter so the layout has room to
-        // breathe before stress majorization runs.
+        // Estimate canvas size from total card area so the spiral seed has
+        // room to breathe before the relaxation runs.
         let totalAttrArea = compound.cards.reduce(0.0) { acc, card in
             acc + Double(card.size.width * card.size.height)
         }
@@ -128,23 +125,15 @@ struct KnowledgeGraphLayout: Sendable {
             canvasSeed: canvasSeed
         )
 
-        // Size-aware ideal distance matrix. The target centre-to-centre
-        // distance for cards `i` and `j` is the sum of their bounding radii
-        // plus `defaultEdgeGap × graphDistance(i, j)`. This guarantees a
-        // visible gap between card boundaries regardless of card size.
         let sizes = compound.cards.map { $0.size }
         let radii = sizes.map { Double(hypot($0.width, $0.height)) / 2.0 }
-        let idealDistances = buildIdealDistances(
-            graphDistances: distances,
-            radii: radii,
-            edgeGap: defaultEdgeGap
-        )
 
-        // Step 3: stress majorization with size-aware targets.
-        stressMajorize(
+        // Step 3: Fruchterman–Reingold relaxation with size-aware springs.
+        fruchtermanReingold(
             positions: &positions,
-            distances: distances,
-            idealDistances: idealDistances,
+            radii: radii,
+            edges: compound.edges,
+            indexByID: indexByID,
             iterations: iterations
         )
 
@@ -153,7 +142,7 @@ struct KnowledgeGraphLayout: Sendable {
             positions: &positions,
             sizes: sizes,
             margin: 48,
-            iterations: 40
+            iterations: 60
         )
 
         // Translate to a non-negative coordinate space and finalise canvas.
@@ -191,56 +180,13 @@ struct KnowledgeGraphLayout: Sendable {
         )
     }
 
-    // MARK: - Shortest paths
-
-    private static func allPairsShortestPaths(
-        cardCount n: Int,
-        edges: [CompoundGraph.CardEdge],
-        indexByID: [CompoundGraph.Card.ID: Int]
-    ) -> [[Double]] {
-        var dist = Array(
-            repeating: Array(repeating: Double.infinity, count: n),
-            count: n
-        )
-        for i in 0..<n { dist[i][i] = 0 }
-        for edge in edges {
-            guard let i = indexByID[edge.source], let j = indexByID[edge.target] else { continue }
-            dist[i][j] = min(dist[i][j], 1)
-            dist[j][i] = min(dist[j][i], 1)
-        }
-        // Floyd-Warshall.
-        for k in 0..<n {
-            for i in 0..<n where dist[i][k].isFinite {
-                let dik = dist[i][k]
-                for j in 0..<n where dist[k][j].isFinite {
-                    let candidate = dik + dist[k][j]
-                    if candidate < dist[i][j] {
-                        dist[i][j] = candidate
-                    }
-                }
-            }
-        }
-        // Disconnected components: replace ∞ with a finite fallback so the
-        // stress optimiser produces a stable layout. The fallback equals the
-        // current diameter + 2, which pushes components apart without
-        // exploding.
-        var diameter: Double = 1
-        for i in 0..<n {
-            for j in 0..<n where dist[i][j].isFinite {
-                if dist[i][j] > diameter { diameter = dist[i][j] }
-            }
-        }
-        let fallback = diameter + 2
-        for i in 0..<n {
-            for j in 0..<n where !dist[i][j].isFinite {
-                dist[i][j] = fallback
-            }
-        }
-        return dist
-    }
-
     // MARK: - Seeding
 
+    /// Seed newcomer cards on a golden-angle (Vogel) spiral around the
+    /// centroid of warm-start positions. Same-radius seeding causes hubs to
+    /// collapse onto a single ring during relaxation; the spiral spreads
+    /// initial positions across an annulus instead, giving every card room
+    /// to settle independently.
     private static func seedPositions(
         cards: [CompoundGraph.Card],
         initial: [NodeIdentifier: CGPoint],
@@ -254,9 +200,13 @@ struct KnowledgeGraphLayout: Sendable {
                 x: warmPoints.reduce(0) { $0 + $1.x } / CGFloat(warmPoints.count),
                 y: warmPoints.reduce(0) { $0 + $1.y } / CGFloat(warmPoints.count)
             )
-        let ringRadius = canvasSeed / 4
+
+        // The Vogel-spiral step controls how fast successive points spread
+        // outward. `canvasSeed / 22` keeps the seed annulus comparable to the
+        // pre-relaxation working area for typical card counts.
+        let spiralStep = max(canvasSeed / 22.0, 18.0)
+        let goldenAngle = .pi * (3.0 - sqrt(5.0))
         var newcomerCounter = 0
-        let newcomerTotal = cards.filter { initial[$0.id.nodeID] == nil }.count
 
         var seeded: [CGPoint] = []
         seeded.reserveCapacity(cards.count)
@@ -264,10 +214,12 @@ struct KnowledgeGraphLayout: Sendable {
             if let warm = initial[card.id.nodeID] {
                 seeded.append(warm)
             } else {
-                let angle = 2 * .pi * Double(newcomerCounter) / Double(max(newcomerTotal, 1))
+                let index = Double(newcomerCounter)
+                let angle = index * goldenAngle
+                let radius = spiralStep * sqrt(index + 1.0)
                 let point = CGPoint(
-                    x: centroid.x + CGFloat(ringRadius * cos(angle)),
-                    y: centroid.y + CGFloat(ringRadius * sin(angle))
+                    x: centroid.x + CGFloat(radius * cos(angle)),
+                    y: centroid.y + CGFloat(radius * sin(angle))
                 )
                 seeded.append(point)
                 newcomerCounter += 1
@@ -276,67 +228,132 @@ struct KnowledgeGraphLayout: Sendable {
         return seeded
     }
 
-    // MARK: - Ideal distance matrix
+    // MARK: - Fruchterman–Reingold
 
-    /// Build a centre-to-centre target distance matrix that accounts for card
-    /// size. `radii[i]` is the bounding-circle radius of card `i`. Adjacent
-    /// cards (`graphDistance == 1`) target `radii[i] + radii[j] + edgeGap`,
-    /// which keeps the empty space between borders constant regardless of
-    /// individual card sizes.
-    private static func buildIdealDistances(
-        graphDistances: [[Double]],
-        radii: [Double],
-        edgeGap: Double
-    ) -> [[Double]] {
-        let n = radii.count
-        var matrix = Array(repeating: Array(repeating: 0.0, count: n), count: n)
-        for i in 0..<n {
-            for j in 0..<n where i != j {
-                let dij = graphDistances[i][j]
-                matrix[i][j] = radii[i] + radii[j] + edgeGap * dij
-            }
-        }
-        return matrix
-    }
-
-    // MARK: - Stress majorization
-
-    private static func stressMajorize(
+    /// Fruchterman–Reingold relaxation. Each iteration applies pairwise
+    /// Coulomb-style repulsion plus per-edge spring attraction, then caps
+    /// the net displacement by a cooling temperature.
+    ///
+    /// - The repulsion constant `k = avgRadius·2 + edgeGap` matches the
+    ///   expected ideal distance between two average cards connected by an
+    ///   edge. Squaring it (`k²`) gives the repulsion magnitude at unit
+    ///   distance.
+    /// - Repulsion is gated by `repelCutoff = 5k`; pairs farther apart
+    ///   contribute zero force. This prevents disconnected components from
+    ///   drifting to infinity while still letting connected hubs spread
+    ///   freely within the cutoff radius.
+    /// - Spring attraction uses per-edge ideal distance
+    ///   `radii[i] + radii[j] + edgeGap`, so hubs whose children are large
+    ///   anchor at a distance proportional to those children's radii.
+    /// - Temperature decays polynomially as `t₀ · (1 - i/N)^1.3` so the
+    ///   layout converges smoothly rather than oscillating in the final
+    ///   passes.
+    private static func fruchtermanReingold(
         positions: inout [CGPoint],
-        distances: [[Double]],
-        idealDistances: [[Double]],
+        radii: [Double],
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int],
         iterations: Int
     ) {
         let n = positions.count
-        guard n > 1 else { return }
+        guard n > 1, iterations > 0 else { return }
+
+        let avgRadius = radii.reduce(0, +) / Double(n)
+        let k0 = avgRadius * 2.0 + defaultEdgeGap
+        let k0Sq = k0 * k0
+        let repelCutoff = k0 * 5.0
+        let initialTemp = k0 * 1.6
+        let coolingExponent: Double = 1.3
+
+        // Pre-compute the unique neighbour list with per-edge ideal distance
+        // so self-loops and parallel edges contribute a single spring each.
+        struct Spring { let i: Int; let j: Int; let ideal: Double }
+        var seenPairs: Set<UInt64> = []
+        seenPairs.reserveCapacity(edges.count)
+        var springs: [Spring] = []
+        springs.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            let lo = UInt64(min(i, j))
+            let hi = UInt64(max(i, j))
+            let key = (lo << 32) | hi
+            if !seenPairs.insert(key).inserted { continue }
+            let ideal = radii[i] + radii[j] + defaultEdgeGap
+            springs.append(Spring(i: i, j: j, ideal: ideal))
+        }
 
         var working = positions
-        for _ in 0..<iterations {
-            var next = working
-            for i in 0..<n {
-                let pi = working[i]
-                var sumX: Double = 0
-                var sumY: Double = 0
-                var sumW: Double = 0
-                for j in 0..<n where j != i {
-                    let dij = distances[i][j]
-                    guard dij > 0 else { continue }
-                    let delta = idealDistances[i][j]
-                    let weight = 1.0 / (dij * dij)
-                    let pj = working[j]
-                    let dx = Double(pi.x - pj.x)
-                    let dy = Double(pi.y - pj.y)
-                    let dist = max(sqrt(dx * dx + dy * dy), 0.001)
-                    sumX += weight * (Double(pj.x) + delta * dx / dist)
-                    sumY += weight * (Double(pj.y) + delta * dy / dist)
-                    sumW += weight
-                }
-                if sumW > 0 {
-                    next[i] = CGPoint(x: CGFloat(sumX / sumW), y: CGFloat(sumY / sumW))
+        var dispX = Array(repeating: 0.0, count: n)
+        var dispY = Array(repeating: 0.0, count: n)
+
+        for step in 0..<iterations {
+            for k in 0..<n {
+                dispX[k] = 0
+                dispY[k] = 0
+            }
+
+            // Pairwise repulsion. Cutoff at `5k` keeps disconnected components
+            // bounded; without it the FR model has no equilibrium for them.
+            for i in 0..<(n - 1) {
+                let pix = Double(working[i].x)
+                let piy = Double(working[i].y)
+                for j in (i + 1)..<n {
+                    let dx = pix - Double(working[j].x)
+                    let dy = piy - Double(working[j].y)
+                    let distSq = dx * dx + dy * dy
+                    let dist = max(sqrt(distSq), 0.01)
+                    if dist > repelCutoff { continue }
+                    let force = k0Sq / dist
+                    let ux = dx / dist
+                    let uy = dy / dist
+                    dispX[i] += ux * force
+                    dispY[i] += uy * force
+                    dispX[j] -= ux * force
+                    dispY[j] -= uy * force
                 }
             }
-            working = next
+
+            // Spring attraction along direct edges. `force = d² / ideal` is
+            // the standard FR attractive law. With per-edge `ideal` the
+            // equilibrium between attraction and the `k²/d` repulsion lands
+            // at roughly `(k² · ideal)^(1/3)`, which is ≈ `ideal` when the
+            // two cards are average-sized and scales up for larger cards.
+            for spring in springs {
+                let i = spring.i
+                let j = spring.j
+                let dx = Double(working[i].x) - Double(working[j].x)
+                let dy = Double(working[i].y) - Double(working[j].y)
+                let dist = max(sqrt(dx * dx + dy * dy), 0.01)
+                let ux = dx / dist
+                let uy = dy / dist
+                let force = (dist * dist) / spring.ideal
+                dispX[i] -= ux * force
+                dispY[i] -= uy * force
+                dispX[j] += ux * force
+                dispY[j] += uy * force
+            }
+
+            // Cool the temperature so movement shrinks as we approach the
+            // final iteration. Polynomial decay outperforms linear here
+            // because it preserves more freedom in the early passes when the
+            // spiral seed is still far from equilibrium.
+            let progress = Double(step) / Double(iterations)
+            let temperature = initialTemp * pow(max(1.0 - progress, 0.0), coolingExponent)
+
+            for i in 0..<n {
+                let magnitude = sqrt(dispX[i] * dispX[i] + dispY[i] * dispY[i])
+                if magnitude < 0.0001 { continue }
+                let limited = min(magnitude, temperature)
+                let scale = limited / magnitude
+                working[i].x += CGFloat(dispX[i] * scale)
+                working[i].y += CGFloat(dispY[i] * scale)
+            }
         }
+
         positions = working
     }
 
