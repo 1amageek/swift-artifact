@@ -311,6 +311,14 @@ struct KnowledgeGraphView: View {
         visibleRect: CGRect,
         context: inout GraphicsContext
     ) {
+        struct VisibleGroup {
+            let info: GroupRenderInfo
+            let rect: CGRect
+        }
+
+        var visibleGroups: [VisibleGroup] = []
+        visibleGroups.reserveCapacity(renderInfos.count)
+
         for info in renderInfos {
             // computeGroupBoundingBoxes emits a rect for every group in
             // compoundGraph.groups; a missing entry is a pipeline desync.
@@ -353,28 +361,112 @@ struct KnowledgeGraphView: View {
                 )
             }
 
-            drawGroupLabel(info: info, bbox: screenRect, context: &context)
+            visibleGroups.append(VisibleGroup(info: info, rect: screenRect))
+        }
+
+        var occupiedLabelRects: [CGRect] = []
+        occupiedLabelRects.reserveCapacity(visibleGroups.count)
+        let groupRects = visibleGroups.map(\.rect)
+        for item in visibleGroups {
+            if let labelRect = drawGroupLabel(
+                info: item.info,
+                bbox: item.rect,
+                occupiedLabelRects: occupiedLabelRects,
+                groupRects: groupRects,
+                visibleRect: visibleRect,
+                context: &context
+            ) {
+                occupiedLabelRects.append(labelRect.insetBy(dx: -4, dy: -3))
+            }
         }
     }
 
-    /// Place the group label just *outside* the bbox's top-left corner so it
-    /// never sits on top of any card (F8). The text is drawn directly — no
-    /// pill background — to keep the visual weight low.
+    /// Place the group label outside the bbox while avoiding other group
+    /// labels and group rectangles. The text is drawn directly — no pill
+    /// background — to keep the visual weight low.
+    @discardableResult
     private func drawGroupLabel(
         info: GroupRenderInfo,
         bbox: CGRect,
+        occupiedLabelRects: [CGRect],
+        groupRects: [CGRect],
+        visibleRect: CGRect,
         context: inout GraphicsContext
-    ) {
+    ) -> CGRect? {
         let resolved = context.resolve(info.labelText)
         let textSize = resolved.measure(in: CGSize(width: max(bbox.width, 80), height: 40))
-        let origin = CGPoint(
-            x: bbox.minX,
-            y: bbox.minY - textSize.height - 4
+        let labelRect = groupLabelRect(
+            bbox: bbox,
+            textSize: textSize,
+            occupiedLabelRects: occupiedLabelRects,
+            groupRects: groupRects,
+            visibleRect: visibleRect
         )
         context.draw(
             resolved,
-            at: CGPoint(x: origin.x + textSize.width / 2, y: origin.y + textSize.height / 2)
+            at: CGPoint(x: labelRect.midX, y: labelRect.midY)
         )
+        return labelRect
+    }
+
+    private func groupLabelRect(
+        bbox: CGRect,
+        textSize: CGSize,
+        occupiedLabelRects: [CGRect],
+        groupRects: [CGRect],
+        visibleRect: CGRect
+    ) -> CGRect {
+        let gap: CGFloat = 5
+        let labelSize = CGSize(
+            width: ceil(textSize.width),
+            height: ceil(textSize.height)
+        )
+        let candidates = [
+            CGPoint(x: bbox.minX, y: bbox.minY - labelSize.height - gap),
+            CGPoint(x: bbox.maxX - labelSize.width, y: bbox.minY - labelSize.height - gap),
+            CGPoint(x: bbox.minX, y: bbox.maxY + gap),
+            CGPoint(x: bbox.maxX - labelSize.width, y: bbox.maxY + gap),
+            CGPoint(x: bbox.minX - labelSize.width - gap, y: bbox.minY),
+            CGPoint(x: bbox.maxX + gap, y: bbox.minY)
+        ].map { origin in
+            CGRect(origin: origin, size: labelSize)
+        }
+
+        for candidate in candidates where !labelCollides(
+            candidate,
+            occupiedLabelRects: occupiedLabelRects,
+            groupRects: groupRects
+        ) {
+            return candidate
+        }
+
+        var fallback = candidates.first ?? CGRect(origin: bbox.origin, size: labelSize)
+        let step = labelSize.height + 4
+        for _ in 0..<12 {
+            fallback.origin.y += step
+            if visibleRect.intersects(fallback), !labelCollides(
+                fallback,
+                occupiedLabelRects: occupiedLabelRects,
+                groupRects: groupRects
+            ) {
+                return fallback
+            }
+        }
+        return candidates.first ?? fallback
+    }
+
+    private func labelCollides(
+        _ rect: CGRect,
+        occupiedLabelRects: [CGRect],
+        groupRects: [CGRect]
+    ) -> Bool {
+        for occupied in occupiedLabelRects where rect.intersects(occupied) {
+            return true
+        }
+        for groupRect in groupRects where rect.intersects(groupRect) {
+            return true
+        }
+        return false
     }
 
     /// Per-group SwiftUI values that depend only on the layout snapshot

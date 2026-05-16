@@ -7,6 +7,8 @@ import ArtifactView
 /// a WKWebView.
 public struct VegaLiteWebViewRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .vegaLite
+    /// The Vega-Lite web shell owns its chart padding.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -56,6 +58,5 @@ public struct VegaLiteWebViewRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: VegaLiteWebViewRenderer()
     )
-    .padding()
     .frame(width: 520, height: 460)
 }

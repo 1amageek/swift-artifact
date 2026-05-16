@@ -73,7 +73,6 @@ public struct JSONLDRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: JSONLDRenderer()
     )
-    .padding()
     .frame(width: 520, height: 420)
 }
 
@@ -93,7 +92,6 @@ public struct JSONLDRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(JSONLDRenderer())
-    .padding()
     .frame(width: 420, height: 360)
 }
 
@@ -123,7 +121,6 @@ public struct JSONLDRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(JSONLDRenderer())
-    .padding()
     .frame(width: 520, height: 460)
 }
 

@@ -7,6 +7,8 @@ import ArtifactView
 /// then the raw bytes are shown so streaming output is still inspectable.
 public struct JSONRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .json
+    /// JSON source owns its scroll-content margin internally.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -33,6 +35,7 @@ public struct JSONRenderer: ArtifactRenderable, Sendable {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .artifactContentHeightLimit()
+        .contentMargins(12)
     }
 
     private func prettyPrint(_ source: String) -> String {
@@ -64,7 +67,6 @@ public struct JSONRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: JSONRenderer()
     )
-    .padding()
     .frame(width: 460)
 }
 
@@ -78,7 +80,6 @@ public struct JSONRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(JSONRenderer())
-    .padding()
     .frame(width: 460)
 }
 
@@ -111,6 +112,5 @@ public struct JSONRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(JSONRenderer())
-    .padding()
     .frame(width: 480, height: 500)
 }

@@ -19,13 +19,15 @@ import KnowledgeGraph
 ///
 /// 3. **Fruchterman–Reingold** force-directed relaxation. Each iteration
 ///    accumulates two forces per card:
-///      - **Coulomb repulsion** between every pair, magnitude `k² / d`
-///        where `k = avgRadius·2 + gap`. A `5k` cutoff bounds the influence
-///        of disconnected components so they do not drift to infinity.
+///      - **Coulomb repulsion** between every pair, magnitude `k² / d`.
+///        `k` is local: high-degree cards receive a larger personal radius,
+///        so dense hubs reserve more whitespace before labels and neighbours
+///        collide.
 ///      - **Spring attraction** along each direct graph edge, magnitude
-///        `d² / ideal_ij` where `ideal_ij = radius(i) + radius(j) + gap`.
-///        Attraction is therefore *size-aware*: hubs with large children
-///        anchor their orbit at a distance that matches the actual radii.
+///        `d² / ideal_ij` where `ideal_ij` includes card radii, group
+///        crossing cost, endpoint degree, and label span. Attraction is
+///        therefore size- and topology-aware: hubs anchor their neighbours
+///        farther out than low-degree pairs.
 ///    Per-iteration movement is capped by a temperature that cools as
 ///    `t₀ · (1 - i/N)^1.3`, so the layout settles smoothly without
 ///    oscillating across the final iterations.
@@ -96,6 +98,12 @@ struct KnowledgeGraphLayout: Sendable {
     static func adaptiveEdgeGap(cardCount n: Int) -> Double {
         let factor = max(0.45, min(1.0, sqrt(Double(n) / 14.0)))
         return defaultEdgeGap * factor
+    }
+
+    private static func estimatedEdgeLabelSpan(_ edge: CompoundGraph.CardEdge) -> Double {
+        let textSpan = min(Double(edge.predicate.count) * 7.0 + 22.0, 260.0)
+        let parallelSpan = Double(max(edge.parallelCount - 1, 0)) * 14.0
+        return textSpan + parallelSpan
     }
 
     /// Compute the layout for `graph`.
@@ -229,11 +237,11 @@ struct KnowledgeGraphLayout: Sendable {
         )
 
         // Step 4.5: edge-angle relaxation. At this point edge lengths,
-        // group spacing, and card separation are already acceptable. This
-        // pass therefore works in the angular dimension only: every edge is
-        // rotated toward its nearest cardinal direction while preserving its
-        // current midpoint and centre-to-centre length for that edge's local
-        // proposal. A short cleanup pass re-applies containment / overlap
+        // group spacing, and card separation are already acceptable. These
+        // passes therefore work in the angular dimension: first rotate edges
+        // toward cardinal axes, then allocate stable radial slots around
+        // high-degree hubs so dense neighbourhoods do not collapse into one
+        // arc. A short cleanup pass re-applies containment / overlap
         // constraints after the angular nudges.
         relaxEdgeAngles(
             positions: &positions,
@@ -241,6 +249,13 @@ struct KnowledgeGraphLayout: Sendable {
             indexByID: indexByID,
             iterations: 28,
             strength: 0.22
+        )
+        spreadHubIncidentEdges(
+            positions: &positions,
+            edges: compound.edges,
+            indexByID: indexByID,
+            iterations: 28,
+            strength: 0.48
         )
         orientBridgeEdgesByGroupOrder(
             positions: &positions,
@@ -275,6 +290,79 @@ struct KnowledgeGraphLayout: Sendable {
             positions: &positions,
             constraints: edgeLengthConstraints,
             iterations: 10
+        )
+        // Cleanup can partially compress hub neighbourhoods while resolving
+        // collisions. Re-apply slotting once, then project lengths back to
+        // the captured FR distances.
+        spreadHubIncidentEdges(
+            positions: &positions,
+            edges: compound.edges,
+            indexByID: indexByID,
+            iterations: 20,
+            strength: 0.45
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            margin: 48,
+            iterations: 12
+        )
+        projectEdgeLengths(
+            positions: &positions,
+            constraints: edgeLengthConstraints,
+            iterations: 8
+        )
+        // Final hard separation. Edge-length projection can reintroduce small
+        // card collisions and overlapping disjoint group bboxes; from this
+        // point on, non-overlap wins over preserving spring lengths exactly.
+        resolveOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            margin: 56,
+            iterations: 80
+        )
+        resolveGroupOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            groups: compound.groups,
+            indexByID: indexByID,
+            margin: 36,
+            iterations: 40
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            margin: 56,
+            iterations: 80
+        )
+        compactSparseGroups(
+            positions: &positions,
+            radii: radii,
+            edges: compound.edges,
+            groups: compound.groups,
+            indexByID: indexByID,
+            cardCount: compound.cards.count,
+            iterations: 40
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            margin: 56,
+            iterations: 80
+        )
+        resolveGroupOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            groups: compound.groups,
+            indexByID: indexByID,
+            margin: 36,
+            iterations: 32
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            margin: 56,
+            iterations: 80
         )
 
         // Translate to a non-negative coordinate space and finalise canvas.
@@ -620,17 +708,17 @@ struct KnowledgeGraphLayout: Sendable {
     /// Coulomb-style repulsion plus per-edge spring attraction, then caps
     /// the net displacement by a cooling temperature.
     ///
-    /// - The repulsion constant `k = avgRadius·2 + edgeGap` matches the
-    ///   expected ideal distance between two average cards connected by an
-    ///   edge. Squaring it (`k²`) gives the repulsion magnitude at unit
-    ///   distance.
-    /// - Repulsion is gated by `repelCutoff = 5k`; pairs farther apart
-    ///   contribute zero force. This prevents disconnected components from
-    ///   drifting to infinity while still letting connected hubs spread
-    ///   freely within the cutoff radius.
+    /// - The baseline repulsion constant `k = avgRadius·2 + edgeGap` matches
+    ///   the expected ideal distance between two average cards connected by an
+    ///   edge. Each pair then derives a local `k` from endpoint degree and
+    ///   label load so hubs reserve more whitespace than leaf pairs.
+    /// - Repulsion is gated by a local cutoff. Pairs farther apart contribute
+    ///   zero force, preventing disconnected components from drifting to
+    ///   infinity while still letting connected hubs spread freely within
+    ///   their larger influence radius.
     /// - Spring attraction uses per-edge ideal distance
-    ///   `radii[i] + radii[j] + edgeGap`, so hubs whose children are large
-    ///   anchor at a distance proportional to those children's radii.
+    ///   `radii[i] + radii[j] + groupGap + topologyGap`, so hubs with many
+    ///   incident neighbours anchor farther out than leaf-to-leaf pairs.
     /// - Temperature decays polynomially as `t₀ · (1 - i/N)^1.3` so the
     ///   layout converges smoothly rather than oscillating in the final
     ///   passes.
@@ -648,7 +736,6 @@ struct KnowledgeGraphLayout: Sendable {
         let avgRadius = radii.reduce(0, +) / Double(n)
         let effectiveGap = adaptiveEdgeGap(cardCount: n)
         let k0 = avgRadius * 2.0 + effectiveGap
-        let k0Sq = k0 * k0
         // Repulsion cutoff. At distances beyond the cutoff cards no longer
         // push each other apart, so disjoint components settle at roughly
         // this distance once gravity pulls them back into range. 1.8k is
@@ -786,6 +873,38 @@ struct KnowledgeGraphLayout: Sendable {
         for (idx, set) in memberToGroups where set.count >= 2 {
             multiGroupHubs.insert(idx)
         }
+
+        // Direct degree is a layout budget, not just metadata. A high-degree
+        // card needs more radial space for incident labels and more angular
+        // slots for neighbours; otherwise dense schema-like graphs collapse
+        // into a text pile even when card sizes and edge lengths are valid.
+        var directDegree = [Int](repeating: 0, count: n)
+        var labelLoad = [Double](repeating: 0, count: n)
+        var degreePairs: Set<UInt64> = []
+        degreePairs.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            let lo = UInt64(min(i, j))
+            let hi = UInt64(max(i, j))
+            let key = (lo << 32) | hi
+            if degreePairs.insert(key).inserted {
+                directDegree[i] += 1
+                directDegree[j] += 1
+            }
+            let span = estimatedEdgeLabelSpan(edge)
+            labelLoad[i] += span
+            labelLoad[j] += span
+        }
+        let degreeWeights = directDegree.map { min(log2(Double($0) + 1.0), 4.0) }
+        let labelWeights = labelLoad.map { min($0 / 220.0, 2.2) }
+        let personalRadii = radii.enumerated().map { index, radius in
+            radius + effectiveGap * (0.16 * degreeWeights[index] + 0.08 * labelWeights[index])
+        }
+
         struct Spring { let i: Int; let j: Int; let ideal: Double }
         var seenPairs: Set<UInt64> = []
         seenPairs.reserveCapacity(edges.count)
@@ -818,6 +937,11 @@ struct KnowledgeGraphLayout: Sendable {
             if multiGroupHubs.contains(i) || multiGroupHubs.contains(j) {
                 gap *= hubGapMultiplier
             }
+            let endpointDegree = max(degreeWeights[i], degreeWeights[j])
+            let endpointLabel = max(labelWeights[i], labelWeights[j])
+            let topologyGap = min(0.95, 0.18 * endpointDegree + 0.06 * endpointLabel)
+            gap += effectiveGap * topologyGap
+            gap += min(72.0, estimatedEdgeLabelSpan(edge) * 0.18)
             let ideal = radii[i] + radii[j] + gap
             springs.append(Spring(i: i, j: j, ideal: ideal))
         }
@@ -881,7 +1005,9 @@ struct KnowledgeGraphLayout: Sendable {
                     let hi = UInt64(max(i, j))
                     let key = (lo << 32) | hi
                     if seenPairs.contains(key) { continue }
-                    let ideal = radii[i] + radii[j] + effectiveGap * intraGroupGapFactor
+                    let endpointDegree = max(degreeWeights[i], degreeWeights[j])
+                    let ideal = radii[i] + radii[j]
+                        + effectiveGap * (intraGroupGapFactor + min(0.35, 0.08 * endpointDegree))
                     groupSprings.append(GroupSpring(
                         i: i,
                         j: j,
@@ -902,12 +1028,10 @@ struct KnowledgeGraphLayout: Sendable {
                 dispY[k] = 0
             }
 
-            // Pairwise repulsion. Cutoff at `2.5k` keeps disconnected
-            // components from pushing past their settle distance once gravity
-            // becomes the dominant force. The 5k cutoff used originally let
-            // disconnected clusters drift to the canvas corners; combined
-            // with the new gravity term, 2.5k is enough to space adjacent
-            // cards while remaining short-range.
+            // Pairwise repulsion. The local radius grows with endpoint
+            // degree and incident label load, so dense hubs reserve enough
+            // personal space for their neighbours before spring attraction
+            // pulls them into angle slots.
             for i in 0..<(n - 1) {
                 let pix = Double(working[i].x)
                 let piy = Double(working[i].y)
@@ -916,8 +1040,10 @@ struct KnowledgeGraphLayout: Sendable {
                     let dy = piy - Double(working[j].y)
                     let distSq = dx * dx + dy * dy
                     let dist = max(sqrt(distSq), 0.01)
-                    if dist > repelCutoff { continue }
-                    let force = k0Sq / dist
+                    let pairK = personalRadii[i] + personalRadii[j] + effectiveGap
+                    let pairCutoff = max(repelCutoff, pairK * 2.05)
+                    if dist > pairCutoff { continue }
+                    let force = (pairK * pairK) / dist
                     let ux = dx / dist
                     let uy = dy / dist
                     dispX[i] += ux * force
@@ -1774,6 +1900,101 @@ struct KnowledgeGraphLayout: Sendable {
         return delta
     }
 
+    /// Allocate angular slots around high-degree cards while preserving each
+    /// incident edge's current centre-to-centre length. FR decides the
+    /// distance budget; this pass spends that budget by distributing a hub's
+    /// neighbours around a full circle instead of leaving them in one arc.
+    private static func spreadHubIncidentEdges(
+        positions: inout [CGPoint],
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        iterations: Int,
+        strength: Double
+    ) {
+        let n = positions.count
+        guard n > 2, iterations > 0, strength > 0 else { return }
+
+        var neighbours = Array(repeating: [Int](), count: n)
+        var seenPairs: Set<UInt64> = []
+        seenPairs.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            let lo = UInt64(min(i, j))
+            let hi = UInt64(max(i, j))
+            let key = (lo << 32) | hi
+            guard seenPairs.insert(key).inserted else { continue }
+            neighbours[i].append(j)
+            neighbours[j].append(i)
+        }
+
+        let degrees = neighbours.map(\.count)
+        let hubs = (0..<n).filter { degrees[$0] >= 4 }
+        guard !hubs.isEmpty else { return }
+
+        var deltaX = [Double](repeating: 0, count: n)
+        var deltaY = [Double](repeating: 0, count: n)
+        var counts = [Double](repeating: 0, count: n)
+        let fullTurn = Double.pi * 2
+        let epsilon: Double = 0.001
+        let maxStep: Double = 72
+
+        for _ in 0..<iterations {
+            for index in 0..<n {
+                deltaX[index] = 0
+                deltaY[index] = 0
+                counts[index] = 0
+            }
+
+            for hub in hubs {
+                let hubX = Double(positions[hub].x)
+                let hubY = Double(positions[hub].y)
+                let ordered = neighbours[hub].sorted()
+                guard ordered.count >= 4 else { continue }
+
+                let slot = fullTurn / Double(ordered.count)
+                let phase = Double((hub % 11) - 5) * 0.07
+                let startAngle = -Double.pi + phase
+
+                for (slotIndex, neighbour) in ordered.enumerated() {
+                    let vx = Double(positions[neighbour].x) - hubX
+                    let vy = Double(positions[neighbour].y) - hubY
+                    let length = max(sqrt(vx * vx + vy * vy), epsilon)
+                    let targetAngle = startAngle + slot * Double(slotIndex)
+                    let desiredX = hubX + cos(targetAngle) * length
+                    let desiredY = hubY + sin(targetAngle) * length
+                    let neighbourWeight = degrees[neighbour] >= 4 ? 0.35 : 1.0
+                    deltaX[neighbour] += (desiredX - Double(positions[neighbour].x))
+                        * neighbourWeight
+                    deltaY[neighbour] += (desiredY - Double(positions[neighbour].y))
+                        * neighbourWeight
+                    counts[neighbour] += neighbourWeight
+                }
+            }
+
+            var moved = false
+            for index in 0..<n where counts[index] > 0 {
+                var dx = deltaX[index] / counts[index] * strength
+                var dy = deltaY[index] / counts[index] * strength
+                let magnitude = sqrt(dx * dx + dy * dy)
+                if magnitude > maxStep {
+                    let scale = maxStep / magnitude
+                    dx *= scale
+                    dy *= scale
+                }
+                if abs(dx) > epsilon || abs(dy) > epsilon {
+                    positions[index].x += CGFloat(dx)
+                    positions[index].y += CGFloat(dy)
+                    moved = true
+                }
+            }
+            if !moved { break }
+        }
+    }
+
     // MARK: - Bridge fan-out
 
     private struct GroupMembershipIndex {
@@ -1994,6 +2215,218 @@ struct KnowledgeGraphLayout: Sendable {
         }
     }
 
+    /// Project disjoint group bounding boxes apart after card-level collision
+    /// resolution. Groups that share members are intentionally skipped because
+    /// a shared card makes fully disjoint bboxes impossible without duplicating
+    /// the card; disjoint groups should never visually merge.
+    private static func resolveGroupOverlaps(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        margin: CGFloat,
+        iterations: Int
+    ) {
+        struct GroupBox {
+            let indices: [Int]
+            let memberSet: Set<Int>
+            var rect: CGRect
+        }
+
+        guard groups.count > 1, iterations > 0 else { return }
+
+        func makeBoxes() -> [GroupBox] {
+            var boxes: [GroupBox] = []
+            boxes.reserveCapacity(groups.count)
+            for group in groups where group.cohesionStrength > 0 {
+                var indices: [Int] = []
+                indices.reserveCapacity(group.members.count)
+                for member in group.members {
+                    if let idx = indexByID[member] {
+                        indices.append(idx)
+                    }
+                }
+                guard !indices.isEmpty else { continue }
+                var rect: CGRect = .null
+                for idx in indices {
+                    let center = positions[idx]
+                    let size = sizes[idx]
+                    let cardRect = CGRect(
+                        x: center.x - size.width / 2,
+                        y: center.y - size.height / 2,
+                        width: size.width,
+                        height: size.height
+                    )
+                    rect = rect.isNull ? cardRect : rect.union(cardRect)
+                }
+                let padded = rect.insetBy(
+                    dx: -(group.style.padding + margin / 2),
+                    dy: -(group.style.padding + margin / 2)
+                )
+                boxes.append(GroupBox(
+                    indices: indices,
+                    memberSet: Set(indices),
+                    rect: padded
+                ))
+            }
+            return boxes
+        }
+
+        func translate(_ indices: [Int], dx: CGFloat, dy: CGFloat) {
+            for idx in indices {
+                positions[idx].x += dx
+                positions[idx].y += dy
+            }
+        }
+
+        for _ in 0..<iterations {
+            var boxes = makeBoxes()
+            var moved = false
+            guard boxes.count > 1 else { return }
+            for a in 0..<(boxes.count - 1) {
+                for b in (a + 1)..<boxes.count {
+                    if !boxes[a].memberSet.isDisjoint(with: boxes[b].memberSet) {
+                        continue
+                    }
+                    let intersection = boxes[a].rect.intersection(boxes[b].rect)
+                    guard
+                        !intersection.isNull,
+                        intersection.width > 0,
+                        intersection.height > 0
+                    else { continue }
+
+                    moved = true
+                    if intersection.width < intersection.height {
+                        let push = intersection.width / 2
+                        if boxes[a].rect.midX <= boxes[b].rect.midX {
+                            translate(boxes[a].indices, dx: -push, dy: 0)
+                            translate(boxes[b].indices, dx: push, dy: 0)
+                            boxes[a].rect.origin.x -= push
+                            boxes[b].rect.origin.x += push
+                        } else {
+                            translate(boxes[a].indices, dx: push, dy: 0)
+                            translate(boxes[b].indices, dx: -push, dy: 0)
+                            boxes[a].rect.origin.x += push
+                            boxes[b].rect.origin.x -= push
+                        }
+                    } else {
+                        let push = intersection.height / 2
+                        if boxes[a].rect.midY <= boxes[b].rect.midY {
+                            translate(boxes[a].indices, dx: 0, dy: -push)
+                            translate(boxes[b].indices, dx: 0, dy: push)
+                            boxes[a].rect.origin.y -= push
+                            boxes[b].rect.origin.y += push
+                        } else {
+                            translate(boxes[a].indices, dx: 0, dy: push)
+                            translate(boxes[b].indices, dx: 0, dy: -push)
+                            boxes[a].rect.origin.y += push
+                            boxes[b].rect.origin.y -= push
+                        }
+                    }
+                }
+            }
+            if !moved { break }
+        }
+    }
+
+    /// Tighten groups whose members were stretched apart by external edges.
+    /// The pass is deliberately late in the pipeline: edge-length projection
+    /// has already done its work, so the final visual priority becomes using
+    /// group interiors efficiently without letting cards collide.
+    private static func compactSparseGroups(
+        positions: inout [CGPoint],
+        radii: [Double],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardCount: Int,
+        iterations: Int
+    ) {
+        guard groups.count > 0, iterations > 0 else { return }
+
+        let effectiveGap = adaptiveEdgeGap(cardCount: cardCount)
+        let targetGap = effectiveGap * 0.55
+        let strength: Double = 0.32
+        let epsilon: Double = 0.001
+
+        struct GroupSpec {
+            let indices: [Int]
+        }
+
+        var connectedPairs: Set<UInt64> = []
+        connectedPairs.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let source = indexByID[edge.source],
+                let target = indexByID[edge.target],
+                source != target
+            else { continue }
+            let lo = UInt64(min(source, target))
+            let hi = UInt64(max(source, target))
+            connectedPairs.insert((lo << 32) | hi)
+        }
+
+        var specs: [GroupSpec] = []
+        specs.reserveCapacity(groups.count)
+        for group in groups where group.cohesionStrength > 0 {
+            var seen: Set<Int> = []
+            var indices: [Int] = []
+            indices.reserveCapacity(group.members.count)
+            for member in group.members {
+                guard let idx = indexByID[member] else { continue }
+                if seen.insert(idx).inserted {
+                    indices.append(idx)
+                }
+            }
+            if indices.count > 1 {
+                var hasInternalEdge = false
+                for aOffset in 0..<(indices.count - 1) where !hasInternalEdge {
+                    let a = indices[aOffset]
+                    for b in indices[(aOffset + 1)...] {
+                        let lo = UInt64(min(a, b))
+                        let hi = UInt64(max(a, b))
+                        if connectedPairs.contains((lo << 32) | hi) {
+                            hasInternalEdge = true
+                            break
+                        }
+                    }
+                }
+                if hasInternalEdge {
+                    continue
+                }
+                specs.append(GroupSpec(indices: indices))
+            }
+        }
+        guard !specs.isEmpty else { return }
+
+        for _ in 0..<iterations {
+            var moved = false
+            for spec in specs {
+                for aOffset in 0..<(spec.indices.count - 1) {
+                    let a = spec.indices[aOffset]
+                    for b in spec.indices[(aOffset + 1)...] {
+                        let dx = Double(positions[b].x - positions[a].x)
+                        let dy = Double(positions[b].y - positions[a].y)
+                        let distance = sqrt(dx * dx + dy * dy)
+                        guard distance > epsilon else { continue }
+                        let desired = radii[a] + radii[b] + targetGap
+                        guard distance > desired else { continue }
+
+                        let correction = (distance - desired) * strength * 0.5
+                        let ux = dx / distance
+                        let uy = dy / distance
+                        positions[a].x += CGFloat(ux * correction)
+                        positions[a].y += CGFloat(uy * correction)
+                        positions[b].x -= CGFloat(ux * correction)
+                        positions[b].y -= CGFloat(uy * correction)
+                        moved = true
+                    }
+                }
+            }
+            if !moved { break }
+        }
+    }
+
     // MARK: - Canvas anchoring
 
     /// Convert the centred positions to top-left card origins and compute
@@ -2174,10 +2607,10 @@ struct KnowledgeGraphLayout: Sendable {
 
     // MARK: - Edge labels
 
-    /// Place each edge label at its curve midpoint, then nudge perpendicular
-    /// through a ladder of offsets until it no longer overlaps any card.
-    /// Pure local optimisation — we do not run a global solver because the
-    /// graph sizes here do not justify it.
+    /// Place each edge label near its curve midpoint, then nudge through a
+    /// deterministic set of perpendicular / tangent candidates until it avoids
+    /// cards and already-placed labels. Pure local optimisation — we do not run
+    /// a global solver because the graph sizes here do not justify it.
     private static func placeEdgeLabels(
         edges: [CompoundGraph.CardEdge],
         routes: [EdgeIdentifier: EdgeRoute],
@@ -2185,8 +2618,10 @@ struct KnowledgeGraphLayout: Sendable {
     ) -> [EdgeIdentifier: CGPoint] {
         var placed: [EdgeIdentifier: CGPoint] = [:]
         placed.reserveCapacity(edges.count)
-        let estimatedLabelSize = CGSize(width: 80, height: 18)
-        let offsets: [CGFloat] = [0, 14, -14, 28, -28, 42, -42]
+        var occupiedLabelRects: [CGRect] = []
+        occupiedLabelRects.reserveCapacity(edges.count)
+        let perpendicularOffsets: [CGFloat] = [0, 18, -18, 36, -36, 56, -56, 78, -78]
+        let tangentOffsets: [CGFloat] = [0, 28, -28, 56, -56]
         for edge in edges {
             guard let route = routes[edge.id] else { continue }
             let mid: CGPoint
@@ -2207,26 +2642,88 @@ struct KnowledgeGraphLayout: Sendable {
             let len = max(hypot(dx, dy), 0.001)
             let perpX = -dy / len
             let perpY = dx / len
+            let tangentX = dx / len
+            let tangentY = dy / len
+            let estimatedLabelSize = edgeLabelSize(edge)
 
             var chosen = mid
-            for offset in offsets {
-                let candidate = CGPoint(
-                    x: mid.x + perpX * offset,
-                    y: mid.y + perpY * offset
-                )
-                let rect = CGRect(
-                    x: candidate.x - estimatedLabelSize.width / 2,
-                    y: candidate.y - estimatedLabelSize.height / 2,
-                    width: estimatedLabelSize.width,
-                    height: estimatedLabelSize.height
-                )
-                if !cardRects.contains(where: { $0.intersects(rect) }) {
-                    chosen = candidate
+            var chosenRect = edgeLabelRect(center: mid, size: estimatedLabelSize)
+            var fallbackScore = CGFloat.greatestFiniteMagnitude
+            var fallbackPoint = mid
+            var fallbackRect = chosenRect
+
+            for tangentOffset in tangentOffsets {
+                for perpOffset in perpendicularOffsets {
+                    let candidate = CGPoint(
+                        x: mid.x + perpX * perpOffset + tangentX * tangentOffset,
+                        y: mid.y + perpY * perpOffset + tangentY * tangentOffset
+                    )
+                    let rect = edgeLabelRect(center: candidate, size: estimatedLabelSize)
+                    let score = edgeLabelCollisionScore(
+                        rect,
+                        cardRects: cardRects,
+                        occupiedLabelRects: occupiedLabelRects
+                    )
+                    if score == 0 {
+                        chosen = candidate
+                        chosenRect = rect
+                        fallbackScore = 0
+                        break
+                    }
+                    if score < fallbackScore {
+                        fallbackScore = score
+                        fallbackPoint = candidate
+                        fallbackRect = rect
+                    }
+                }
+                if fallbackScore == 0 {
                     break
                 }
             }
+            if fallbackScore > 0 {
+                chosen = fallbackPoint
+                chosenRect = fallbackRect
+            }
             placed[edge.id] = chosen
+            occupiedLabelRects.append(chosenRect.insetBy(dx: -4, dy: -3))
         }
         return placed
+    }
+
+    private static func edgeLabelSize(_ edge: CompoundGraph.CardEdge) -> CGSize {
+        CGSize(
+            width: min(CGFloat(edge.predicate.count) * 7 + 24, 190),
+            height: 18
+        )
+    }
+
+    private static func edgeLabelRect(center: CGPoint, size: CGSize) -> CGRect {
+        CGRect(
+            x: center.x - size.width / 2,
+            y: center.y - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    private static func edgeLabelCollisionScore(
+        _ rect: CGRect,
+        cardRects: [CGRect],
+        occupiedLabelRects: [CGRect]
+    ) -> CGFloat {
+        var score: CGFloat = 0
+        for card in cardRects {
+            let intersection = rect.intersection(card.insetBy(dx: -6, dy: -4))
+            if !intersection.isNull {
+                score += intersection.width * intersection.height * 6
+            }
+        }
+        for occupied in occupiedLabelRects {
+            let intersection = rect.intersection(occupied)
+            if !intersection.isNull {
+                score += intersection.width * intersection.height
+            }
+        }
+        return score
     }
 }

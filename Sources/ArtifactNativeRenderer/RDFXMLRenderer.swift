@@ -64,7 +64,6 @@ public struct RDFXMLRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: RDFXMLRenderer()
     )
-    .padding()
     .frame(width: 520, height: 420)
 }
 
@@ -83,7 +82,6 @@ public struct RDFXMLRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(RDFXMLRenderer())
-    .padding()
     .frame(width: 420, height: 360)
 }
 
@@ -115,7 +113,6 @@ public struct RDFXMLRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(RDFXMLRenderer())
-    .padding()
     .frame(width: 520, height: 460)
 }
 

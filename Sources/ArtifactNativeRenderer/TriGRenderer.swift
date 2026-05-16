@@ -58,7 +58,6 @@ public struct TriGRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: TriGRenderer()
     )
-    .padding()
     .frame(width: 520, height: 420)
 }
 
@@ -75,7 +74,6 @@ public struct TriGRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(TriGRenderer())
-    .padding()
     .frame(width: 420, height: 360)
 }
 
@@ -102,7 +100,6 @@ public struct TriGRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(TriGRenderer())
-    .padding()
     .frame(width: 520, height: 460)
 }
 

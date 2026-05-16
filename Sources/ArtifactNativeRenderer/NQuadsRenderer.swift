@@ -54,7 +54,6 @@ public struct NQuadsRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: NQuadsRenderer()
     )
-    .padding()
     .frame(width: 520, height: 420)
 }
 
@@ -70,7 +69,6 @@ public struct NQuadsRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(NQuadsRenderer())
-    .padding()
     .frame(width: 420, height: 360)
 }
 
@@ -94,7 +92,6 @@ public struct NQuadsRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(NQuadsRenderer())
-    .padding()
     .frame(width: 520, height: 460)
 }
 

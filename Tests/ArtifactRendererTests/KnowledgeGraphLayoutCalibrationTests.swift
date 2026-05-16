@@ -18,6 +18,10 @@ struct KnowledgeGraphLayoutCalibrationTests {
         NodeIdentifier.iri("http://example/\(tail)")
     }
 
+    private static func exampleOrgIRI(_ tail: String) -> NodeIdentifier {
+        NodeIdentifier.iri("http://example.org/\(tail)")
+    }
+
     private static func edge(
         from: NodeIdentifier,
         to: NodeIdentifier,
@@ -203,6 +207,172 @@ struct KnowledgeGraphLayoutCalibrationTests {
         #expect(rightBox.midX > leftBox.midX + 125)
     }
 
+    @Test
+    func highDegreeEdgesReceiveLongerDistanceBudget() throws {
+        let pairA = Self.iri("pair-a")
+        let pairB = Self.iri("pair-b")
+        let pairGraph = KnowledgeGraph(
+            nodes: [pairA, pairB].map { Node(id: $0) },
+            edges: [Self.edge(from: pairA, to: pairB, namedGraph: "pair")],
+            namedGraphs: [NamedGraph(id: "pair", nodes: [pairA, pairB])]
+        )
+        let pairResult = KnowledgeGraphLayout.compute(graph: pairGraph)
+        let pairLengths = try edgeCenterLengths(result: pairResult)
+        let pairEdge = try #require(pairResult.compoundGraph.edges.first)
+        let pairLength = try #require(pairLengths[pairEdge.id])
+
+        let hub = Self.iri("hub")
+        let leaves = (0..<8).map { Self.iri("hub-leaf-\($0)") }
+        let hubGraph = KnowledgeGraph(
+            nodes: ([hub] + leaves).map { Node(id: $0) },
+            edges: leaves.map { Self.edge(from: hub, to: $0, namedGraph: "hub") },
+            namedGraphs: [NamedGraph(id: "hub", nodes: [hub] + leaves)]
+        )
+        let hubResult = KnowledgeGraphLayout.compute(graph: hubGraph)
+        let hubLengths = try edgeCenterLengths(result: hubResult)
+        let averageHubLength = hubResult.compoundGraph.edges.compactMap { hubLengths[$0.id] }
+            .reduce(0, +) / Double(leaves.count)
+
+        #expect(averageHubLength > pairLength * 1.15)
+    }
+
+    @Test
+    func highDegreeHubUsesWideAngularCoverage() throws {
+        let hub = Self.iri("angle-hub")
+        let leaves = (0..<10).map { Self.iri("angle-leaf-\($0)") }
+        let graph = KnowledgeGraph(
+            nodes: ([hub] + leaves).map { Node(id: $0) },
+            edges: leaves.map { Self.edge(from: hub, to: $0, namedGraph: "hub") },
+            namedGraphs: [NamedGraph(id: "hub", nodes: [hub] + leaves)]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let hubCenter = try center(of: CompoundGraph.Card.ID(nodeID: hub), in: result)
+        let angles = try leaves.map { leaf -> Double in
+            let leafCenter = try center(of: CompoundGraph.Card.ID(nodeID: leaf), in: result)
+            return normalizedAngle(atan2(
+                Double(leafCenter.y - hubCenter.y),
+                Double(leafCenter.x - hubCenter.x)
+            ))
+        }.sorted()
+        try #require(angles.count == leaves.count)
+
+        #expect(largestAngularGap(angles) < 2.4)
+    }
+
+    @Test
+    func finalLayoutHasNoOverlappingCards() throws {
+        let hubs = (0..<3).map { Self.iri("dense-hub-\($0)") }
+        let leaves = (0..<12).map { Self.iri("dense-leaf-\($0)") }
+        var edges: [Edge] = []
+        for (hubIndex, hub) in hubs.enumerated() {
+            for (leafIndex, leaf) in leaves.enumerated() where leafIndex % hubs.count == hubIndex {
+                edges.append(Self.edge(from: hub, to: leaf, namedGraph: "dense"))
+            }
+        }
+        edges.append(Self.edge(from: hubs[0], to: hubs[1], namedGraph: "dense"))
+        edges.append(Self.edge(from: hubs[1], to: hubs[2], namedGraph: "dense"))
+        edges.append(Self.edge(from: hubs[2], to: hubs[0], namedGraph: "dense"))
+
+        let graph = KnowledgeGraph(
+            nodes: (hubs + leaves).map { Node(id: $0) },
+            edges: edges,
+            namedGraphs: [NamedGraph(id: "dense", nodes: hubs + leaves)]
+        )
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+
+        let rects = try cardRects(result: result)
+        for i in 0..<(rects.count - 1) {
+            for j in (i + 1)..<rects.count {
+                #expect(!rects[i].insetBy(dx: -1, dy: -1).intersects(rects[j]))
+            }
+        }
+    }
+
+    @Test
+    func disjointGroupBoxesDoNotOverlap() throws {
+        let left = (0..<4).map { Self.iri("left-\($0)") }
+        let right = (0..<4).map { Self.iri("right-\($0)") }
+        let edges = [
+            Self.edge(from: left[0], to: left[1], namedGraph: "left"),
+            Self.edge(from: left[1], to: left[2], namedGraph: "left"),
+            Self.edge(from: left[2], to: left[3], namedGraph: "left"),
+            Self.edge(from: right[0], to: right[1], namedGraph: "right"),
+            Self.edge(from: right[1], to: right[2], namedGraph: "right"),
+            Self.edge(from: right[2], to: right[3], namedGraph: "right"),
+            Self.edge(from: left[3], to: right[0], predicate: "http://example/bridge")
+        ]
+        let graph = KnowledgeGraph(
+            nodes: (left + right).map { Node(id: $0) },
+            edges: edges,
+            namedGraphs: [
+                NamedGraph(id: "left", nodes: left),
+                NamedGraph(id: "right", nodes: right)
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let leftBox = try #require(groupBoundingBox(label: "left", result: result))
+        let rightBox = try #require(groupBoundingBox(label: "right", result: result))
+
+        #expect(!leftBox.intersects(rightBox))
+    }
+
+    @Test
+    func edgeLabelsDoNotOverlapCardsOrEachOther() throws {
+        let center = Self.iri("label-center")
+        let leaves = (0..<6).map { Self.iri("label-leaf-\($0)") }
+        let predicates = [
+            "http://example/type",
+            "http://example/knows",
+            "http://example/memberOf",
+            "http://example/reportsTo",
+            "http://example/dependsOn",
+            "http://example/uses"
+        ]
+        let edges = zip(leaves, predicates).map { leaf, predicate in
+            Self.edge(from: center, to: leaf, predicate: predicate, namedGraph: "labels")
+        }
+        let graph = KnowledgeGraph(
+            nodes: ([center] + leaves).map { Node(id: $0) },
+            edges: edges,
+            namedGraphs: [NamedGraph(id: "labels", nodes: [center] + leaves)]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let cardRects = try cardRects(result: result).map { $0.insetBy(dx: -2, dy: -2) }
+        let labelRects = try edgeLabelRects(result: result)
+
+        for labelRect in labelRects {
+            for cardRect in cardRects {
+                #expect(!labelRect.intersects(cardRect))
+            }
+        }
+        for i in 0..<(labelRects.count - 1) {
+            for j in (i + 1)..<labelRects.count {
+                #expect(!labelRects[i].intersects(labelRects[j]))
+            }
+        }
+    }
+
+    @Test
+    func namespacePreviewKeepsGroupsCompactAndLabelsSeparated() throws {
+        let graph = byNamespacePreviewGraph()
+        let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .byNamespace())
+
+        for group in result.compoundGraph.groups {
+            let fillRatio = try groupMemberFillRatio(group: group, result: result)
+            #expect(fillRatio > 0.10)
+        }
+
+        let labelRects = try edgeLabelRects(result: result)
+        for i in 0..<(labelRects.count - 1) {
+            for j in (i + 1)..<labelRects.count {
+                #expect(!labelRects[i].intersects(labelRects[j]))
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func bboxToCanvasAreaRatio(
@@ -221,6 +391,27 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let quarterTurn = Double.pi / 2
         let remainder = abs(angle.truncatingRemainder(dividingBy: quarterTurn))
         return min(remainder, quarterTurn - remainder)
+    }
+
+    private func normalizedAngle(_ angle: Double) -> Double {
+        var result = angle
+        while result < 0 {
+            result += Double.pi * 2
+        }
+        while result >= Double.pi * 2 {
+            result -= Double.pi * 2
+        }
+        return result
+    }
+
+    private func largestAngularGap(_ sortedAngles: [Double]) -> Double {
+        guard sortedAngles.count > 1 else { return Double.pi * 2 }
+        var largest = 0.0
+        for index in 0..<(sortedAngles.count - 1) {
+            largest = max(largest, sortedAngles[index + 1] - sortedAngles[index])
+        }
+        let wrapGap = sortedAngles[0] + Double.pi * 2 - sortedAngles[sortedAngles.count - 1]
+        return max(largest, wrapGap)
     }
 
     private func edgeCenterLengths(
@@ -249,6 +440,44 @@ struct KnowledgeGraphLayoutCalibrationTests {
         )
     }
 
+    private func cardRects(result: KnowledgeGraphLayout.Result) throws -> [CGRect] {
+        try result.compoundGraph.cards.map { card in
+            let origin = try #require(result.cardPositions[card.id])
+            return CGRect(origin: origin, size: card.size)
+        }
+    }
+
+    private func edgeLabelRects(result: KnowledgeGraphLayout.Result) throws -> [CGRect] {
+        try result.compoundGraph.edges.map { edge in
+            let center = try #require(result.edgeLabelPositions[edge.id])
+            let size = CGSize(
+                width: min(CGFloat(edge.predicate.count) * 7 + 24, 190),
+                height: 18
+            )
+            return CGRect(
+                x: center.x - size.width / 2,
+                y: center.y - size.height / 2,
+                width: size.width,
+                height: size.height
+            )
+        }
+    }
+
+    private func groupMemberFillRatio(
+        group: CompoundGraph.Group,
+        result: KnowledgeGraphLayout.Result
+    ) throws -> Double {
+        let bbox = try #require(result.groupBoundingBoxes[group.id])
+        let inner = bbox.insetBy(dx: group.style.padding, dy: group.style.padding)
+        let innerArea = max(Double(inner.width * inner.height), 1)
+        var memberArea = 0.0
+        for member in group.members {
+            let card = try #require(result.compoundGraph.cardByID[member])
+            memberArea += Double(card.size.width * card.size.height)
+        }
+        return memberArea / innerArea
+    }
+
     private func groupBoundingBox(
         label: String,
         result: KnowledgeGraphLayout.Result
@@ -257,5 +486,43 @@ struct KnowledgeGraphLayoutCalibrationTests {
             return nil
         }
         return result.groupBoundingBoxes[group.id]
+    }
+
+    private func byNamespacePreviewGraph() -> KnowledgeGraph {
+        let alice = Self.exampleOrgIRI("alice")
+        let bob = Self.exampleOrgIRI("bob")
+        let carol = Self.exampleOrgIRI("carol")
+        let engineering = Self.exampleOrgIRI("org/engineering")
+        let sales = Self.exampleOrgIRI("org/sales")
+        let recruiting = Self.exampleOrgIRI("org/hr/recruiting")
+        let payroll = Self.exampleOrgIRI("org/hr/payroll")
+        let widget = Self.exampleOrgIRI("product/widget")
+        let gadget = Self.exampleOrgIRI("product/gadget")
+
+        let memberOf = "http://example.org/memberOf"
+        let builds = "http://example.org/builds"
+        let reviews = "http://example.org/reviews"
+        let nodes = [alice, bob, carol, engineering, sales, recruiting, payroll, widget, gadget]
+        let edges = [
+            Self.edge(from: alice, to: bob, predicate: Self.knows),
+            Self.edge(from: bob, to: carol, predicate: Self.knows),
+            Self.edge(from: alice, to: engineering, predicate: memberOf),
+            Self.edge(from: bob, to: recruiting, predicate: memberOf),
+            Self.edge(from: carol, to: sales, predicate: memberOf),
+            Self.edge(from: alice, to: widget, predicate: builds),
+            Self.edge(from: bob, to: gadget, predicate: reviews),
+            Self.edge(from: carol, to: payroll, predicate: memberOf)
+        ]
+
+        return KnowledgeGraph(
+            nodes: nodes.map { Node(id: $0) },
+            edges: edges,
+            namespaces: [
+                Namespace(prefix: "foaf", uri: "http://xmlns.com/foaf/0.1/"),
+                Namespace(prefix: "org", uri: "http://example.org/org/"),
+                Namespace(prefix: "orgHR", uri: "http://example.org/org/hr/"),
+                Namespace(prefix: "prod", uri: "http://example.org/product/")
+            ]
+        )
     }
 }

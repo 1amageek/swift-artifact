@@ -137,7 +137,6 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: CodeRenderer()
     )
-    .padding()
     .frame(width: 460)
 }
 
@@ -152,7 +151,6 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(CodeRenderer())
-    .padding()
     .frame(width: 460)
 }
 
@@ -182,6 +180,5 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(CodeRenderer())
-    .padding()
     .frame(width: 480, height: 480)
 }

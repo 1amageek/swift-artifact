@@ -10,6 +10,8 @@ import ArtifactView
 /// renderer shows the streaming progress placeholder until the artifact closes.
 public struct ReactWebViewRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .react
+    /// The React document shell owns its body padding.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -53,7 +55,6 @@ public struct ReactWebViewRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: ReactWebViewRenderer()
     )
-    .padding()
     .frame(width: 480, height: 440)
 }
 
@@ -68,6 +69,5 @@ public struct ReactWebViewRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(ReactWebViewRenderer())
-    .padding()
     .frame(width: 420)
 }

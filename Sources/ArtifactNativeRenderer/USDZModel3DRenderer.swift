@@ -16,6 +16,8 @@ import ArtifactView
 /// fetch.
 public struct USDZModel3DRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .usdz
+    /// The interactive 3D viewport should fill the card body edge-to-edge.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -181,7 +183,6 @@ enum USDZAssetLoader {
         ),
         renderer: USDZModel3DRenderer()
     )
-    .padding()
     .frame(width: 480, height: 480)
 }
 
@@ -195,6 +196,5 @@ enum USDZAssetLoader {
         )
     )
     .artifactRenderer(USDZModel3DRenderer())
-    .padding()
     .frame(width: 360, height: 200)
 }

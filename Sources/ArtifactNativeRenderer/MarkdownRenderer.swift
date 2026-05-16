@@ -9,6 +9,9 @@ import ArtifactView
 /// thematic breaks) on top of `swift-markdown`'s CommonMark parser.
 public struct MarkdownRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .markdown
+    /// Markdown owns its reading inset internally so it renders with the same
+    /// typography spacing both inside and outside `ArtifactCard`.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -43,6 +46,7 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
         ScrollView(.vertical) {
             MarkdownView(payload)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(defaultArtifactCardContentInsets)
         }
         .artifactContentHeightLimit()
     }
@@ -70,7 +74,6 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: MarkdownRenderer()
     )
-    .padding()
     .frame(width: 420)
 }
 
@@ -85,7 +88,6 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(MarkdownRenderer())
-    .padding()
     .frame(width: 420)
 }
 
@@ -111,7 +113,6 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: MarkdownRenderer()
     )
-    .padding()
     .frame(width: 520, height: 460)
 }
 
@@ -147,6 +148,5 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(MarkdownRenderer())
-    .padding()
     .frame(width: 480, height: 520)
 }

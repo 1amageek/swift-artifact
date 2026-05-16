@@ -349,7 +349,6 @@ private struct MermaidErrorView: View {
         ),
         renderer: MermaidRenderer()
     )
-    .padding()
     .frame(width: 520, height: 420)
 }
 
@@ -374,7 +373,6 @@ private struct MermaidErrorView: View {
         ),
         renderer: MermaidRenderer()
     )
-    .padding()
     .frame(width: 520, height: 420)
 }
 
@@ -393,7 +391,6 @@ private struct MermaidErrorView: View {
         )
     )
     .artifactRenderer(MermaidRenderer())
-    .padding()
     .frame(width: 420, height: 240)
 }
 
@@ -416,6 +413,5 @@ private struct MermaidErrorView: View {
         ArtifactCard(artifact)
     }
     .artifactRenderer(MermaidRenderer())
-    .padding()
     .frame(width: 520, height: 460)
 }

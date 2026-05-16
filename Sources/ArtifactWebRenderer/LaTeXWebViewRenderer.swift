@@ -7,6 +7,8 @@ import ArtifactView
 /// (`"block"` or `"inline"`, default `"block"`) chooses block vs inline math.
 public struct LaTeXWebViewRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .latex
+    /// The KaTeX shell owns its body padding, so the card should not add more.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -83,7 +85,6 @@ enum LatexRefiner {
         ),
         renderer: LaTeXWebViewRenderer()
     )
-    .padding()
     .frame(width: 460)
 }
 
@@ -99,7 +100,6 @@ enum LatexRefiner {
         )
     )
     .artifactRenderer(LaTeXWebViewRenderer())
-    .padding()
     .frame(width: 460)
 }
 
@@ -115,6 +115,5 @@ enum LatexRefiner {
         ArtifactCard(artifact)
     }
     .artifactRenderer(LaTeXWebViewRenderer())
-    .padding()
     .frame(width: 460, height: 320)
 }

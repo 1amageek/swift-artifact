@@ -71,7 +71,6 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: HTMLWebViewRenderer()
     )
-    .padding()
     .frame(width: 480, height: 420)
 }
 
@@ -121,6 +120,5 @@ public struct HTMLWebViewRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(HTMLWebViewRenderer())
-    .padding()
     .frame(width: 480, height: 560)
 }

@@ -82,6 +82,5 @@ struct ModelPlaceholderView: View {
         ),
         renderer: GLTFSceneKitRenderer()
     )
-    .padding()
     .frame(width: 460)
 }

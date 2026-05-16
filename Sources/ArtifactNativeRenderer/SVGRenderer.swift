@@ -16,6 +16,8 @@ import AppKit
 /// `SVGView` / `SwiftDraw`.
 public struct SVGRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .svg
+    /// Rasterized SVG fills the card; textual fallback provides its own inset.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -70,6 +72,7 @@ private struct SVGBody: View {
             }
             .artifactContentHeightLimit()
         }
+        .padding(defaultArtifactCardContentInsets)
     }
 }
 
@@ -90,7 +93,6 @@ private struct SVGBody: View {
         ),
         renderer: SVGRenderer()
     )
-    .padding()
     .frame(width: 360)
 }
 
@@ -112,6 +114,5 @@ private struct SVGBody: View {
         ArtifactCard(artifact)
     }
     .artifactRenderer(SVGRenderer())
-    .padding()
     .frame(width: 420, height: 420)
 }

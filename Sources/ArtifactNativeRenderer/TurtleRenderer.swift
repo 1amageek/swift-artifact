@@ -59,7 +59,6 @@ public struct TurtleRenderer: ArtifactRenderable, Sendable {
         ),
         renderer: TurtleRenderer()
     )
-    .padding()
     .frame(width: 520, height: 420)
 }
 
@@ -76,7 +75,6 @@ public struct TurtleRenderer: ArtifactRenderable, Sendable {
         )
     )
     .artifactRenderer(TurtleRenderer())
-    .padding()
     .frame(width: 420, height: 360)
 }
 
@@ -99,7 +97,6 @@ public struct TurtleRenderer: ArtifactRenderable, Sendable {
         ArtifactCard(artifact)
     }
     .artifactRenderer(TurtleRenderer())
-    .padding()
     .frame(width: 520, height: 460)
 }
 

@@ -245,7 +245,6 @@ enum MapRegionResolver {
         ),
         renderer: GeoJSONMapKitRenderer()
     )
-    .padding()
     .frame(width: 480, height: 420)
 }
 
@@ -302,7 +301,6 @@ enum MapRegionResolver {
         ArtifactCard(artifact)
     }
     .artifactRenderer(GeoJSONMapKitRenderer())
-    .padding()
     .frame(width: 520, height: 540)
 }
 
@@ -347,6 +345,5 @@ enum MapRegionResolver {
         )
     )
     .artifactRenderer(GeoJSONMapKitRenderer())
-    .padding()
     .frame(width: 520, height: 480)
 }

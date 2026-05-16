@@ -58,4 +58,29 @@ struct PreferredContentInsetsTests {
     @Test func codeRendererOptsOutOfPadding() {
         #expect(CodeRenderer.preferredContentInsets == EdgeInsets())
     }
+
+    @Test func markdownRendererOwnsItsReadingInset() {
+        #expect(MarkdownRenderer.preferredContentInsets == EdgeInsets())
+    }
+
+    @Test func nativeSurfaceRenderersOptOutOfCardPadding() {
+        #expect(CSVRenderer.preferredContentInsets == EdgeInsets())
+        #expect(JSONRenderer.preferredContentInsets == EdgeInsets())
+        #expect(SVGRenderer.preferredContentInsets == EdgeInsets())
+        #expect(USDZModel3DRenderer.preferredContentInsets == EdgeInsets())
+    }
+
+    @Test func knowledgeGraphRenderersOptOutOfCardPadding() {
+        #expect(TurtleRenderer.preferredContentInsets == EdgeInsets())
+        #expect(TriGRenderer.preferredContentInsets == EdgeInsets())
+        #expect(NQuadsRenderer.preferredContentInsets == EdgeInsets())
+        #expect(RDFXMLRenderer.preferredContentInsets == EdgeInsets())
+        #expect(JSONLDRenderer.preferredContentInsets == EdgeInsets())
+    }
+
+    @Test func webSurfaceRenderersOptOutOfCardPadding() {
+        #expect(ReactWebViewRenderer.preferredContentInsets == EdgeInsets())
+        #expect(VegaLiteWebViewRenderer.preferredContentInsets == EdgeInsets())
+        #expect(LaTeXWebViewRenderer.preferredContentInsets == EdgeInsets())
+    }
 }

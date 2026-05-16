@@ -10,6 +10,8 @@ import ArtifactView
 /// affordances).
 public struct CSVRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .csv
+    /// The table owns its cell padding and should reach the card edges.
+    public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
 
@@ -129,7 +131,6 @@ enum CSVParser {
         ),
         renderer: CSVRenderer()
     )
-    .padding()
     .frame(width: 480)
 }
 
@@ -144,7 +145,6 @@ enum CSVParser {
         )
     )
     .artifactRenderer(CSVRenderer())
-    .padding()
     .frame(width: 360)
 }
 
@@ -167,6 +167,5 @@ enum CSVParser {
         ArtifactCard(artifact)
     }
     .artifactRenderer(CSVRenderer())
-    .padding()
     .frame(width: 520, height: 460)
 }
