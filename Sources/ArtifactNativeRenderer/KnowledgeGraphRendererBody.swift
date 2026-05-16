@@ -45,7 +45,10 @@ struct KnowledgeGraphRendererBody: View {
                     .controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .success(let graph):
-                KnowledgeGraphView(graph: graph)
+                KnowledgeGraphView(
+                    graph: graph,
+                    groupingStrategy: groupingStrategy(for: payload)
+                )
             case .failure(let error):
                 KnowledgeGraphErrorView(error: error, source: payload)
             }
@@ -79,5 +82,14 @@ struct KnowledgeGraphRendererBody: View {
             if Task.isCancelled { return }
             parseResult = result
         }
+    }
+
+    private func groupingStrategy(for payload: String) -> GroupingStrategy {
+        guard format == .jsonLD,
+              let strategy = JSONLDViewGroupExtractor.groupingStrategy(from: payload)
+        else {
+            return .namedGraphs()
+        }
+        return strategy
     }
 }

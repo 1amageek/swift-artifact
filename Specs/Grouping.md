@@ -331,6 +331,10 @@ extension CompoundGraph {
 
 ## 7. レイアウト統合
 
+Node / Edge / Group の基本幾何制約は `Specs/KnowledgeGraphLayout.md` に従う。
+この章は Grouping 統合の追加要件だけを扱い、Edge routing の最短性、
+斜め禁止、Node 非干渉、最小距離制約を上書きしない。
+
 `KnowledgeGraphLayout.compute(graph:iterations:initial:)` に 2 つを追加。
 
 ### 7.1 FR ループ内のグループ凝集力

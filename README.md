@@ -217,11 +217,14 @@ alone.
 
 ### Knowledge graph (W3C RDF)
 
-All five RDF renderers share a force-directed layout, blank-node-stable
-identifiers across re-renders, and progressive partial rendering. JSON-LD
-and RDF/XML use bespoke partial processors so the diagram appears as
-triples become derivable from the prefix — not when the closing `}` or
-`</rdf:RDF>` arrives.
+All five RDF renderers share a layered, orthogonal knowledge-graph layout,
+blank-node-stable identifiers across re-renders, and progressive partial
+rendering. The layout constraints are specified in
+`Specs/KnowledgeGraphLayout.md`: edges use horizontal/vertical routes, avoid
+non-endpoint nodes, connect to node sides by their normal, and prefer shorter
+valid paths with fewer corners as the tie-breaker. JSON-LD and RDF/XML use bespoke partial
+processors so the diagram appears as triples become derivable from the
+prefix — not when the closing `}` or `</rdf:RDF>` arrives.
 
 | Format | MIME | Extensions | Renderer |
 |---|---|---|---|

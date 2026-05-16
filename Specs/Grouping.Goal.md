@@ -48,6 +48,10 @@
 
 ## D. レイアウト品質 (MUST)
 
+基本制約は `Specs/KnowledgeGraphLayout.md` を正とする。
+Grouping はその上に group outline を描画する機能であり、Edge / Node / Group の
+幾何制約を上書きしない。
+
 戦略 `!= .none` の条件下で:
 
 | # | 条件 | 閾値 (キャリブレーション後 — 2026-05-15) |
@@ -59,6 +63,10 @@
 | D5 | 単一大グループの bbox タイト性 (8 ノード 1 グループ) | `bbox.area < canvas.area × 0.90` (実測 0.88) |
 | D6 | 全 `cardPosition.x, .y` が `.isFinite` |
 | D7 | 凝集力ありで NaN/Inf が発生しない (単一メンバ / 重複座標保護) |
+| D8 | Edge segment は水平または垂直のみ (`KnowledgeGraphLayout.md` L1) | — |
+| D9 | Edge は endpoint ではない Node に被らない (`KnowledgeGraphLayout.md` L3) | — |
+| D10 | Edge は Node の辺に法線方向で接続 (`KnowledgeGraphLayout.md` L2) | — |
+| D11 | Edge route は制約を満たす候補の中で短い候補を優先し、同程度なら角数が少ない候補を優先 (`KnowledgeGraphLayout.md` L4) | — |
 
 ---
 

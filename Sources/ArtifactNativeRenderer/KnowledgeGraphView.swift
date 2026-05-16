@@ -52,8 +52,11 @@ struct KnowledgeGraphView: View {
     private let viewportMargin: CGFloat = 16
     private let arrowSize: CGFloat = 9
     private let edgeLineWidth: CGFloat = 1.4
+    private let edgeSourceMarkerRadius: CGFloat = 2.2
+    private let edgeLabelGuideInset: CGFloat = 3
     private let cullingMargin: CGFloat = 120
     private let zoomStep: CGFloat = 1.25
+    private let groupLabelMeasurementWidth: CGFloat = 2048
 
     /// Transient state mirrored from `MagnifyGesture` via `@GestureState` so
     /// the in-flight pinch can be replayed against `viewportAtMagnifyStart`
@@ -192,24 +195,29 @@ struct KnowledgeGraphView: View {
         context: inout GraphicsContext
     ) {
         var strokePath = Path()
+        var sourcePath = Path()
         var headPath = Path()
 
         for edge in layout.compoundGraph.edges {
             guard let route = layout.edgeRoutes[edge.id] else { continue }
-            let screenStart = viewport.canvasToScreen(route.start)
-            let screenEnd = viewport.canvasToScreen(route.end)
+            let routePoints = route.points.isEmpty ? [route.start, route.end] : route.points
+            let screenPoints = routePoints.map { viewport.canvasToScreen($0) }
+            guard
+                let screenStart = screenPoints.first,
+                let screenEnd = screenPoints.last
+            else { continue }
 
-            // Coarse cull — skip when both endpoints fall outside the
-            // viewport along the same axis. The curve's bounding box may
-            // bulge slightly past the endpoints; `cullingMargin` covers it.
-            if (screenStart.x < visibleRect.minX && screenEnd.x < visibleRect.minX) ||
-                (screenStart.x > visibleRect.maxX && screenEnd.x > visibleRect.maxX) ||
-                (screenStart.y < visibleRect.minY && screenEnd.y < visibleRect.minY) ||
-                (screenStart.y > visibleRect.maxY && screenEnd.y > visibleRect.maxY) {
+            var routeBounds = CGRect.null
+            for point in screenPoints {
+                let rect = CGRect(x: point.x, y: point.y, width: 1, height: 1)
+                routeBounds = routeBounds.isNull ? rect : routeBounds.union(rect)
+            }
+            if !routeBounds.insetBy(dx: -48, dy: -48).intersects(visibleRect) {
                 continue
             }
 
             strokePath.move(to: screenStart)
+            appendSourceMarker(at: screenStart, into: &sourcePath)
             let tangent: CGVector
             if route.isCurved {
                 let screenControl = viewport.canvasToScreen(route.control)
@@ -217,6 +225,15 @@ struct KnowledgeGraphView: View {
                 tangent = CGVector(
                     dx: screenEnd.x - screenControl.x,
                     dy: screenEnd.y - screenControl.y
+                )
+            } else if screenPoints.count > 2 {
+                for point in screenPoints.dropFirst() {
+                    strokePath.addLine(to: point)
+                }
+                let previous = screenPoints[screenPoints.count - 2]
+                tangent = CGVector(
+                    dx: screenEnd.x - previous.x,
+                    dy: screenEnd.y - previous.y
                 )
             } else {
                 strokePath.addLine(to: screenEnd)
@@ -235,9 +252,22 @@ struct KnowledgeGraphView: View {
                 style: StrokeStyle(lineWidth: edgeLineWidth, lineCap: .round)
             )
         }
+        if !sourcePath.isEmpty {
+            context.fill(sourcePath, with: .color(theme.arrow.opacity(0.82)))
+        }
         if !headPath.isEmpty {
             context.fill(headPath, with: .color(theme.arrow))
         }
+    }
+
+    private func appendSourceMarker(at point: CGPoint, into path: inout Path) {
+        let diameter = edgeSourceMarkerRadius * 2
+        path.addEllipse(in: CGRect(
+            x: point.x - edgeSourceMarkerRadius,
+            y: point.y - edgeSourceMarkerRadius,
+            width: diameter,
+            height: diameter
+        ))
     }
 
     private func appendArrowhead(
@@ -274,7 +304,10 @@ struct KnowledgeGraphView: View {
         context: inout GraphicsContext
     ) {
         for edge in layout.compoundGraph.edges {
-            guard let position = layout.edgeLabelPositions[edge.id] else { continue }
+            guard
+                let position = layout.edgeLabelPositions[edge.id],
+                let route = layout.edgeRoutes[edge.id]
+            else { continue }
             let screenPos = viewport.canvasToScreen(position)
             guard visibleRect.contains(screenPos) else { continue }
 
@@ -294,13 +327,83 @@ struct KnowledgeGraphView: View {
             )
             let labelPath = Path(roundedRect: bgRect, cornerRadius: 4)
             context.fill(labelPath, with: .color(theme.edgeLabelFill))
+            drawEdgeLabelGuide(
+                in: bgRect,
+                axis: edgeLabelAxis(route: route, labelPosition: position),
+                theme: theme,
+                context: &context
+            )
             context.stroke(
                 labelPath,
                 with: .color(theme.edgeLabelStroke),
                 lineWidth: 1
             )
-            context.draw(resolved, at: screenPos)
+            context.draw(resolved, at: screenPos, anchor: .center)
         }
+    }
+
+    private enum EdgeLabelAxis {
+        case horizontal
+        case vertical
+    }
+
+    private func drawEdgeLabelGuide(
+        in rect: CGRect,
+        axis: EdgeLabelAxis,
+        theme: KnowledgeGraphVisualTheme,
+        context: inout GraphicsContext
+    ) {
+        var path = Path()
+        switch axis {
+        case .horizontal:
+            path.move(to: CGPoint(x: rect.minX + edgeLabelGuideInset, y: rect.midY))
+            path.addLine(to: CGPoint(x: rect.maxX - edgeLabelGuideInset, y: rect.midY))
+        case .vertical:
+            path.move(to: CGPoint(x: rect.midX, y: rect.minY + edgeLabelGuideInset))
+            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY - edgeLabelGuideInset))
+        }
+        context.stroke(
+            path,
+            with: .color(theme.line.opacity(0.9)),
+            style: StrokeStyle(lineWidth: edgeLineWidth, lineCap: .round)
+        )
+    }
+
+    private func edgeLabelAxis(
+        route: KnowledgeGraphLayout.EdgeRoute,
+        labelPosition: CGPoint
+    ) -> EdgeLabelAxis {
+        let points = route.points.isEmpty ? [route.start, route.end] : route.points
+        guard points.count > 1 else { return .horizontal }
+
+        var bestAxis = EdgeLabelAxis.horizontal
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for offset in 1..<points.count {
+            let start = points[offset - 1]
+            let end = points[offset]
+            let distance = labelDistance(labelPosition, toSegmentStart: start, end: end)
+            guard distance < bestDistance else { continue }
+            bestDistance = distance
+            bestAxis = abs(end.x - start.x) >= abs(end.y - start.y) ? .horizontal : .vertical
+        }
+        return bestAxis
+    }
+
+    private func labelDistance(
+        _ point: CGPoint,
+        toSegmentStart start: CGPoint,
+        end: CGPoint
+    ) -> CGFloat {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0.001 else {
+            return hypot(point.x - start.x, point.y - start.y)
+        }
+        let rawT = ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared
+        let t = min(1, max(0, rawT))
+        let projection = CGPoint(x: start.x + dx * t, y: start.y + dy * t)
+        return hypot(point.x - projection.x, point.y - projection.y)
     }
 
     // MARK: - Drawing — groups
@@ -371,14 +474,11 @@ struct KnowledgeGraphView: View {
 
         var occupiedLabelRects: [CGRect] = []
         occupiedLabelRects.reserveCapacity(visibleGroups.count)
-        let groupRects = visibleGroups.map(\.rect)
         for item in visibleGroups {
             if let labelRect = drawGroupLabel(
                 info: item.info,
                 bbox: item.rect,
                 occupiedLabelRects: occupiedLabelRects,
-                groupRects: groupRects,
-                visibleRect: visibleRect,
                 context: &context
             ) {
                 occupiedLabelRects.append(labelRect.insetBy(dx: -4, dy: -3))
@@ -394,12 +494,12 @@ struct KnowledgeGraphView: View {
         info: GroupRenderInfo,
         bbox: CGRect,
         occupiedLabelRects: [CGRect],
-        groupRects: [CGRect],
-        visibleRect: CGRect,
         context: inout GraphicsContext
     ) -> CGRect? {
         let resolved = context.resolve(info.labelText)
-        let textSize = resolved.measure(in: CGSize(width: max(bbox.width, 80), height: 40))
+        let textSize = resolved.measure(
+            in: CGSize(width: groupLabelMeasurementWidth, height: 40)
+        )
         let hPad: CGFloat = 8
         let vPad: CGFloat = 3
         let labelSize = CGSize(
@@ -409,9 +509,7 @@ struct KnowledgeGraphView: View {
         let labelRect = groupLabelRect(
             bbox: bbox,
             labelSize: labelSize,
-            occupiedLabelRects: occupiedLabelRects,
-            groupRects: groupRects,
-            visibleRect: visibleRect
+            occupiedLabelRects: occupiedLabelRects
         )
         let labelPath = Path(roundedRect: labelRect, cornerRadius: 5)
         context.fill(labelPath, with: .color(info.labelFillColor))
@@ -422,7 +520,8 @@ struct KnowledgeGraphView: View {
         )
         context.draw(
             resolved,
-            at: CGPoint(x: labelRect.midX, y: labelRect.midY)
+            at: CGPoint(x: labelRect.midX, y: labelRect.midY),
+            anchor: .center
         )
         return labelRect
     }
@@ -430,54 +529,52 @@ struct KnowledgeGraphView: View {
     private func groupLabelRect(
         bbox: CGRect,
         labelSize: CGSize,
-        occupiedLabelRects: [CGRect],
-        groupRects: [CGRect],
-        visibleRect: CGRect
+        occupiedLabelRects: [CGRect]
     ) -> CGRect {
         let gap: CGFloat = 5
-        let candidates = [
-            CGPoint(x: bbox.minX, y: bbox.minY - labelSize.height - gap),
-            CGPoint(x: bbox.maxX - labelSize.width, y: bbox.minY - labelSize.height - gap),
+        let verticalStep = labelSize.height + 4
+        var candidates: [CGRect] = []
+        candidates.reserveCapacity(22)
+
+        func appendStack(origin: CGPoint, direction: CGFloat, count: Int) {
+            for offset in 0..<count {
+                let stackedOrigin = CGPoint(
+                    x: origin.x,
+                    y: origin.y + direction * verticalStep * CGFloat(offset)
+                )
+                candidates.append(CGRect(origin: stackedOrigin, size: labelSize))
+            }
+        }
+
+        let topLeft = CGPoint(x: bbox.minX, y: bbox.minY - labelSize.height - gap)
+        let topRight = CGPoint(x: bbox.maxX - labelSize.width, y: bbox.minY - labelSize.height - gap)
+        appendStack(origin: topLeft, direction: -1, count: 6)
+        appendStack(origin: topRight, direction: -1, count: 4)
+        candidates.append(contentsOf: [
             CGPoint(x: bbox.minX, y: bbox.maxY + gap),
             CGPoint(x: bbox.maxX - labelSize.width, y: bbox.maxY + gap),
             CGPoint(x: bbox.minX - labelSize.width - gap, y: bbox.minY),
             CGPoint(x: bbox.maxX + gap, y: bbox.minY)
         ].map { origin in
             CGRect(origin: origin, size: labelSize)
-        }
+        })
+        appendStack(origin: topLeft, direction: 1, count: 6)
 
-        for candidate in candidates where !labelCollides(
+        for candidate in candidates where !labelCollidesOtherLabels(
             candidate,
-            occupiedLabelRects: occupiedLabelRects,
-            groupRects: groupRects
+            occupiedLabelRects: occupiedLabelRects
         ) {
             return candidate
         }
 
-        var fallback = candidates.first ?? CGRect(origin: bbox.origin, size: labelSize)
-        let step = labelSize.height + 4
-        for _ in 0..<12 {
-            fallback.origin.y += step
-            if visibleRect.intersects(fallback), !labelCollides(
-                fallback,
-                occupiedLabelRects: occupiedLabelRects,
-                groupRects: groupRects
-            ) {
-                return fallback
-            }
-        }
-        return candidates.first ?? fallback
+        return candidates.first ?? CGRect(origin: topLeft, size: labelSize)
     }
 
-    private func labelCollides(
+    private func labelCollidesOtherLabels(
         _ rect: CGRect,
-        occupiedLabelRects: [CGRect],
-        groupRects: [CGRect]
+        occupiedLabelRects: [CGRect]
     ) -> Bool {
         for occupied in occupiedLabelRects where rect.intersects(occupied) {
-            return true
-        }
-        for groupRect in groupRects where rect.intersects(groupRect) {
             return true
         }
         return false

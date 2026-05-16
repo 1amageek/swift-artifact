@@ -356,14 +356,20 @@ extension GroupingStrategy {
         //    re-derives membership without reinterpreting Named Graph semantics
         //    (each edge already carries the graph attribution from parse time).
         let edgeMembersByGraphID = membersByNamedGraphFromEdges(graph: graph)
+        let baseMembersByGraphID = baseMembersByNamedGraph(
+            graph: graph,
+            edgeMembersByGraphID: edgeMembersByGraphID
+        )
         var result: [CompoundGraph.Group] = []
         result.reserveCapacity(graph.namedGraphs.count)
         for named in graph.namedGraphs {
             var seen: Set<CompoundGraph.Card.ID> = []
             var members: [CompoundGraph.Card.ID] = []
-            let nodeIDs = named.nodes.isEmpty
-                ? (edgeMembersByGraphID[named.id] ?? [])
-                : named.nodes
+            let nodeIDs = expandedMembers(
+                for: named.id,
+                baseMembersByGraphID: baseMembersByGraphID,
+                expanding: []
+            )
             members.reserveCapacity(nodeIDs.count)
             for nodeID in nodeIDs {
                 guard let cardID = cardIDsByNodeID[nodeID] else { continue }
@@ -372,7 +378,7 @@ extension GroupingStrategy {
                 }
             }
             guard !members.isEmpty else { continue }
-            let label = (named.label?.isEmpty == false) ? named.label! : named.id
+            let label = namedGraphLabel(for: named, in: graph) ?? named.id
             result.append(CompoundGraph.Group(
                 id: CompoundGraph.Group.ID(key: "namedGraph:\(named.id)"),
                 label: label,
@@ -382,6 +388,123 @@ extension GroupingStrategy {
             ))
         }
         return result
+    }
+
+    private func baseMembersByNamedGraph(
+        graph: KnowledgeGraph,
+        edgeMembersByGraphID: [String: [NodeIdentifier]]
+    ) -> [String: [NodeIdentifier]] {
+        var result: [String: [NodeIdentifier]] = [:]
+        result.reserveCapacity(graph.namedGraphs.count)
+        for named in graph.namedGraphs {
+            result[named.id] = named.nodes.isEmpty
+                ? (edgeMembersByGraphID[named.id] ?? [])
+                : named.nodes
+        }
+        return result
+    }
+
+    private func expandedMembers(
+        for graphID: String,
+        baseMembersByGraphID: [String: [NodeIdentifier]],
+        expanding: Set<String>
+    ) -> [NodeIdentifier] {
+        guard !expanding.contains(graphID) else { return [] }
+        let nextExpanding = expanding.union([graphID])
+        let baseMembers = baseMembersByGraphID[graphID] ?? []
+        var result: [NodeIdentifier] = []
+        var seen: Set<NodeIdentifier> = []
+        func append(_ nodeID: NodeIdentifier) {
+            if seen.insert(nodeID).inserted {
+                result.append(nodeID)
+            }
+        }
+        for nodeID in baseMembers {
+            append(nodeID)
+            guard nodeID.kind == .iri || nodeID.kind == .blank else { continue }
+            guard baseMembersByGraphID[nodeID.key] != nil else { continue }
+            for childNodeID in expandedMembers(
+                for: nodeID.key,
+                baseMembersByGraphID: baseMembersByGraphID,
+                expanding: nextExpanding
+            ) {
+                append(childNodeID)
+            }
+        }
+        return result
+    }
+
+    private func namedGraphLabel(for named: NamedGraph, in graph: KnowledgeGraph) -> String? {
+        if let label = named.label, !label.isEmpty {
+            return label
+        }
+        let candidates = graph.nodes.compactMap { node -> NodeIdentifier? in
+            switch node.id.kind {
+            case .iri, .blank:
+                return node.id.key == named.id ? node.id : nil
+            case .literal:
+                return nil
+            }
+        }
+        guard !candidates.isEmpty else { return nil }
+        let nodeByID = Dictionary(uniqueKeysWithValues: graph.nodes.map { ($0.id, $0) })
+        for candidate in candidates {
+            for edge in graph.edges where edge.source == candidate && isNamedGraphLabelPredicate(edge.predicate) {
+                guard edge.target.kind == .literal else { continue }
+                if let label = literalValue(for: edge.target, nodeByID: nodeByID), !label.isEmpty {
+                    return label
+                }
+            }
+        }
+        return nil
+    }
+
+    private func isNamedGraphLabelPredicate(_ predicate: String) -> Bool {
+        switch predicate {
+        case "http://www.w3.org/2000/01/rdf-schema#label",
+             "http://schema.org/name",
+             "https://schema.org/name",
+             "http://schema.org/title",
+             "https://schema.org/title",
+             "http://purl.org/dc/terms/title",
+             "http://purl.org/dc/elements/1.1/title":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func literalValue(
+        for id: NodeIdentifier,
+        nodeByID: [NodeIdentifier: Node]
+    ) -> String? {
+        guard id.kind == .literal else { return nil }
+        if let label = nodeByID[id]?.label, !label.isEmpty {
+            return label
+        }
+        return lexicalLiteralValue(from: id.key)
+    }
+
+    private func lexicalLiteralValue(from key: String) -> String? {
+        guard key.first == "\"" else { return nil }
+        var result = ""
+        var index = key.index(after: key.startIndex)
+        var escaped = false
+        while index < key.endIndex {
+            let character = key[index]
+            if escaped {
+                result.append(character)
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                return result
+            } else {
+                result.append(character)
+            }
+            index = key.index(after: index)
+        }
+        return nil
     }
 
     private func membersByNamedGraphFromEdges(

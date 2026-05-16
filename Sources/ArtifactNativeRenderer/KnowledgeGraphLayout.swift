@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import KnowledgeGraph
 
-/// Constraint-based layout for a `KnowledgeGraph`.
+/// Layered, Mermaid-inspired layout for a `KnowledgeGraph`.
 ///
 /// The pipeline is:
 ///
@@ -11,35 +11,33 @@ import KnowledgeGraph
 ///    rather than raw nodes, which eliminates the foaf:name "Alice" pattern
 ///    as an independent vertex.
 ///
-/// 2. **Constraint planning** — every card receives a personal radius from
-///    its size, direct degree, edge-label load, and group memberships. Every
-///    edge receives an ideal length from the endpoint radii, endpoint degree,
-///    label span, and whether the edge crosses group boundaries. High-degree
-///    or multi-group cards therefore reserve more radial and angular space.
+/// 2. **Layer assignment** — each connected component is cycle-broken into a
+///    DAG, then assigned left-to-right ranks with a longest-path pass. This
+///    mirrors the ELK layered pipeline used by BeautifulMermaidSwift instead
+///    of treating graph layout as a force simulation.
 ///
-/// 3. **Component seeding** — connected components are seeded independently.
-///    The highest-degree card starts each component and the remaining cards
-///    are placed by BFS order on a golden-angle spiral around it. Warm-start
-///    positions are preserved when available.
+/// 3. **Crossing reduction** — nodes in every rank are repeatedly sorted by
+///    neighbour barycentres in downward and upward sweeps, with group
+///    membership and source order as deterministic tie breakers.
 ///
-/// 4. **Constraint solving** — each iteration combines card repulsion,
-///    Hookean edge springs, same-group pseudo-springs, group cohesion, group
-///    bbox separation, a weak global gravity, and a cardinal-axis bias. This
-///    makes edge length, edge angle, hub fan-out, and group distance part of
-///    the same energy model instead of separate after-the-fact patches.
+/// 4. **Coordinate assignment** — rank gaps are computed from card sizes,
+///    edge-label span, degree load, and group boundaries. This keeps short
+///    labels short while still giving hubs enough vertical slots.
 ///
-/// 5. **Projection cleanup** — final passes project edge lengths toward their
-///    planned ideals, spread high-degree incident edges, compact sparse
-///    groups, eject non-members from group bboxes, and enforce card/group
-///    non-overlap. Non-overlap wins over exact spring length at the end.
+/// 5. **Distance projection and compaction** — node-node, group-node, and
+///    group-group clearances are projected as hard rectangle constraints.
+///    The remaining outline is compacted with fixed separation axes so no
+///    extra shelf or group gap survives before routing.
 ///
-/// 6. **Edge routing**. Each edge anchors on the boundary of its source and
-///    target rectangles, biased perpendicularly for parallel edges. Bezier
-///    control points are derived from the same perpendicular offset.
+/// 6. **Compound cleanup** — overlapping group components are kept as a
+///    single compaction unit, non-member cards are ejected from group bboxes,
+///    and card/group overlaps are resolved without returning to global force
+///    physics.
 ///
-/// 7. **Edge label slotting**. Labels start at the curve midpoint and slide
-///    perpendicular through a small ladder of offsets until they no longer
-///    overlap any card rectangle.
+/// 7. **Orthogonal edge routing** — each edge receives deterministic boundary
+///    ports and a Manhattan polyline. Parallel edges use separate lanes and
+///    labels prefer off-centre slots on the routed path, following Mermaid's
+///    orthogonal edge model.
 ///
 /// All steps are deterministic and pure functions of the input graph plus
 /// any warm-restart positions, so re-running the pipeline on the same
@@ -70,13 +68,53 @@ struct KnowledgeGraphLayout: Sendable {
         /// Quadratic Bezier control point. Equal to the midpoint of
         /// `start → end` for straight edges.
         let control: CGPoint
+        /// Orthogonal polyline points. Empty for legacy quadratic routes and
+        /// self-loops.
+        let points: [CGPoint]
         /// `true` when this edge is one of multiple parallel edges between
         /// the same pair of cards (or its sibling pair `(t, s)`) and needs a
         /// curved render.
         let isCurved: Bool
+
+        init(
+            start: CGPoint,
+            end: CGPoint,
+            control: CGPoint,
+            isCurved: Bool,
+            points: [CGPoint] = []
+        ) {
+            self.start = start
+            self.end = end
+            self.control = control
+            self.points = points
+            self.isCurved = isCurved
+        }
+
+        func translatedBy(dx: CGFloat, dy: CGFloat) -> EdgeRoute {
+            EdgeRoute(
+                start: CGPoint(x: start.x + dx, y: start.y + dy),
+                end: CGPoint(x: end.x + dx, y: end.y + dy),
+                control: CGPoint(x: control.x + dx, y: control.y + dy),
+                isCurved: isCurved,
+                points: points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+            )
+        }
     }
 
     static let defaultIterations = 200
+
+    private enum LayoutSpacing {
+        static let edgeEdge: CGFloat = 18
+        static let nodeNode: CGFloat = 40
+        static let edgeNode: CGFloat = 18
+        static let groupNode: CGFloat = 32
+        static let groupGroup: CGFloat = 72
+        static let portCornerGuard: CGFloat = 1
+
+        static let labelHeight: CGFloat = 18
+        static let connectedNodeNode: CGFloat = labelHeight + edgeNode * 2
+    }
+
     /// Desired empty space between adjacent card boundaries for a *large*
     /// graph (n ≥ 14). The actual centre-to-centre target for a graph edge
     /// adds the two cards' bounding radii on top of this, so cards never
@@ -97,9 +135,9 @@ struct KnowledgeGraphLayout: Sendable {
     }
 
     private static func estimatedEdgeLabelSpan(_ edge: CompoundGraph.CardEdge) -> Double {
-        let textSpan = min(Double(edge.predicate.count) * 7.0 + 22.0, 260.0)
-        let parallelSpan = Double(max(edge.parallelCount - 1, 0)) * 14.0
-        return textSpan + parallelSpan
+        let labelWidth = Double(edgeLabelSize(edge).width)
+        let parallelSpan = Double(max(edge.parallelCount - 1, 0)) * 18.0
+        return labelWidth + parallelSpan
     }
 
     /// Compute the layout for `graph`.
@@ -136,28 +174,19 @@ struct KnowledgeGraphLayout: Sendable {
 
         let sizes = compound.cards.map { $0.size }
         let radii = sizes.map { Double(hypot($0.width, $0.height)) / 2.0 }
-        let plan = makeLayoutPlan(
-            edges: compound.edges,
-            groups: compound.groups,
-            radii: radii,
-            sizes: sizes,
-            indexByID: indexByID
-        )
-        var positions = seedConstraintPositions(
+        var positions = computeLayeredPositions(
             cards: compound.cards,
             edges: compound.edges,
+            groups: compound.groups,
+            sizes: sizes,
+            indexByID: indexByID,
             initial: initial,
-            plan: plan
+            sweepLimit: max(8, min(32, iterations / 8))
         )
-
-        solveConstraintLayout(
+        finalizeLayeredLayout(
             positions: &positions,
-            plan: plan,
-            iterations: iterations
-        )
-        finalizeConstraintLayout(
-            positions: &positions,
-            plan: plan,
+            sizes: sizes,
+            radii: radii,
             edges: compound.edges,
             groups: compound.groups,
             indexByID: indexByID
@@ -167,18 +196,19 @@ struct KnowledgeGraphLayout: Sendable {
         // Groups need extra slack so their padded bbox + outside-top label
         // fit inside the canvas without clipping.
         let canvasPadding: CGFloat = compound.groups.isEmpty ? 36 : 64
-        let (cardPositions, canvasSize) = anchorAndCanvas(
+        var (cardPositions, canvasSize) = anchorAndCanvas(
             cards: compound.cards,
             centerPositions: positions,
             padding: canvasPadding
         )
 
         // Step 5 & 6: edge routes and label slotting.
-        let routes = computeEdgeRoutes(
+        var routes = computeEdgeRoutes(
             edges: compound.edges,
             cards: compound.cards,
             indexByID: indexByID,
-            cardPositions: cardPositions
+            cardPositions: cardPositions,
+            groups: compound.groups
         )
         let cardRects = compound.cards.map { card -> CGRect in
             // anchorAndCanvas produces an origin for every card, so a missing
@@ -188,17 +218,27 @@ struct KnowledgeGraphLayout: Sendable {
             }
             return CGRect(origin: origin, size: card.size)
         }
-        let labels = placeEdgeLabels(
+        var labels = placeEdgeLabels(
             edges: compound.edges,
             routes: routes,
             cardRects: cardRects
         )
 
-        let groupBoxes = computeGroupBoundingBoxes(
+        var groupBoxes = computeGroupBoundingBoxes(
             groups: compound.groups,
             cards: compound.cards,
             indexByID: indexByID,
             cardPositions: cardPositions
+        )
+        normalizeFinalGeometry(
+            cards: compound.cards,
+            edges: compound.edges,
+            cardPositions: &cardPositions,
+            edgeRoutes: &routes,
+            edgeLabelPositions: &labels,
+            groupBoundingBoxes: &groupBoxes,
+            canvasSize: &canvasSize,
+            padding: 24
         )
 
         return Result(
@@ -209,6 +249,1694 @@ struct KnowledgeGraphLayout: Sendable {
             groupBoundingBoxes: groupBoxes,
             canvasSize: canvasSize
         )
+    }
+
+    // MARK: - Layered layout model
+
+    private struct LayeredEdge: Sendable {
+        let source: Int
+        let target: Int
+        let order: Int
+        let labelSpan: Double
+    }
+
+    private struct LayeredComponentLayout: Sendable {
+        let indices: [Int]
+        let positions: [Int: CGPoint]
+        let rect: CGRect
+    }
+
+    private struct LayoutBlock: Sendable {
+        let id: Int
+        let groupIndex: Int?
+        let indices: [Int]
+        let localPositions: [Int: CGPoint]
+        let size: CGSize
+    }
+
+    private struct DisjointSet {
+        private var parents: [Int]
+        private var ranks: [Int]
+
+        init(count: Int) {
+            self.parents = Array(0..<count)
+            self.ranks = Array(repeating: 0, count: count)
+        }
+
+        mutating func find(_ value: Int) -> Int {
+            if parents[value] != value {
+                parents[value] = find(parents[value])
+            }
+            return parents[value]
+        }
+
+        mutating func union(_ lhs: Int, _ rhs: Int) {
+            let left = find(lhs)
+            let right = find(rhs)
+            guard left != right else { return }
+            if ranks[left] < ranks[right] {
+                parents[left] = right
+            } else if ranks[left] > ranks[right] {
+                parents[right] = left
+            } else {
+                parents[right] = left
+                ranks[left] += 1
+            }
+        }
+    }
+
+    private static func computeLayeredPositions(
+        cards: [CompoundGraph.Card],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        sizes: [CGSize],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        initial: [NodeIdentifier: CGPoint],
+        sweepLimit: Int
+    ) -> [CGPoint] {
+        let count = cards.count
+        guard count > 1 else {
+            return cards.isEmpty ? [] : [CGPoint(x: 0, y: 0)]
+        }
+
+        var layeredEdges: [LayeredEdge] = []
+        layeredEdges.reserveCapacity(edges.count)
+        for (order, edge) in edges.enumerated() {
+            guard
+                let source = indexByID[edge.source],
+                let target = indexByID[edge.target]
+            else { continue }
+            if source != target {
+                layeredEdges.append(LayeredEdge(
+                    source: source,
+                    target: target,
+                    order: order,
+                    labelSpan: estimatedEdgeLabelSpan(edge)
+                ))
+            }
+        }
+
+        let membership = groupMembershipIndex(groups: groups, indexByID: indexByID)
+        let blocks = makeLayoutBlocks(
+            groups: groups,
+            sizes: sizes,
+            edges: layeredEdges,
+            membership: membership,
+            initial: initial,
+            cards: cards,
+            sweepLimit: sweepLimit
+        )
+        guard blocks.count > 1 else {
+            var result = Array(repeating: CGPoint.zero, count: count)
+            if let block = blocks.first {
+                for index in block.indices {
+                    result[index] = block.localPositions[index] ?? .zero
+                }
+            }
+            return result
+        }
+
+        var blockByCard: [Int: Int] = [:]
+        blockByCard.reserveCapacity(count)
+        for block in blocks {
+            for index in block.indices {
+                blockByCard[index] = block.id
+            }
+        }
+        let blockSizes = blocks.map(\.size)
+        let macroEdges = makeBlockEdges(
+            cardEdges: layeredEdges,
+            blockByCard: blockByCard
+        )
+
+        var disjointSet = DisjointSet(count: blocks.count)
+        for edge in macroEdges where edge.source != edge.target {
+            disjointSet.union(edge.source, edge.target)
+        }
+        var componentMembers: [Int: [Int]] = [:]
+        for index in blocks.indices {
+            componentMembers[disjointSet.find(index), default: []].append(index)
+        }
+        let blockComponents = componentMembers.values
+            .map { $0.sorted() }
+            .sorted { lhs, rhs in
+                (lhs.first ?? 0) < (rhs.first ?? 0)
+            }
+        let blockLayouts = blockComponents.map { component in
+            layoutLayeredBlockComponent(
+                indices: component,
+                edges: macroEdges.filter { component.contains($0.source) && component.contains($0.target) },
+                sizes: blockSizes,
+                sweepLimit: sweepLimit,
+                optimizeOutlineWrap: groups.isEmpty
+            )
+        }
+        let blockCenters = packLayeredComponents(
+            blockLayouts,
+            sizes: blockSizes,
+            cardCount: blocks.count
+        )
+
+        var result = Array(repeating: CGPoint.zero, count: count)
+        for block in blocks {
+            let blockCenter = blockCenters[block.id]
+            for index in block.indices {
+                let local = block.localPositions[index] ?? .zero
+                result[index] = CGPoint(
+                    x: blockCenter.x + local.x,
+                    y: blockCenter.y + local.y
+                )
+            }
+        }
+        return result
+    }
+
+    private static func makeLayoutBlocks(
+        groups: [CompoundGraph.Group],
+        sizes: [CGSize],
+        edges: [LayeredEdge],
+        membership: GroupMembershipIndex,
+        initial: [NodeIdentifier: CGPoint],
+        cards: [CompoundGraph.Card],
+        sweepLimit: Int
+    ) -> [LayoutBlock] {
+        let count = sizes.count
+        let primaryGroupByCard = primaryGroupByCard(
+            cardCount: count,
+            groups: groups,
+            membership: membership
+        )
+
+        var ownedByGroup: [Int: [Int]] = [:]
+        for (cardIndex, groupIndex) in primaryGroupByCard {
+            ownedByGroup[groupIndex, default: []].append(cardIndex)
+        }
+
+        var blocks: [LayoutBlock] = []
+        blocks.reserveCapacity(groups.count + count)
+        var assigned: Set<Int> = []
+        for groupIndex in groups.indices {
+            let indices = (ownedByGroup[groupIndex] ?? []).sorted()
+            guard !indices.isEmpty else { continue }
+            let block = makeGroupLayoutBlock(
+                id: blocks.count,
+                groupIndex: groupIndex,
+                indices: indices,
+                group: groups[groupIndex],
+                sizes: sizes,
+                edges: edges,
+                membership: membership,
+                initial: initial,
+                cards: cards,
+                sweepLimit: sweepLimit,
+                useVerticalBase: groups.count > 1 || hasExternalEdges(indices: indices, edges: edges)
+            )
+            assigned.formUnion(indices)
+            blocks.append(block)
+        }
+
+        for index in 0..<count {
+            guard !assigned.contains(index) else { continue }
+            let size = sizes[index]
+            blocks.append(LayoutBlock(
+                id: blocks.count,
+                groupIndex: nil,
+                indices: [index],
+                localPositions: [index: .zero],
+                size: size
+            ))
+        }
+        return blocks
+    }
+
+    private static func primaryGroupByCard(
+        cardCount: Int,
+        groups: [CompoundGraph.Group],
+        membership: GroupMembershipIndex
+    ) -> [Int: Int] {
+        var result: [Int: Int] = [:]
+        result.reserveCapacity(cardCount)
+        for index in 0..<cardCount {
+            guard let groupIndices = membership.memberToGroups[index], !groupIndices.isEmpty else {
+                continue
+            }
+            let primary = groupIndices.min { lhs, rhs in
+                let leftCount = groups.indices.contains(lhs) ? groups[lhs].members.count : Int.max
+                let rightCount = groups.indices.contains(rhs) ? groups[rhs].members.count : Int.max
+                if leftCount != rightCount {
+                    return leftCount < rightCount
+                }
+                return lhs < rhs
+            }
+            if let primary {
+                result[index] = primary
+            }
+        }
+        return result
+    }
+
+    private static func makeGroupLayoutBlock(
+        id: Int,
+        groupIndex: Int,
+        indices: [Int],
+        group: CompoundGraph.Group,
+        sizes: [CGSize],
+        edges: [LayeredEdge],
+        membership: GroupMembershipIndex,
+        initial: [NodeIdentifier: CGPoint],
+        cards: [CompoundGraph.Card],
+        sweepLimit: Int,
+        useVerticalBase: Bool
+    ) -> LayoutBlock {
+        let localLayout: LayeredComponentLayout
+        if useVerticalBase {
+            localLayout = layoutVerticalGroupComponent(
+                indices: indices,
+                edges: edges,
+                sizes: sizes
+            )
+        } else {
+            let indexSet = Set(indices)
+            let localEdges = edges.filter { indexSet.contains($0.source) && indexSet.contains($0.target) }
+            localLayout = layoutLayeredComponent(
+                indices: indices,
+                edges: localEdges,
+                sizes: sizes,
+                membership: membership,
+                initial: initial,
+                cards: cards,
+                sweepLimit: sweepLimit,
+                optimizeOutlineWrap: false
+            )
+        }
+        let padding = group.style.padding
+        let rect = localLayout.rect.insetBy(dx: -padding, dy: -padding)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        var localPositions: [Int: CGPoint] = [:]
+        localPositions.reserveCapacity(indices.count)
+        for index in indices {
+            let point = localLayout.positions[index] ?? .zero
+            localPositions[index] = CGPoint(
+                x: point.x - center.x,
+                y: point.y - center.y
+            )
+        }
+        return LayoutBlock(
+            id: id,
+            groupIndex: groupIndex,
+            indices: indices,
+            localPositions: localPositions,
+            size: CGSize(width: rect.width, height: rect.height)
+        )
+    }
+
+    private static func hasExternalEdges(
+        indices: [Int],
+        edges: [LayeredEdge]
+    ) -> Bool {
+        let indexSet = Set(indices)
+        for edge in edges {
+            let sourceInside = indexSet.contains(edge.source)
+            let targetInside = indexSet.contains(edge.target)
+            if sourceInside != targetInside {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func layoutVerticalGroupComponent(
+        indices: [Int],
+        edges: [LayeredEdge],
+        sizes: [CGSize]
+    ) -> LayeredComponentLayout {
+        guard indices.count > 1 else {
+            let index = indices[0]
+            let positions = [index: CGPoint(x: 0, y: 0)]
+            return LayeredComponentLayout(
+                indices: indices,
+                positions: positions,
+                rect: componentRect(indices: indices, positions: positions, sizes: sizes)
+            )
+        }
+
+        let indexSet = Set(indices)
+        let localEdges = edges.filter { indexSet.contains($0.source) && indexSet.contains($0.target) }
+        let ranks = assignLayerRanks(indices: indices, edges: localEdges)
+        let degree = layeredDegrees(indices: indices, edges: edges)
+        let externalOrder = externalEdgeOrder(indices: indices, edges: edges)
+        let ordered = indices.sorted { lhs, rhs in
+            let leftRank = ranks[lhs] ?? 0
+            let rightRank = ranks[rhs] ?? 0
+            if leftRank != rightRank {
+                return leftRank < rightRank
+            }
+            let leftExternal = externalOrder[lhs] ?? Int.max
+            let rightExternal = externalOrder[rhs] ?? Int.max
+            if leftExternal != rightExternal {
+                return leftExternal < rightExternal
+            }
+            let leftDegree = degree[lhs] ?? 0
+            let rightDegree = degree[rhs] ?? 0
+            if leftDegree != rightDegree {
+                return leftDegree > rightDegree
+            }
+            return lhs < rhs
+        }
+
+        var cursor: CGFloat = 0
+        var positions: [Int: CGPoint] = [:]
+        positions.reserveCapacity(indices.count)
+        for (offset, index) in ordered.enumerated() {
+            if offset > 0 {
+                cursor += verticalGroupNodeGap(
+                    between: ordered[offset - 1],
+                    and: index,
+                    edges: localEdges
+                )
+            }
+            cursor += sizes[index].height / 2
+            positions[index] = CGPoint(x: 0, y: cursor)
+            cursor += sizes[index].height / 2
+        }
+        return LayeredComponentLayout(
+            indices: indices,
+            positions: positions,
+            rect: componentRect(indices: indices, positions: positions, sizes: sizes)
+        )
+    }
+
+    private static func verticalGroupNodeGap(
+        between lhs: Int,
+        and rhs: Int,
+        edges: [LayeredEdge]
+    ) -> CGFloat {
+        let multiplicity = edges.reduce(0) { partial, edge in
+            let matchesForward = edge.source == lhs && edge.target == rhs
+            let matchesBackward = edge.source == rhs && edge.target == lhs
+            return partial + (matchesForward || matchesBackward ? 1 : 0)
+        }
+        guard multiplicity > 0 else {
+            return LayoutSpacing.nodeNode
+        }
+        let parallelReserve = CGFloat(max(multiplicity - 1, 0)) * LayoutSpacing.edgeEdge
+        return max(LayoutSpacing.nodeNode, LayoutSpacing.connectedNodeNode + parallelReserve)
+    }
+
+    private static func externalEdgeOrder(
+        indices: [Int],
+        edges: [LayeredEdge]
+    ) -> [Int: Int] {
+        let indexSet = Set(indices)
+        var result: [Int: Int] = [:]
+        for edge in edges {
+            let sourceInside = indexSet.contains(edge.source)
+            let targetInside = indexSet.contains(edge.target)
+            guard sourceInside != targetInside else { continue }
+            let inside = sourceInside ? edge.source : edge.target
+            result[inside] = min(result[inside] ?? Int.max, edge.order)
+        }
+        return result
+    }
+
+    private static func makeBlockEdges(
+        cardEdges: [LayeredEdge],
+        blockByCard: [Int: Int]
+    ) -> [LayeredEdge] {
+        var result: [LayeredEdge] = []
+        result.reserveCapacity(cardEdges.count)
+        var bestByPair: [UInt64: LayeredEdge] = [:]
+        for edge in cardEdges {
+            guard
+                let source = blockByCard[edge.source],
+                let target = blockByCard[edge.target],
+                source != target
+            else { continue }
+            let key = pairKey(source, target)
+            let candidate = LayeredEdge(
+                source: source,
+                target: target,
+                order: edge.order,
+                labelSpan: edge.labelSpan
+            )
+            if let existing = bestByPair[key] {
+                bestByPair[key] = LayeredEdge(
+                    source: existing.source,
+                    target: existing.target,
+                    order: min(existing.order, candidate.order),
+                    labelSpan: max(existing.labelSpan, candidate.labelSpan)
+                )
+            } else {
+                bestByPair[key] = candidate
+            }
+        }
+        for edge in bestByPair.values.sorted(by: layeredEdgeSort) {
+            result.append(edge)
+        }
+        return result
+    }
+
+    private static func layoutLayeredBlockComponent(
+        indices: [Int],
+        edges: [LayeredEdge],
+        sizes: [CGSize],
+        sweepLimit: Int,
+        optimizeOutlineWrap: Bool
+    ) -> LayeredComponentLayout {
+        guard indices.count > 1 else {
+            let index = indices[0]
+            let positions = [index: CGPoint(x: 0, y: 0)]
+            return LayeredComponentLayout(
+                indices: indices,
+                positions: positions,
+                rect: componentRect(indices: indices, positions: positions, sizes: sizes)
+            )
+        }
+
+        let degree = layeredDegrees(indices: indices, edges: edges)
+        var ranks = assignLayerRanks(indices: indices, edges: edges)
+        let minRank = ranks.values.min() ?? 0
+        for index in ranks.keys {
+            ranks[index] = (ranks[index] ?? 0) - minRank
+        }
+        let rankCount = (ranks.values.max() ?? 0) + 1
+        var layers = Array(repeating: [Int](), count: rankCount)
+        for index in indices {
+            layers[ranks[index] ?? 0].append(index)
+        }
+        for rank in layers.indices {
+            layers[rank].sort { lhs, rhs in
+                let leftDegree = degree[lhs] ?? 0
+                let rightDegree = degree[rhs] ?? 0
+                if leftDegree != rightDegree {
+                    return leftDegree > rightDegree
+                }
+                return lhs < rhs
+            }
+        }
+        layers = reduceLayerCrossingsForBlocks(
+            layers: layers,
+            ranks: ranks,
+            edges: edges,
+            degree: degree,
+            sweeps: sweepLimit
+        )
+
+        let membership = GroupMembershipIndex(memberToGroups: [:], groupMembers: [])
+        var positions = assignLayeredCoordinates(
+            layers: layers,
+            ranks: ranks,
+            edges: edges,
+            sizes: sizes,
+            degree: degree,
+            membership: membership,
+            optimizeOutlineWrap: optimizeOutlineWrap
+        )
+        relaxLayeredYCoordinates(
+            positions: &positions,
+            layers: layers,
+            edges: edges,
+            sizes: sizes,
+            iterations: 8
+        )
+
+        return LayeredComponentLayout(
+            indices: indices,
+            positions: positions,
+            rect: componentRect(indices: indices, positions: positions, sizes: sizes)
+        )
+    }
+
+    private static func layoutLayeredComponent(
+        indices: [Int],
+        edges: [LayeredEdge],
+        sizes: [CGSize],
+        membership: GroupMembershipIndex,
+        initial: [NodeIdentifier: CGPoint],
+        cards: [CompoundGraph.Card],
+        sweepLimit: Int,
+        optimizeOutlineWrap: Bool
+    ) -> LayeredComponentLayout {
+        guard indices.count > 1 else {
+            let index = indices[0]
+            let positions = [index: CGPoint(x: 0, y: 0)]
+            return LayeredComponentLayout(
+                indices: indices,
+                positions: positions,
+                rect: componentRect(indices: indices, positions: positions, sizes: sizes)
+            )
+        }
+
+        let degree = layeredDegrees(indices: indices, edges: edges)
+        var ranks = assignLayerRanks(indices: indices, edges: edges)
+        let minRank = ranks.values.min() ?? 0
+        for index in ranks.keys {
+            ranks[index] = (ranks[index] ?? 0) - minRank
+        }
+
+        let rankCount = (ranks.values.max() ?? 0) + 1
+        var layers = Array(repeating: [Int](), count: rankCount)
+        for index in indices {
+            let rank = ranks[index] ?? 0
+            layers[rank].append(index)
+        }
+        for rank in layers.indices {
+            layers[rank].sort {
+                layeredInitialOrder(
+                    lhs: $0,
+                    rhs: $1,
+                    membership: membership,
+                    degree: degree,
+                    initial: initial,
+                    cards: cards
+                )
+            }
+        }
+
+        layers = reduceLayerCrossings(
+            layers: layers,
+            ranks: ranks,
+            edges: edges,
+            membership: membership,
+            degree: degree,
+            initial: initial,
+            cards: cards,
+            sweeps: sweepLimit
+        )
+
+        var positions = assignLayeredCoordinates(
+            layers: layers,
+            ranks: ranks,
+            edges: edges,
+            sizes: sizes,
+            degree: degree,
+            membership: membership,
+            optimizeOutlineWrap: optimizeOutlineWrap
+        )
+        relaxLayeredYCoordinates(
+            positions: &positions,
+            layers: layers,
+            edges: edges,
+            sizes: sizes,
+            iterations: 10
+        )
+
+        return LayeredComponentLayout(
+            indices: indices,
+            positions: positions,
+            rect: componentRect(indices: indices, positions: positions, sizes: sizes)
+        )
+    }
+
+    private static func layeredDegrees(
+        indices: [Int],
+        edges: [LayeredEdge]
+    ) -> [Int: Int] {
+        var result = Dictionary(uniqueKeysWithValues: indices.map { ($0, 0) })
+        var seenPairs: Set<UInt64> = []
+        for edge in edges where edge.source != edge.target {
+            let key = pairKey(edge.source, edge.target)
+            guard seenPairs.insert(key).inserted else { continue }
+            result[edge.source, default: 0] += 1
+            result[edge.target, default: 0] += 1
+        }
+        return result
+    }
+
+    private static func assignLayerRanks(
+        indices: [Int],
+        edges: [LayeredEdge]
+    ) -> [Int: Int] {
+        let localByGlobal = Dictionary(uniqueKeysWithValues: indices.enumerated().map { ($0.element, $0.offset) })
+        let globalByLocal = indices
+        var dag = Array(repeating: Set<Int>(), count: indices.count)
+        var seenDirected: Set<UInt64> = []
+
+        for edge in edges.sorted(by: layeredEdgeSort) {
+            guard
+                let source = localByGlobal[edge.source],
+                let target = localByGlobal[edge.target],
+                source != target
+            else { continue }
+            let directedKey = (UInt64(source) << 32) | UInt64(target)
+            guard seenDirected.insert(directedKey).inserted else { continue }
+
+            if !pathExists(from: target, to: source, adjacency: dag) {
+                dag[source].insert(target)
+            } else if !pathExists(from: source, to: target, adjacency: dag) {
+                dag[target].insert(source)
+            }
+        }
+
+        var indegree = Array(repeating: 0, count: indices.count)
+        for source in dag.indices {
+            for target in dag[source] {
+                indegree[target] += 1
+            }
+        }
+
+        var queue = indegree.indices
+            .filter { indegree[$0] == 0 }
+            .sorted { globalByLocal[$0] < globalByLocal[$1] }
+        var cursor = 0
+        var rank = Array(repeating: 0, count: indices.count)
+        while cursor < queue.count {
+            let source = queue[cursor]
+            cursor += 1
+            for target in dag[source].sorted(by: { globalByLocal[$0] < globalByLocal[$1] }) {
+                rank[target] = max(rank[target], rank[source] + 1)
+                indegree[target] -= 1
+                if indegree[target] == 0 {
+                    queue.append(target)
+                    queue[cursor...].sort { globalByLocal[$0] < globalByLocal[$1] }
+                }
+            }
+        }
+
+        return Dictionary(uniqueKeysWithValues: indices.enumerated().map { offset, global in
+            (global, rank[offset])
+        })
+    }
+
+    private static func pathExists(
+        from start: Int,
+        to target: Int,
+        adjacency: [Set<Int>]
+    ) -> Bool {
+        if start == target { return true }
+        var visited: Set<Int> = [start]
+        var stack = [start]
+        while let node = stack.popLast() {
+            for next in adjacency[node] where !visited.contains(next) {
+                if next == target { return true }
+                visited.insert(next)
+                stack.append(next)
+            }
+        }
+        return false
+    }
+
+    private static func layeredEdgeSort(_ lhs: LayeredEdge, _ rhs: LayeredEdge) -> Bool {
+        if lhs.order != rhs.order { return lhs.order < rhs.order }
+        if lhs.source != rhs.source { return lhs.source < rhs.source }
+        return lhs.target < rhs.target
+    }
+
+    private static func layeredInitialOrder(
+        lhs: Int,
+        rhs: Int,
+        membership: GroupMembershipIndex,
+        degree: [Int: Int],
+        initial: [NodeIdentifier: CGPoint],
+        cards: [CompoundGraph.Card]
+    ) -> Bool {
+        let leftGroup = primaryGroupIndex(lhs, membership: membership)
+        let rightGroup = primaryGroupIndex(rhs, membership: membership)
+        if leftGroup != rightGroup {
+            return leftGroup < rightGroup
+        }
+        let leftInitial = initial[cards[lhs].id.nodeID]
+        let rightInitial = initial[cards[rhs].id.nodeID]
+        if let leftInitial, let rightInitial, leftInitial.y != rightInitial.y {
+            return leftInitial.y < rightInitial.y
+        }
+        let leftDegree = degree[lhs] ?? 0
+        let rightDegree = degree[rhs] ?? 0
+        if leftDegree != rightDegree {
+            return leftDegree > rightDegree
+        }
+        return lhs < rhs
+    }
+
+    private static func primaryGroupIndex(
+        _ index: Int,
+        membership: GroupMembershipIndex
+    ) -> Int {
+        membership.memberToGroups[index]?.min() ?? Int.max
+    }
+
+    private static func reduceLayerCrossings(
+        layers inputLayers: [[Int]],
+        ranks: [Int: Int],
+        edges: [LayeredEdge],
+        membership: GroupMembershipIndex,
+        degree: [Int: Int],
+        initial: [NodeIdentifier: CGPoint],
+        cards: [CompoundGraph.Card],
+        sweeps: Int
+    ) -> [[Int]] {
+        guard inputLayers.count > 1 else { return inputLayers }
+        var layers = inputLayers
+
+        for _ in 0..<sweeps {
+            for rank in 1..<layers.count {
+                sortLayerByBarycenter(
+                    layer: &layers[rank],
+                    ranks: ranks,
+                    referenceRanks: Set(0..<rank),
+                    layers: layers,
+                    edges: edges,
+                    membership: membership,
+                    degree: degree,
+                    initial: initial,
+                    cards: cards
+                )
+            }
+            if layers.count > 1 {
+                for rank in stride(from: layers.count - 2, through: 0, by: -1) {
+                    sortLayerByBarycenter(
+                        layer: &layers[rank],
+                        ranks: ranks,
+                        referenceRanks: Set((rank + 1)..<layers.count),
+                        layers: layers,
+                        edges: edges,
+                        membership: membership,
+                        degree: degree,
+                        initial: initial,
+                        cards: cards
+                    )
+                }
+            }
+        }
+        return layers
+    }
+
+    private static func sortLayerByBarycenter(
+        layer: inout [Int],
+        ranks: [Int: Int],
+        referenceRanks: Set<Int>,
+        layers: [[Int]],
+        edges: [LayeredEdge],
+        membership: GroupMembershipIndex,
+        degree: [Int: Int],
+        initial: [NodeIdentifier: CGPoint],
+        cards: [CompoundGraph.Card]
+    ) {
+        let order = layerOrderMap(layers)
+        func barycenter(for node: Int) -> Double? {
+            var total = 0.0
+            var count = 0.0
+            for edge in edges {
+                let other: Int
+                if edge.source == node {
+                    other = edge.target
+                } else if edge.target == node {
+                    other = edge.source
+                } else {
+                    continue
+                }
+                guard let rank = ranks[other], referenceRanks.contains(rank) else { continue }
+                total += order[other] ?? 0
+                count += 1
+            }
+            guard count > 0 else { return nil }
+            return total / count
+        }
+
+        layer.sort { lhs, rhs in
+            let leftBarycenter = barycenter(for: lhs)
+            let rightBarycenter = barycenter(for: rhs)
+            switch (leftBarycenter, rightBarycenter) {
+            case let (left?, right?) where abs(left - right) > 0.0001:
+                return left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return layeredInitialOrder(
+                    lhs: lhs,
+                    rhs: rhs,
+                    membership: membership,
+                    degree: degree,
+                    initial: initial,
+                    cards: cards
+                )
+            }
+        }
+    }
+
+    private static func reduceLayerCrossingsForBlocks(
+        layers inputLayers: [[Int]],
+        ranks: [Int: Int],
+        edges: [LayeredEdge],
+        degree: [Int: Int],
+        sweeps: Int
+    ) -> [[Int]] {
+        guard inputLayers.count > 1 else { return inputLayers }
+        var layers = inputLayers
+        for _ in 0..<sweeps {
+            for rank in 1..<layers.count {
+                sortBlockLayerByBarycenter(
+                    layer: &layers[rank],
+                    ranks: ranks,
+                    referenceRanks: Set(0..<rank),
+                    layers: layers,
+                    edges: edges,
+                    degree: degree
+                )
+            }
+            if layers.count > 1 {
+                for rank in stride(from: layers.count - 2, through: 0, by: -1) {
+                    sortBlockLayerByBarycenter(
+                        layer: &layers[rank],
+                        ranks: ranks,
+                        referenceRanks: Set((rank + 1)..<layers.count),
+                        layers: layers,
+                        edges: edges,
+                        degree: degree
+                    )
+                }
+            }
+        }
+        return layers
+    }
+
+    private static func sortBlockLayerByBarycenter(
+        layer: inout [Int],
+        ranks: [Int: Int],
+        referenceRanks: Set<Int>,
+        layers: [[Int]],
+        edges: [LayeredEdge],
+        degree: [Int: Int]
+    ) {
+        let order = layerOrderMap(layers)
+        func barycenter(for node: Int) -> Double? {
+            var total = 0.0
+            var count = 0.0
+            for edge in edges {
+                let other: Int
+                if edge.source == node {
+                    other = edge.target
+                } else if edge.target == node {
+                    other = edge.source
+                } else {
+                    continue
+                }
+                guard let rank = ranks[other], referenceRanks.contains(rank) else { continue }
+                total += order[other] ?? 0
+                count += 1
+            }
+            guard count > 0 else { return nil }
+            return total / count
+        }
+
+        layer.sort { lhs, rhs in
+            let leftBarycenter = barycenter(for: lhs)
+            let rightBarycenter = barycenter(for: rhs)
+            switch (leftBarycenter, rightBarycenter) {
+            case let (left?, right?) where abs(left - right) > 0.0001:
+                return left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                let leftDegree = degree[lhs] ?? 0
+                let rightDegree = degree[rhs] ?? 0
+                if leftDegree != rightDegree {
+                    return leftDegree > rightDegree
+                }
+                return lhs < rhs
+            }
+        }
+    }
+
+    private static func layerOrderMap(_ layers: [[Int]]) -> [Int: Double] {
+        var result: [Int: Double] = [:]
+        for layer in layers {
+            for (offset, node) in layer.enumerated() {
+                result[node] = Double(offset)
+            }
+        }
+        return result
+    }
+
+    private static func assignLayeredCoordinates(
+        layers: [[Int]],
+        ranks: [Int: Int],
+        edges: [LayeredEdge],
+        sizes: [CGSize],
+        degree: [Int: Int],
+        membership: GroupMembershipIndex,
+        optimizeOutlineWrap: Bool
+    ) -> [Int: CGPoint] {
+        struct RankBand {
+            let ranks: [Int]
+            let width: Double
+            let height: Double
+        }
+
+        let rankWidths = layers.map { layer in
+            layer.map { Double(sizes[$0].width) }.max() ?? 0
+        }
+        let gapBeforeRank = layers.indices.map { rank in
+            rank == 0 ? 0.0 : layerGap(
+                before: rank,
+                ranks: ranks,
+                edges: edges,
+                degree: degree,
+                membership: membership
+            )
+        }
+
+        var layerHeights: [Double] = []
+        layerHeights.reserveCapacity(layers.count)
+        for layer in layers {
+            guard !layer.isEmpty else {
+                layerHeights.append(0)
+                continue
+            }
+            var height = 0.0
+            for (offset, index) in layer.enumerated() {
+                if offset > 0 {
+                    height += verticalGap(
+                        between: layer[offset - 1],
+                        and: index,
+                        degree: degree,
+                        membership: membership
+                    )
+                }
+                height += Double(sizes[index].height)
+            }
+            layerHeights.append(height)
+        }
+
+        let tallestRank = max(layerHeights.max() ?? 0, 1.0)
+        let bandGap = max(118.0, tallestRank * 0.34)
+        let bands: [RankBand]
+        if optimizeOutlineWrap {
+            bands = optimizedRankBands(
+                rankWidths: rankWidths,
+                rankHeights: layerHeights,
+                gapBeforeRank: gapBeforeRank,
+                bandGap: bandGap
+            ).map { band in
+                RankBand(ranks: band.ranks, width: band.width, height: band.height)
+            }
+        } else {
+            bands = greedyRankBands(
+                rankWidths: rankWidths,
+                rankHeights: layerHeights,
+                gapBeforeRank: gapBeforeRank
+            ).map { band in
+                RankBand(ranks: band.ranks, width: band.width, height: band.height)
+            }
+        }
+
+        var xByRank = Array(repeating: 0.0, count: layers.count)
+        var yBaseByRank = Array(repeating: 0.0, count: layers.count)
+        var bandTop = 0.0
+        for (bandIndex, band) in bands.enumerated() {
+            var cursor = 0.0
+            for (offset, rank) in band.ranks.enumerated() {
+                if offset > 0 {
+                    cursor += gapBeforeRank[rank]
+                }
+                let centerX = cursor + rankWidths[rank] * 0.5
+                xByRank[rank] = bandIndex.isMultiple(of: 2)
+                    ? centerX
+                    : band.width - centerX
+                yBaseByRank[rank] = bandTop + band.height * 0.5
+                cursor += rankWidths[rank]
+            }
+            bandTop += band.height + bandGap
+        }
+
+        var positions: [Int: CGPoint] = [:]
+        for (rank, layer) in layers.enumerated() {
+            var yCursor = yBaseByRank[rank] - layerHeights[rank] * 0.5
+            for (offset, index) in layer.enumerated() {
+                if offset > 0 {
+                    yCursor += verticalGap(
+                        between: layer[offset - 1],
+                        and: index,
+                        degree: degree,
+                        membership: membership
+                    )
+                }
+                yCursor += Double(sizes[index].height) * 0.5
+                positions[index] = CGPoint(x: xByRank[rank], y: yCursor)
+                yCursor += Double(sizes[index].height) * 0.5
+            }
+        }
+        return positions
+    }
+
+    private struct OptimizedRankBand {
+        let ranks: [Int]
+        let width: Double
+        let height: Double
+    }
+
+    private static func greedyRankBands(
+        rankWidths: [Double],
+        rankHeights: [Double],
+        gapBeforeRank: [Double]
+    ) -> [OptimizedRankBand] {
+        guard !rankWidths.isEmpty else { return [] }
+        let targetAspect = 1.5
+        let unwrappedWidth = rankWidths.enumerated().reduce(0.0) { partial, entry in
+            partial + entry.element + (entry.offset == 0 ? 0.0 : gapBeforeRank[entry.offset])
+        }
+        let tallestRank = max(rankHeights.max() ?? 0, 1.0)
+        let widestAdjacentPair = rankWidths.indices.dropLast().reduce(0.0) { partial, rank in
+            max(partial, rankWidths[rank] + gapBeforeRank[rank + 1] + rankWidths[rank + 1])
+        }
+        let widestThreeRankRun = rankWidths.indices.dropLast(2).reduce(0.0) { partial, rank in
+            max(
+                partial,
+                rankWidths[rank]
+                    + gapBeforeRank[rank + 1]
+                    + rankWidths[rank + 1]
+                    + gapBeforeRank[rank + 2]
+                    + rankWidths[rank + 2]
+            )
+        }
+        let minimumWrappedWidth = rankWidths.count >= 6
+            ? max(widestAdjacentPair, widestThreeRankRun)
+            : widestAdjacentPair
+        let targetWidth = min(
+            max(max(920.0, minimumWrappedWidth), sqrt(unwrappedWidth * tallestRank * targetAspect) * 1.25),
+            max(unwrappedWidth, 920.0)
+        )
+        let unwrappedAspect = unwrappedWidth / tallestRank
+        let shouldWrap = rankWidths.count >= 3
+            && unwrappedWidth > 760
+            && unwrappedAspect > targetAspect * 1.35
+        let wrapWidth = shouldWrap ? targetWidth : Double.greatestFiniteMagnitude
+
+        var bands: [OptimizedRankBand] = []
+        var currentRanks: [Int] = []
+        var currentWidth = 0.0
+        var currentHeight = 0.0
+        func finishBand() {
+            guard !currentRanks.isEmpty else { return }
+            bands.append(OptimizedRankBand(
+                ranks: currentRanks,
+                width: currentWidth,
+                height: currentHeight
+            ))
+            currentRanks.removeAll(keepingCapacity: true)
+            currentWidth = 0
+            currentHeight = 0
+        }
+
+        for rank in rankWidths.indices {
+            let addedWidth = currentRanks.isEmpty
+                ? rankWidths[rank]
+                : gapBeforeRank[rank] + rankWidths[rank]
+            if !currentRanks.isEmpty, currentWidth + addedWidth > wrapWidth {
+                finishBand()
+            }
+            currentRanks.append(rank)
+            currentWidth += currentRanks.count == 1 ? rankWidths[rank] : gapBeforeRank[rank] + rankWidths[rank]
+            currentHeight = max(currentHeight, rankHeights[rank])
+        }
+        finishBand()
+        return bands
+    }
+
+    private struct RankBandLayoutScore {
+        let aspectViolation: Double
+        let area: Double
+        let aspectDelta: Double
+        let bandCount: Int
+
+        func isBetter(than other: RankBandLayoutScore) -> Bool {
+            if abs(aspectViolation - other.aspectViolation) > 0.001 {
+                return aspectViolation < other.aspectViolation
+            }
+            if abs(area - other.area) > 0.001 {
+                return area < other.area
+            }
+            if abs(aspectDelta - other.aspectDelta) > 0.001 {
+                return aspectDelta < other.aspectDelta
+            }
+            return bandCount < other.bandCount
+        }
+    }
+
+    private struct RankBandDPState {
+        let height: Double
+        let previousRank: Int
+    }
+
+    private static func optimizedRankBands(
+        rankWidths: [Double],
+        rankHeights: [Double],
+        gapBeforeRank: [Double],
+        bandGap: Double
+    ) -> [OptimizedRankBand] {
+        let rankCount = rankWidths.count
+        guard rankCount > 0 else { return [] }
+        guard rankCount > 1 else {
+            return [OptimizedRankBand(ranks: [0], width: rankWidths[0], height: rankHeights[0])]
+        }
+        guard rankCount > 2 else {
+            return greedyRankBands(
+                rankWidths: rankWidths,
+                rankHeights: rankHeights,
+                gapBeforeRank: gapBeforeRank
+            )
+        }
+
+        let bandOptions = rankBandOptions(
+            rankWidths: rankWidths,
+            rankHeights: rankHeights,
+            gapBeforeRank: gapBeforeRank
+        )
+        let candidateWidths = sortedUniqueDoubleValues(bandOptions.flatMap { row in
+            row.compactMap { $0?.width }
+        })
+        var bestBands: [OptimizedRankBand] = []
+        var bestScore: RankBandLayoutScore?
+
+        for maximumWidth in candidateWidths {
+            guard let bands = optimalRankBandPartition(
+                bandOptions: bandOptions,
+                maximumWidth: maximumWidth,
+                bandGap: bandGap
+            ) else { continue }
+            let width = bands.map(\.width).max() ?? 0
+            let height = bands.enumerated().reduce(0.0) { partial, entry in
+                partial + entry.element.height + (entry.offset == 0 ? 0.0 : bandGap)
+            }
+            guard width > 0, height > 0 else { continue }
+            let aspect = width / height
+            let targetAspect = 1.5
+            let minAspect = 0.95
+            let maxAspect = 2.05
+            let aspectViolation = max(minAspect - aspect, 0) + max(aspect - maxAspect, 0)
+            let score = RankBandLayoutScore(
+                aspectViolation: aspectViolation,
+                area: width * height,
+                aspectDelta: abs(aspect - targetAspect),
+                bandCount: bands.count
+            )
+            if bestScore.map({ score.isBetter(than: $0) }) ?? true {
+                bestScore = score
+                bestBands = bands
+            }
+        }
+
+        return bestBands.isEmpty
+            ? [OptimizedRankBand(ranks: Array(0..<rankCount), width: rankWidths.reduce(0, +), height: rankHeights.max() ?? 0)]
+            : bestBands
+    }
+
+    private static func rankBandOptions(
+        rankWidths: [Double],
+        rankHeights: [Double],
+        gapBeforeRank: [Double]
+    ) -> [[OptimizedRankBand?]] {
+        let count = rankWidths.count
+        var options = Array(
+            repeating: Array<OptimizedRankBand?>(repeating: nil, count: count),
+            count: count
+        )
+        for start in 0..<count {
+            var width = 0.0
+            var height = 0.0
+            for end in start..<count {
+                width += end == start ? rankWidths[end] : gapBeforeRank[end] + rankWidths[end]
+                height = max(height, rankHeights[end])
+                options[start][end] = OptimizedRankBand(
+                    ranks: Array(start...end),
+                    width: width,
+                    height: height
+                )
+            }
+        }
+        return options
+    }
+
+    private static func optimalRankBandPartition(
+        bandOptions: [[OptimizedRankBand?]],
+        maximumWidth: Double,
+        bandGap: Double
+    ) -> [OptimizedRankBand]? {
+        let count = bandOptions.count
+        var states = Array<RankBandDPState?>(repeating: nil, count: count + 1)
+        states[0] = RankBandDPState(height: 0, previousRank: -1)
+        for end in 1...count {
+            var best: RankBandDPState?
+            for start in 0..<end {
+                guard
+                    let prior = states[start],
+                    let band = bandOptions[start][end - 1],
+                    band.width <= maximumWidth + 0.001
+                else { continue }
+                let addedGap = start == 0 ? 0.0 : bandGap
+                let candidate = RankBandDPState(
+                    height: prior.height + addedGap + band.height,
+                    previousRank: start
+                )
+                if best == nil || candidate.height < (best?.height ?? .greatestFiniteMagnitude) {
+                    best = candidate
+                }
+            }
+            states[end] = best
+        }
+        guard states[count] != nil else { return nil }
+
+        var bands: [OptimizedRankBand] = []
+        var end = count
+        while end > 0 {
+            guard
+                let state = states[end],
+                let band = bandOptions[state.previousRank][end - 1]
+            else { return nil }
+            bands.append(band)
+            end = state.previousRank
+        }
+        return bands.reversed()
+    }
+
+    private static func sortedUniqueDoubleValues(_ values: [Double]) -> [Double] {
+        var result: [Double] = []
+        for value in values.sorted() {
+            if !result.contains(where: { abs($0 - value) < 0.5 }) {
+                result.append(value)
+            }
+        }
+        return result
+    }
+
+    private static func layerGap(
+        before rank: Int,
+        ranks: [Int: Int],
+        edges: [LayeredEdge],
+        degree: [Int: Int],
+        membership: GroupMembershipIndex
+    ) -> Double {
+        var gap = 108.0
+        for edge in edges {
+            guard let sourceRank = ranks[edge.source], let targetRank = ranks[edge.target] else {
+                continue
+            }
+            let minRank = min(sourceRank, targetRank)
+            let maxRank = max(sourceRank, targetRank)
+            guard minRank < rank && rank <= maxRank else { continue }
+            let degreeLoad = log2(Double(max(degree[edge.source] ?? 0, degree[edge.target] ?? 0)) + 1.0)
+            let labelGap = edge.labelSpan
+                + Double(LayoutSpacing.edgeNode * 2)
+                + min(72.0, degreeLoad * Double(LayoutSpacing.edgeEdge))
+            gap = max(gap, min(260.0, labelGap))
+            if !shareAnyGroup(edge.source, edge.target, membership: membership) {
+                gap = max(gap, 154.0)
+            }
+        }
+        return gap
+    }
+
+    private static func verticalGap(
+        between lhs: Int,
+        and rhs: Int,
+        degree: [Int: Int],
+        membership: GroupMembershipIndex
+    ) -> Double {
+        let degreeLoad = log2(Double(max(degree[lhs] ?? 0, degree[rhs] ?? 0)) + 1.0)
+        var gap = Double(LayoutSpacing.nodeNode) + min(34.0, degreeLoad * 7.0)
+        let leftGroups = membership.memberToGroups[lhs] ?? []
+        let rightGroups = membership.memberToGroups[rhs] ?? []
+        if !leftGroups.isEmpty, !rightGroups.isEmpty, leftGroups.isDisjoint(with: rightGroups) {
+            gap += Double(LayoutSpacing.groupGroup - LayoutSpacing.nodeNode)
+        }
+        return gap
+    }
+
+    private static func shareAnyGroup(
+        _ lhs: Int,
+        _ rhs: Int,
+        membership: GroupMembershipIndex
+    ) -> Bool {
+        guard
+            let leftGroups = membership.memberToGroups[lhs],
+            let rightGroups = membership.memberToGroups[rhs]
+        else { return false }
+        return !leftGroups.isDisjoint(with: rightGroups)
+    }
+
+    private static func relaxLayeredYCoordinates(
+        positions: inout [Int: CGPoint],
+        layers: [[Int]],
+        edges: [LayeredEdge],
+        sizes: [CGSize],
+        iterations: Int
+    ) {
+        guard layers.count > 1, iterations > 0 else { return }
+        var neighbours: [Int: [Int]] = [:]
+        for edge in edges {
+            neighbours[edge.source, default: []].append(edge.target)
+            neighbours[edge.target, default: []].append(edge.source)
+        }
+
+        for _ in 0..<iterations {
+            for layer in layers {
+                guard layer.count > 1 else { continue }
+                var desired: [Int: Double] = [:]
+                for index in layer {
+                    let ys = (neighbours[index] ?? []).compactMap { positions[$0].map { Double($0.y) } }
+                    guard !ys.isEmpty, let current = positions[index] else { continue }
+                    let average = ys.reduce(0, +) / Double(ys.count)
+                    desired[index] = Double(current.y) * 0.55 + average * 0.45
+                }
+
+                var laidOut: [(index: Int, y: Double)] = []
+                laidOut.reserveCapacity(layer.count)
+                for index in layer {
+                    let y = desired[index] ?? Double(positions[index]?.y ?? 0)
+                    laidOut.append((index, y))
+                }
+                let targetCenter = layer.compactMap { positions[$0].map { Double($0.y) } }
+                    .reduce(0, +) / Double(layer.count)
+                for offset in 1..<laidOut.count {
+                    let previous = laidOut[offset - 1]
+                    let current = laidOut[offset]
+                    let minDistance = Double(sizes[previous.index].height + sizes[current.index].height) * 0.5
+                        + Double(LayoutSpacing.nodeNode)
+                    if current.y < previous.y + minDistance {
+                        laidOut[offset].y = previous.y + minDistance
+                    }
+                }
+                let center = laidOut.reduce(0.0) { $0 + $1.y } / Double(laidOut.count)
+                for entry in laidOut {
+                    guard var point = positions[entry.index] else { continue }
+                    point.y = CGFloat(targetCenter + entry.y - center)
+                    positions[entry.index] = point
+                }
+            }
+        }
+    }
+
+    private static func componentRect(
+        indices: [Int],
+        positions: [Int: CGPoint],
+        sizes: [CGSize]
+    ) -> CGRect {
+        var rect = CGRect.null
+        for index in indices {
+            guard let center = positions[index] else { continue }
+            let cardRect = CGRect(
+                x: center.x - sizes[index].width / 2,
+                y: center.y - sizes[index].height / 2,
+                width: sizes[index].width,
+                height: sizes[index].height
+            )
+            rect = rect.isNull ? cardRect : rect.union(cardRect)
+        }
+        return rect
+    }
+
+    private static func packLayeredComponents(
+        _ layouts: [LayeredComponentLayout],
+        sizes: [CGSize],
+        cardCount: Int
+    ) -> [CGPoint] {
+        var result = Array(repeating: CGPoint.zero, count: cardCount)
+        guard !layouts.isEmpty else { return result }
+
+        let totalArea = layouts.reduce(0.0) { partial, layout in
+            partial + Double(max(layout.rect.width, 1) * max(layout.rect.height, 1))
+        }
+        let maxShelfWidth = max(820.0, sqrt(totalArea) * 1.85)
+        let componentGapX: CGFloat = 180
+        let componentGapY: CGFloat = 150
+        var cursorX: CGFloat = 0
+        var cursorY: CGFloat = 0
+        var shelfHeight: CGFloat = 0
+
+        for layout in layouts {
+            let width = layout.rect.width
+            let height = layout.rect.height
+            if cursorX > 0, Double(cursorX + width) > maxShelfWidth {
+                cursorX = 0
+                cursorY += shelfHeight + componentGapY
+                shelfHeight = 0
+            }
+            let shiftX = cursorX - layout.rect.minX
+            let shiftY = cursorY - layout.rect.minY
+            for index in layout.indices {
+                if let point = layout.positions[index] {
+                    result[index] = CGPoint(x: point.x + shiftX, y: point.y + shiftY)
+                }
+            }
+            cursorX += width + componentGapX
+            shelfHeight = max(shelfHeight, height)
+        }
+        return result
+    }
+
+    private static func finalizeLayeredLayout(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        radii: [Double],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) {
+        resolveOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            margin: LayoutSpacing.nodeNode,
+            iterations: 36
+        )
+        resolveLayeredGroupGaps(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            iterations: 18
+        )
+        ejectNonMembersFromGroups(
+            positions: &positions,
+            sizes: sizes,
+            groups: groups,
+            indexByID: indexByID
+        )
+        resolveGroupOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            groups: groups,
+            indexByID: indexByID,
+            margin: LayoutSpacing.groupGroup,
+            iterations: 54
+        )
+        compactSparseGroups(
+            positions: &positions,
+            radii: radii,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            cardCount: sizes.count,
+            iterations: 20
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: sizes,
+            margin: LayoutSpacing.nodeNode,
+            iterations: 42
+        )
+        resolveLayeredGroupGaps(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            iterations: 12
+        )
+        enforceLayoutDistanceConstraints(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            iterations: 12
+        )
+        minimizeConstrainedOutlineArea(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID
+        )
+        enforceLayoutDistanceConstraints(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            iterations: 16
+        )
+    }
+
+    private struct LayeredGroupBox {
+        let groupIndex: Int
+        let indices: [Int]
+        let memberSet: Set<Int>
+        var rect: CGRect
+    }
+
+    private static func resolveLayeredGroupGaps(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        iterations: Int
+    ) {
+        guard groups.count > 1, iterations > 0 else { return }
+        let groupEdgeCounts = disjointGroupEdgeCounts(
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID
+        )
+
+        for _ in 0..<iterations {
+            var boxes = layeredGroupBoxes(
+                positions: positions,
+                sizes: sizes,
+                groups: groups,
+                indexByID: indexByID
+            )
+            guard boxes.count > 1 else { return }
+            var moved = false
+            for a in 0..<(boxes.count - 1) {
+                for b in (a + 1)..<boxes.count {
+                    guard boxes[a].memberSet.isDisjoint(with: boxes[b].memberSet) else {
+                        continue
+                    }
+                    let pair = pairKey(boxes[a].groupIndex, boxes[b].groupIndex)
+                    let targetGap = minimumGroupGroupGap(edgeCount: groupEdgeCounts[pair] ?? 0)
+                    let expandedA = boxes[a].rect.insetBy(dx: -targetGap / 2, dy: -targetGap / 2)
+                    let expandedB = boxes[b].rect.insetBy(dx: -targetGap / 2, dy: -targetGap / 2)
+                    let intersection = expandedA.intersection(expandedB)
+                    guard
+                        !intersection.isNull,
+                        intersection.width > 0,
+                        intersection.height > 0
+                    else { continue }
+
+                    if intersection.width < intersection.height {
+                        let direction: CGFloat
+                        if abs(boxes[a].rect.midX - boxes[b].rect.midX) < 0.001 {
+                            direction = boxes[a].groupIndex < boxes[b].groupIndex ? 1 : -1
+                        } else {
+                            direction = boxes[a].rect.midX < boxes[b].rect.midX ? 1 : -1
+                        }
+                        let shift = intersection.width * 0.5 * 0.72
+                        translate(indices: boxes[a].indices, dx: -direction * shift, dy: 0, positions: &positions)
+                        translate(indices: boxes[b].indices, dx: direction * shift, dy: 0, positions: &positions)
+                        boxes[a].rect.origin.x -= direction * shift
+                        boxes[b].rect.origin.x += direction * shift
+                    } else {
+                        let direction: CGFloat
+                        if abs(boxes[a].rect.midY - boxes[b].rect.midY) < 0.001 {
+                            direction = boxes[a].groupIndex < boxes[b].groupIndex ? 1 : -1
+                        } else {
+                            direction = boxes[a].rect.midY < boxes[b].rect.midY ? 1 : -1
+                        }
+                        let shift = intersection.height * 0.5 * 0.72
+                        translate(indices: boxes[a].indices, dx: 0, dy: -direction * shift, positions: &positions)
+                        translate(indices: boxes[b].indices, dx: 0, dy: direction * shift, positions: &positions)
+                        boxes[a].rect.origin.y -= direction * shift
+                        boxes[b].rect.origin.y += direction * shift
+                    }
+                    moved = true
+                }
+            }
+            if !moved { break }
+        }
+    }
+
+    private static func layeredGroupBoxes(
+        positions: [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [LayeredGroupBox] {
+        var result: [LayeredGroupBox] = []
+        result.reserveCapacity(groups.count)
+        for (groupIndex, group) in groups.enumerated() where group.cohesionStrength > 0 {
+            var indices: [Int] = []
+            indices.reserveCapacity(group.members.count)
+            for member in group.members {
+                if let index = indexByID[member] {
+                    indices.append(index)
+                }
+            }
+            guard !indices.isEmpty else { continue }
+            var rect = CGRect.null
+            for index in indices {
+                let center = positions[index]
+                let cardRect = CGRect(
+                    x: center.x - sizes[index].width / 2,
+                    y: center.y - sizes[index].height / 2,
+                    width: sizes[index].width,
+                    height: sizes[index].height
+                )
+                rect = rect.isNull ? cardRect : rect.union(cardRect)
+            }
+            let padded = rect.insetBy(
+                dx: -group.style.padding,
+                dy: -group.style.padding
+            )
+            result.append(LayeredGroupBox(
+                groupIndex: groupIndex,
+                indices: indices,
+                memberSet: Set(indices),
+                rect: padded
+            ))
+        }
+        return result
+    }
+
+    private static func linkedDisjointGroupPairs(
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Set<UInt64> {
+        let membership = groupMembershipIndex(groups: groups, indexByID: indexByID)
+        var result: Set<UInt64> = []
+        for edge in edges {
+            guard
+                let source = indexByID[edge.source],
+                let target = indexByID[edge.target],
+                source != target,
+                let sourceGroups = membership.memberToGroups[source],
+                let targetGroups = membership.memberToGroups[target]
+            else { continue }
+            if !sourceGroups.isDisjoint(with: targetGroups) {
+                continue
+            }
+            for sourceGroup in sourceGroups {
+                for targetGroup in targetGroups where sourceGroup != targetGroup {
+                    guard groups.indices.contains(sourceGroup), groups.indices.contains(targetGroup) else {
+                        continue
+                    }
+                    let sourceMembers = Set(membership.groupMembers[sourceGroup])
+                    let targetMembers = Set(membership.groupMembers[targetGroup])
+                    if sourceMembers.isDisjoint(with: targetMembers) {
+                        result.insert(pairKey(sourceGroup, targetGroup))
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private static func translate(
+        indices: [Int],
+        dx: CGFloat,
+        dy: CGFloat,
+        positions: inout [CGPoint]
+    ) {
+        for index in indices {
+            positions[index].x += dx
+            positions[index].y += dy
+        }
     }
 
     // MARK: - Constraint layout model
@@ -233,6 +1961,7 @@ struct KnowledgeGraphLayout: Sendable {
         let i: Int
         let j: Int
         let ideal: Double
+        let boundaryGap: Double?
         let strength: Double
         let axisBias: Double
     }
@@ -354,18 +2083,27 @@ struct KnowledgeGraphLayout: Sendable {
             let degreeLoad = max(degreeWeights[i], degreeWeights[j])
             let labelWeight = max(labelWeights[i], labelWeights[j])
             let membershipLoad = min(Double(max(gi.count, gj.count)), 3.0)
+            let labelSpan = estimatedEdgeLabelSpan(edge)
             let relationMultiplier = 1.0
-                + 0.18 * degreeLoad
+                + 0.24 * degreeLoad
                 + 0.08 * labelWeight
                 + 0.12 * Double(externalCount)
                 + 0.10 * membershipLoad
             let groupMultiplier = sharesGroup ? 0.78 : 1.65
-            let spanGap = min(90.0, estimatedEdgeLabelSpan(edge) * 0.16)
-            let ideal = radii[i] + radii[j] + baseGap * groupMultiplier * relationMultiplier + spanGap
+            let topologyGap = baseGap * groupMultiplier * relationMultiplier
+            let degreeReadableGap = baseGap * min(0.90, 0.32 * max(degreeLoad - 1.0, 0.0))
+            let labelReadableGap = labelSpan + 36.0 + degreeReadableGap
+            let maxReadableGap = labelReadableGap
+                + baseGap * (sharesGroup ? 0.45 : 0.90)
+                + min(48.0, 16.0 * Double(externalCount))
+            let resolvedGap = min(max(topologyGap, labelReadableGap), maxReadableGap)
+            let ideal = radii[i] + radii[j]
+                + resolvedGap
             edgeSprings.append(LayoutSpring(
                 i: i,
                 j: j,
                 ideal: ideal,
+                boundaryGap: resolvedGap,
                 strength: sharesGroup ? 0.030 : 0.022,
                 axisBias: 0.050
             ))
@@ -386,6 +2124,7 @@ struct KnowledgeGraphLayout: Sendable {
                         i: i,
                         j: j,
                         ideal: ideal,
+                        boundaryGap: nil,
                         strength: perPairStrength,
                         axisBias: 0.025
                     ))
@@ -568,12 +2307,14 @@ struct KnowledgeGraphLayout: Sendable {
             accumulateSpringForces(
                 springs: plan.edgeSprings,
                 positions: working,
+                sizes: plan.sizes,
                 dispX: &dispX,
                 dispY: &dispY
             )
             accumulateSpringForces(
                 springs: plan.groupSprings,
                 positions: working,
+                sizes: plan.sizes,
                 dispX: &dispX,
                 dispY: &dispY
             )
@@ -622,6 +2363,7 @@ struct KnowledgeGraphLayout: Sendable {
             projectPlannedEdgeLengths(
                 positions: &positions,
                 springs: plan.edgeSprings,
+                sizes: plan.sizes,
                 iterations: 10,
                 stiffness: 0.35
             )
@@ -739,6 +2481,7 @@ struct KnowledgeGraphLayout: Sendable {
     private static func accumulateSpringForces(
         springs: [LayoutSpring],
         positions: [CGPoint],
+        sizes: [CGSize],
         dispX: inout [Double],
         dispY: inout [Double]
     ) {
@@ -750,7 +2493,13 @@ struct KnowledgeGraphLayout: Sendable {
             let distance = max(sqrt(dx * dx + dy * dy), 0.01)
             let ux = dx / distance
             let uy = dy / distance
-            let force = (distance - spring.ideal) * spring.strength
+            let ideal = idealDistance(
+                for: spring,
+                positions: positions,
+                sizes: sizes,
+                fallbackDistance: distance
+            )
+            let force = (distance - ideal) * spring.strength
             dispX[i] += ux * force
             dispY[i] += uy * force
             dispX[j] -= ux * force
@@ -766,6 +2515,41 @@ struct KnowledgeGraphLayout: Sendable {
                 dispX[j] -= correction
             }
         }
+    }
+
+    private static func idealDistance(
+        for spring: LayoutSpring,
+        positions: [CGPoint],
+        sizes: [CGSize],
+        fallbackDistance: Double
+    ) -> Double {
+        guard let boundaryGap = spring.boundaryGap else {
+            return spring.ideal
+        }
+
+        let dx = Double(positions[spring.j].x - positions[spring.i].x)
+        let dy = Double(positions[spring.j].y - positions[spring.i].y)
+        let distance = max(sqrt(dx * dx + dy * dy), max(fallbackDistance, 0.001))
+        let ux = dx / distance
+        let uy = dy / distance
+        let sourceExit = rayBoundaryDistance(size: sizes[spring.i], ux: ux, uy: uy)
+        let targetExit = rayBoundaryDistance(size: sizes[spring.j], ux: -ux, uy: -uy)
+        return max(sourceExit + targetExit + boundaryGap, 1.0)
+    }
+
+    private static func rayBoundaryDistance(size: CGSize, ux: Double, uy: Double) -> Double {
+        let halfWidth = max(Double(size.width) * 0.5, 1.0)
+        let halfHeight = max(Double(size.height) * 0.5, 1.0)
+        let absX = abs(ux)
+        let absY = abs(uy)
+
+        if absX < 0.0001 {
+            return halfHeight
+        }
+        if absY < 0.0001 {
+            return halfWidth
+        }
+        return min(halfWidth / absX, halfHeight / absY)
     }
 
     private static func accumulateGroupCohesion(
@@ -853,6 +2637,7 @@ struct KnowledgeGraphLayout: Sendable {
     private static func projectPlannedEdgeLengths(
         positions: inout [CGPoint],
         springs: [LayoutSpring],
+        sizes: [CGSize],
         iterations: Int,
         stiffness: Double
     ) {
@@ -862,7 +2647,13 @@ struct KnowledgeGraphLayout: Sendable {
                 let dx = Double(positions[spring.j].x - positions[spring.i].x)
                 let dy = Double(positions[spring.j].y - positions[spring.i].y)
                 let distance = max(sqrt(dx * dx + dy * dy), 0.001)
-                let error = distance - spring.ideal
+                let ideal = idealDistance(
+                    for: spring,
+                    positions: positions,
+                    sizes: sizes,
+                    fallbackDistance: distance
+                )
+                let error = distance - ideal
                 guard abs(error) > 0.01 else { continue }
                 let ux = dx / distance
                 let uy = dy / distance
@@ -2213,7 +4004,7 @@ struct KnowledgeGraphLayout: Sendable {
         // B's rendered bbox would then touch (or overlap) A's. 32 pt
         // covers the common padding range of 12-24 pt with a clear
         // gap on top.
-        let visualGap: Double = 32
+        let visualGap = Double(LayoutSpacing.groupNode)
         // Push past the bbox edge by `escapeSlack` so floating-point
         // error doesn't re-detect the card as inside on the next pass.
         let escapeSlack: Double = 4
@@ -2979,6 +4770,666 @@ struct KnowledgeGraphLayout: Sendable {
         }
     }
 
+    // MARK: - Distance constraints and area compaction
+
+    private enum LayoutCompactionAxis: Hashable {
+        case horizontal
+        case vertical
+    }
+
+    private struct LayoutCompactionUnit {
+        let groupIndices: Set<Int>
+        let indices: [Int]
+        let memberSet: Set<Int>
+        let rect: CGRect
+    }
+
+    private struct UnitSeparationConstraint {
+        let before: Int
+        let after: Int
+        let gap: CGFloat
+    }
+
+    private static func enforceLayoutDistanceConstraints(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        iterations: Int
+    ) {
+        guard iterations > 0 else { return }
+        let edgeMultiplicity = edgeMultiplicityByCardPair(edges: edges, indexByID: indexByID)
+        let groupEdgeCounts = disjointGroupEdgeCounts(edges: edges, groups: groups, indexByID: indexByID)
+
+        for _ in 0..<iterations {
+            var moved = false
+            moved = resolveNodeDistances(
+                positions: &positions,
+                sizes: sizes,
+                edgeMultiplicity: edgeMultiplicity,
+                iterations: 1
+            ) || moved
+            moved = resolveGroupDistances(
+                positions: &positions,
+                sizes: sizes,
+                groups: groups,
+                indexByID: indexByID,
+                groupEdgeCounts: groupEdgeCounts,
+                iterations: 1
+            ) || moved
+            moved = ejectNonMembersFromGroupsOnce(
+                positions: &positions,
+                sizes: sizes,
+                groups: groups,
+                indexByID: indexByID
+            ) || moved
+            if !moved { break }
+        }
+    }
+
+    private static func minimizeConstrainedOutlineArea(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) {
+        guard positions.count > 1 else { return }
+        let edgeMultiplicity = edgeMultiplicityByCardPair(edges: edges, indexByID: indexByID)
+        let groupEdgeCounts = disjointGroupEdgeCounts(edges: edges, groups: groups, indexByID: indexByID)
+
+        for _ in 0..<4 {
+            let units = layoutCompactionUnits(
+                positions: positions,
+                sizes: sizes,
+                groups: groups,
+                indexByID: indexByID
+            )
+            guard units.count > 1 else { return }
+            let oldArea = layoutArea(
+                layoutOutlineRect(positions: positions, sizes: sizes, groups: groups, indexByID: indexByID)
+            )
+            let constraints = unitSeparationConstraints(
+                units: units,
+                edgeMultiplicity: edgeMultiplicity,
+                groupEdgeCounts: groupEdgeCounts
+            )
+            let compacted = compactedPositions(
+                positions: positions,
+                units: units,
+                constraints: constraints
+            )
+            var candidate = compacted
+            enforceLayoutDistanceConstraints(
+                positions: &candidate,
+                sizes: sizes,
+                edges: edges,
+                groups: groups,
+                indexByID: indexByID,
+                iterations: 6
+            )
+            let newArea = layoutArea(
+                layoutOutlineRect(positions: candidate, sizes: sizes, groups: groups, indexByID: indexByID)
+            )
+            guard newArea <= oldArea + 0.5 else { break }
+            positions = candidate
+        }
+    }
+
+    private static func resolveNodeDistances(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        edgeMultiplicity: [UInt64: Int],
+        iterations: Int
+    ) -> Bool {
+        guard positions.count > 1, iterations > 0 else { return false }
+        var movedAny = false
+        for _ in 0..<iterations {
+            var moved = false
+            var rects = cardRects(positions: positions, sizes: sizes)
+            for a in 0..<(rects.count - 1) {
+                for b in (a + 1)..<rects.count {
+                    let gap = minimumNodeNodeGap(edgeMultiplicity: edgeMultiplicity[pairKey(a, b)] ?? 0)
+                    let expandedA = rects[a].insetBy(dx: -gap / 2, dy: -gap / 2)
+                    let expandedB = rects[b].insetBy(dx: -gap / 2, dy: -gap / 2)
+                    let intersection = expandedA.intersection(expandedB)
+                    guard
+                        !intersection.isNull,
+                        intersection.width > 0,
+                        intersection.height > 0
+                    else { continue }
+                    moved = true
+                    movedAny = true
+                    if intersection.width <= intersection.height {
+                        let direction: CGFloat
+                        if abs(rects[a].midX - rects[b].midX) < 0.001 {
+                            direction = a < b ? 1 : -1
+                        } else {
+                            direction = rects[a].midX < rects[b].midX ? 1 : -1
+                        }
+                        let shift = intersection.width / 2
+                        positions[a].x -= direction * shift
+                        positions[b].x += direction * shift
+                        rects[a].origin.x -= direction * shift
+                        rects[b].origin.x += direction * shift
+                    } else {
+                        let direction: CGFloat
+                        if abs(rects[a].midY - rects[b].midY) < 0.001 {
+                            direction = a < b ? 1 : -1
+                        } else {
+                            direction = rects[a].midY < rects[b].midY ? 1 : -1
+                        }
+                        let shift = intersection.height / 2
+                        positions[a].y -= direction * shift
+                        positions[b].y += direction * shift
+                        rects[a].origin.y -= direction * shift
+                        rects[b].origin.y += direction * shift
+                    }
+                }
+            }
+            if !moved { break }
+        }
+        return movedAny
+    }
+
+    private static func resolveGroupDistances(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        groupEdgeCounts: [UInt64: Int],
+        iterations: Int
+    ) -> Bool {
+        guard groups.count > 1, iterations > 0 else { return false }
+        var movedAny = false
+        for _ in 0..<iterations {
+            var boxes = layeredGroupBoxes(
+                positions: positions,
+                sizes: sizes,
+                groups: groups,
+                indexByID: indexByID
+            )
+            guard boxes.count > 1 else { return movedAny }
+            var moved = false
+            for a in 0..<(boxes.count - 1) {
+                for b in (a + 1)..<boxes.count {
+                    guard boxes[a].memberSet.isDisjoint(with: boxes[b].memberSet) else {
+                        continue
+                    }
+                    let pair = pairKey(boxes[a].groupIndex, boxes[b].groupIndex)
+                    let gap = minimumGroupGroupGap(edgeCount: groupEdgeCounts[pair] ?? 0)
+                    let expandedA = boxes[a].rect.insetBy(dx: -gap / 2, dy: -gap / 2)
+                    let expandedB = boxes[b].rect.insetBy(dx: -gap / 2, dy: -gap / 2)
+                    let intersection = expandedA.intersection(expandedB)
+                    guard
+                        !intersection.isNull,
+                        intersection.width > 0,
+                        intersection.height > 0
+                    else { continue }
+                    moved = true
+                    movedAny = true
+                    if intersection.width <= intersection.height {
+                        let direction: CGFloat
+                        if abs(boxes[a].rect.midX - boxes[b].rect.midX) < 0.001 {
+                            direction = boxes[a].groupIndex < boxes[b].groupIndex ? 1 : -1
+                        } else {
+                            direction = boxes[a].rect.midX < boxes[b].rect.midX ? 1 : -1
+                        }
+                        let shift = intersection.width / 2
+                        translate(indices: boxes[a].indices, dx: -direction * shift, dy: 0, positions: &positions)
+                        translate(indices: boxes[b].indices, dx: direction * shift, dy: 0, positions: &positions)
+                        boxes[a].rect.origin.x -= direction * shift
+                        boxes[b].rect.origin.x += direction * shift
+                    } else {
+                        let direction: CGFloat
+                        if abs(boxes[a].rect.midY - boxes[b].rect.midY) < 0.001 {
+                            direction = boxes[a].groupIndex < boxes[b].groupIndex ? 1 : -1
+                        } else {
+                            direction = boxes[a].rect.midY < boxes[b].rect.midY ? 1 : -1
+                        }
+                        let shift = intersection.height / 2
+                        translate(indices: boxes[a].indices, dx: 0, dy: -direction * shift, positions: &positions)
+                        translate(indices: boxes[b].indices, dx: 0, dy: direction * shift, positions: &positions)
+                        boxes[a].rect.origin.y -= direction * shift
+                        boxes[b].rect.origin.y += direction * shift
+                    }
+                }
+            }
+            if !moved { break }
+        }
+        return movedAny
+    }
+
+    private static func ejectNonMembersFromGroupsOnce(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Bool {
+        struct GroupSpec {
+            let indices: [Int]
+            let memberSet: Set<Int>
+            let rect: CGRect
+        }
+
+        var specs: [GroupSpec] = []
+        specs.reserveCapacity(groups.count)
+        for group in groups where group.cohesionStrength > 0 {
+            let indices = group.members.compactMap { indexByID[$0] }
+            guard !indices.isEmpty else { continue }
+            let rect = rectForIndices(indices, positions: positions, sizes: sizes)
+                .insetBy(
+                    dx: -(group.style.padding + LayoutSpacing.groupNode),
+                    dy: -(group.style.padding + LayoutSpacing.groupNode)
+                )
+            specs.append(GroupSpec(indices: indices, memberSet: Set(indices), rect: rect))
+        }
+        guard !specs.isEmpty else { return false }
+
+        var moved = false
+        var rects = cardRects(positions: positions, sizes: sizes)
+        for index in rects.indices {
+            for spec in specs where !spec.memberSet.contains(index) {
+                let rect = rects[index]
+                let intersection = rect.intersection(spec.rect)
+                guard
+                    !intersection.isNull,
+                    intersection.width > 0,
+                    intersection.height > 0
+                else { continue }
+                moved = true
+                let penLeft = rect.maxX - spec.rect.minX
+                let penRight = spec.rect.maxX - rect.minX
+                let penTop = rect.maxY - spec.rect.minY
+                let penBottom = spec.rect.maxY - rect.minY
+                let minPen = min(min(penLeft, penRight), min(penTop, penBottom))
+                if minPen == penLeft {
+                    let shift = penLeft + 0.5
+                    positions[index].x -= shift
+                    rects[index].origin.x -= shift
+                } else if minPen == penRight {
+                    let shift = penRight + 0.5
+                    positions[index].x += shift
+                    rects[index].origin.x += shift
+                } else if minPen == penTop {
+                    let shift = penTop + 0.5
+                    positions[index].y -= shift
+                    rects[index].origin.y -= shift
+                } else {
+                    let shift = penBottom + 0.5
+                    positions[index].y += shift
+                    rects[index].origin.y += shift
+                }
+            }
+        }
+        return moved
+    }
+
+    private static func layoutCompactionUnits(
+        positions: [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [LayoutCompactionUnit] {
+        var units: [LayoutCompactionUnit] = []
+        units.reserveCapacity(groups.count + positions.count)
+        var assigned: Set<Int> = []
+        let membership = groupMembershipIndex(groups: groups, indexByID: indexByID)
+        let groupComponents = overlappingGroupComponents(membership: membership, groupCount: groups.count)
+        for component in groupComponents {
+            let indices = component
+                .flatMap { membership.groupMembers[$0] }
+                .reduce(into: Set<Int>()) { result, index in
+                    result.insert(index)
+                }
+                .sorted()
+            guard !indices.isEmpty else { continue }
+            var rect = CGRect.null
+            for groupIndex in component {
+                let groupMembers = membership.groupMembers[groupIndex]
+                guard !groupMembers.isEmpty else { continue }
+                let groupRect = rectForIndices(groupMembers, positions: positions, sizes: sizes)
+                    .insetBy(
+                        dx: -groups[groupIndex].style.padding,
+                        dy: -groups[groupIndex].style.padding
+                    )
+                rect = rect.isNull ? groupRect : rect.union(groupRect)
+            }
+            units.append(LayoutCompactionUnit(
+                groupIndices: Set(component),
+                indices: indices,
+                memberSet: Set(indices),
+                rect: rect
+            ))
+            assigned.formUnion(indices)
+        }
+
+        for index in positions.indices where !assigned.contains(index) {
+            let rect = CGRect(
+                x: positions[index].x - sizes[index].width / 2,
+                y: positions[index].y - sizes[index].height / 2,
+                width: sizes[index].width,
+                height: sizes[index].height
+            )
+            units.append(LayoutCompactionUnit(
+                groupIndices: [],
+                indices: [index],
+                memberSet: [index],
+                rect: rect
+            ))
+        }
+        return units
+    }
+
+    private static func overlappingGroupComponents(
+        membership: GroupMembershipIndex,
+        groupCount: Int
+    ) -> [[Int]] {
+        guard groupCount > 0 else { return [] }
+        var disjointSet = DisjointSet(count: groupCount)
+        var ownerByMember: [Int: Int] = [:]
+        for groupIndex in 0..<groupCount {
+            for member in membership.groupMembers[groupIndex] {
+                if let owner = ownerByMember[member] {
+                    disjointSet.union(owner, groupIndex)
+                } else {
+                    ownerByMember[member] = groupIndex
+                }
+            }
+        }
+
+        var components: [Int: [Int]] = [:]
+        for groupIndex in 0..<groupCount {
+            components[disjointSet.find(groupIndex), default: []].append(groupIndex)
+        }
+        return components.values
+            .map { $0.sorted() }
+            .sorted { lhs, rhs in
+                (lhs.first ?? 0) < (rhs.first ?? 0)
+            }
+    }
+
+    private static func unitSeparationConstraints(
+        units: [LayoutCompactionUnit],
+        edgeMultiplicity: [UInt64: Int],
+        groupEdgeCounts: [UInt64: Int]
+    ) -> [LayoutCompactionAxis: [UnitSeparationConstraint]] {
+        var result: [LayoutCompactionAxis: [UnitSeparationConstraint]] = [
+            .horizontal: [],
+            .vertical: []
+        ]
+        guard units.count > 1 else { return result }
+
+        for a in 0..<(units.count - 1) {
+            for b in (a + 1)..<units.count {
+                guard units[a].memberSet.isDisjoint(with: units[b].memberSet) else {
+                    continue
+                }
+                let gap = minimumUnitGap(
+                    lhs: units[a],
+                    rhs: units[b],
+                    edgeMultiplicity: edgeMultiplicity,
+                    groupEdgeCounts: groupEdgeCounts
+                )
+                let axis = separationAxis(lhs: units[a].rect, rhs: units[b].rect, gap: gap)
+                let before: Int
+                let after: Int
+                switch axis {
+                case .horizontal:
+                    if units[a].rect.midX <= units[b].rect.midX {
+                        before = a
+                        after = b
+                    } else {
+                        before = b
+                        after = a
+                    }
+                case .vertical:
+                    if units[a].rect.midY <= units[b].rect.midY {
+                        before = a
+                        after = b
+                    } else {
+                        before = b
+                        after = a
+                    }
+                }
+                result[axis, default: []].append(UnitSeparationConstraint(
+                    before: before,
+                    after: after,
+                    gap: gap
+                ))
+            }
+        }
+        return result
+    }
+
+    private static func compactedPositions(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        constraints: [LayoutCompactionAxis: [UnitSeparationConstraint]]
+    ) -> [CGPoint] {
+        let xOrigins = compactedUnitOrigins(
+            units: units,
+            axis: .horizontal,
+            constraints: constraints[.horizontal] ?? []
+        )
+        let yOrigins = compactedUnitOrigins(
+            units: units,
+            axis: .vertical,
+            constraints: constraints[.vertical] ?? []
+        )
+        var result = positions
+        for (unitIndex, unit) in units.enumerated() {
+            let dx = xOrigins[unitIndex] - unit.rect.minX
+            let dy = yOrigins[unitIndex] - unit.rect.minY
+            for index in unit.indices {
+                result[index].x += dx
+                result[index].y += dy
+            }
+        }
+        return result
+    }
+
+    private static func compactedUnitOrigins(
+        units: [LayoutCompactionUnit],
+        axis: LayoutCompactionAxis,
+        constraints: [UnitSeparationConstraint]
+    ) -> [CGFloat] {
+        let order = units.indices.sorted { lhs, rhs in
+            let left = axis == .horizontal ? units[lhs].rect.minX : units[lhs].rect.minY
+            let right = axis == .horizontal ? units[rhs].rect.minX : units[rhs].rect.minY
+            if abs(left - right) > 0.001 {
+                return left < right
+            }
+            return lhs < rhs
+        }
+        var incoming: [Int: [UnitSeparationConstraint]] = [:]
+        for constraint in constraints {
+            incoming[constraint.after, default: []].append(constraint)
+        }
+        var origins = Array(repeating: CGFloat(0), count: units.count)
+        for unitIndex in order {
+            var origin: CGFloat = 0
+            for constraint in incoming[unitIndex] ?? [] {
+                let size = axis == .horizontal
+                    ? units[constraint.before].rect.width
+                    : units[constraint.before].rect.height
+                origin = max(origin, origins[constraint.before] + size + constraint.gap)
+            }
+            origins[unitIndex] = origin
+        }
+        return origins
+    }
+
+    private static func separationAxis(
+        lhs: CGRect,
+        rhs: CGRect,
+        gap: CGFloat
+    ) -> LayoutCompactionAxis {
+        let dx = abs(rhs.midX - lhs.midX)
+        let dy = abs(rhs.midY - lhs.midY)
+        let requiredX = (lhs.width + rhs.width) / 2 + gap
+        let requiredY = (lhs.height + rhs.height) / 2 + gap
+        let xRatio = requiredX > 0 ? dx / requiredX : 0
+        let yRatio = requiredY > 0 ? dy / requiredY : 0
+        return xRatio >= yRatio ? .horizontal : .vertical
+    }
+
+    private static func minimumUnitGap(
+        lhs: LayoutCompactionUnit,
+        rhs: LayoutCompactionUnit,
+        edgeMultiplicity: [UInt64: Int],
+        groupEdgeCounts: [UInt64: Int]
+    ) -> CGFloat {
+        let edgeCount = edgeCountBetweenUnits(lhs, rhs, edgeMultiplicity: edgeMultiplicity)
+        if !lhs.groupIndices.isEmpty, !rhs.groupIndices.isEmpty {
+            var groupEdgeCount = 0
+            for left in lhs.groupIndices {
+                for right in rhs.groupIndices where left != right {
+                    groupEdgeCount += groupEdgeCounts[pairKey(left, right)] ?? 0
+                }
+            }
+            return minimumGroupGroupGap(edgeCount: max(groupEdgeCount, edgeCount))
+        }
+        if !lhs.groupIndices.isEmpty || !rhs.groupIndices.isEmpty {
+            return LayoutSpacing.groupNode + CGFloat(min(edgeCount, 4)) * LayoutSpacing.edgeEdge
+        }
+        return minimumNodeNodeGap(edgeMultiplicity: edgeCount)
+    }
+
+    private static func edgeCountBetweenUnits(
+        _ lhs: LayoutCompactionUnit,
+        _ rhs: LayoutCompactionUnit,
+        edgeMultiplicity: [UInt64: Int]
+    ) -> Int {
+        var count = 0
+        for left in lhs.memberSet {
+            for right in rhs.memberSet where left != right {
+                count += edgeMultiplicity[pairKey(left, right)] ?? 0
+            }
+        }
+        return count
+    }
+
+    private static func minimumNodeNodeGap(edgeMultiplicity: Int) -> CGFloat {
+        guard edgeMultiplicity > 0 else {
+            return LayoutSpacing.nodeNode
+        }
+        let parallelReserve = CGFloat(max(edgeMultiplicity - 1, 0)) * LayoutSpacing.edgeEdge
+        return max(LayoutSpacing.nodeNode, LayoutSpacing.connectedNodeNode + parallelReserve)
+    }
+
+    private static func minimumGroupGroupGap(edgeCount: Int) -> CGFloat {
+        LayoutSpacing.groupGroup + CGFloat(min(max(edgeCount, 0), 6)) * LayoutSpacing.edgeEdge
+    }
+
+    private static func edgeMultiplicityByCardPair(
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [UInt64: Int] {
+        var result: [UInt64: Int] = [:]
+        result.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let source = indexByID[edge.source],
+                let target = indexByID[edge.target],
+                source != target
+            else { continue }
+            result[pairKey(source, target), default: 0] += 1
+        }
+        return result
+    }
+
+    private static func disjointGroupEdgeCounts(
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [UInt64: Int] {
+        let membership = groupMembershipIndex(groups: groups, indexByID: indexByID)
+        var result: [UInt64: Int] = [:]
+        result.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let source = indexByID[edge.source],
+                let target = indexByID[edge.target],
+                source != target,
+                let sourceGroups = membership.memberToGroups[source],
+                let targetGroups = membership.memberToGroups[target]
+            else { continue }
+            for sourceGroup in sourceGroups {
+                for targetGroup in targetGroups where sourceGroup != targetGroup {
+                    guard
+                        groups.indices.contains(sourceGroup),
+                        groups.indices.contains(targetGroup)
+                    else { continue }
+                    if Set(membership.groupMembers[sourceGroup]).isDisjoint(
+                        with: Set(membership.groupMembers[targetGroup])
+                    ) {
+                        result[pairKey(sourceGroup, targetGroup), default: 0] += 1
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private static func cardRects(
+        positions: [CGPoint],
+        sizes: [CGSize]
+    ) -> [CGRect] {
+        positions.indices.map { index in
+            CGRect(
+                x: positions[index].x - sizes[index].width / 2,
+                y: positions[index].y - sizes[index].height / 2,
+                width: sizes[index].width,
+                height: sizes[index].height
+            )
+        }
+    }
+
+    private static func rectForIndices(
+        _ indices: [Int],
+        positions: [CGPoint],
+        sizes: [CGSize]
+    ) -> CGRect {
+        var rect = CGRect.null
+        for index in indices {
+            let cardRect = CGRect(
+                x: positions[index].x - sizes[index].width / 2,
+                y: positions[index].y - sizes[index].height / 2,
+                width: sizes[index].width,
+                height: sizes[index].height
+            )
+            rect = rect.isNull ? cardRect : rect.union(cardRect)
+        }
+        return rect
+    }
+
+    private static func layoutOutlineRect(
+        positions: [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> CGRect {
+        var rect = CGRect.null
+        for cardRect in cardRects(positions: positions, sizes: sizes) {
+            rect = rect.isNull ? cardRect : rect.union(cardRect)
+        }
+        for group in groups where group.cohesionStrength > 0 {
+            let indices = group.members.compactMap { indexByID[$0] }
+            guard !indices.isEmpty else { continue }
+            let groupRect = rectForIndices(indices, positions: positions, sizes: sizes)
+                .insetBy(dx: -group.style.padding, dy: -group.style.padding)
+            rect = rect.isNull ? groupRect : rect.union(groupRect)
+        }
+        return rect
+    }
+
+    private static func layoutArea(_ rect: CGRect) -> CGFloat {
+        guard !rect.isNull else { return 0 }
+        return max(rect.width, 0) * max(rect.height, 0)
+    }
+
     // MARK: - Canvas anchoring
 
     /// Convert the centred positions to top-left card origins and compute
@@ -3018,16 +5469,111 @@ struct KnowledgeGraphLayout: Sendable {
         return (origins, CGSize(width: max(width, 320), height: max(height, 240)))
     }
 
+    private static func normalizeFinalGeometry(
+        cards: [CompoundGraph.Card],
+        edges: [CompoundGraph.CardEdge],
+        cardPositions: inout [CompoundGraph.Card.ID: CGPoint],
+        edgeRoutes: inout [EdgeIdentifier: EdgeRoute],
+        edgeLabelPositions: inout [EdgeIdentifier: CGPoint],
+        groupBoundingBoxes: inout [CompoundGraph.Group.ID: CGRect],
+        canvasSize: inout CGSize,
+        padding: CGFloat
+    ) {
+        var bounds = CGRect(origin: .zero, size: canvasSize)
+        for card in cards {
+            guard let origin = cardPositions[card.id] else { continue }
+            bounds = bounds.union(CGRect(origin: origin, size: card.size))
+        }
+        for route in edgeRoutes.values {
+            let points = route.points.isEmpty ? [route.start, route.end] : route.points
+            for point in points {
+                bounds = bounds.union(CGRect(x: point.x, y: point.y, width: 1, height: 1))
+            }
+        }
+        for edge in edges {
+            guard let center = edgeLabelPositions[edge.id] else { continue }
+            bounds = bounds.union(edgeLabelRect(center: center, size: edgeLabelSize(edge)))
+        }
+        for box in groupBoundingBoxes.values {
+            bounds = bounds.union(box)
+        }
+        bounds = bounds.insetBy(dx: -padding, dy: -padding)
+
+        let dx = bounds.minX < 0 ? -bounds.minX : 0
+        let dy = bounds.minY < 0 ? -bounds.minY : 0
+        if dx > 0 || dy > 0 {
+            translateGeometry(
+                dx: dx,
+                dy: dy,
+                cardPositions: &cardPositions,
+                edgeRoutes: &edgeRoutes,
+                edgeLabelPositions: &edgeLabelPositions,
+                groupBoundingBoxes: &groupBoundingBoxes
+            )
+            bounds = bounds.offsetBy(dx: dx, dy: dy)
+        }
+        canvasSize = CGSize(
+            width: max(canvasSize.width + dx, bounds.maxX, 320),
+            height: max(canvasSize.height + dy, bounds.maxY, 240)
+        )
+    }
+
+    private static func translateGeometry(
+        dx: CGFloat,
+        dy: CGFloat,
+        cardPositions: inout [CompoundGraph.Card.ID: CGPoint],
+        edgeRoutes: inout [EdgeIdentifier: EdgeRoute],
+        edgeLabelPositions: inout [EdgeIdentifier: CGPoint],
+        groupBoundingBoxes: inout [CompoundGraph.Group.ID: CGRect]
+    ) {
+        for key in cardPositions.keys {
+            guard let point = cardPositions[key] else { continue }
+            cardPositions[key] = CGPoint(x: point.x + dx, y: point.y + dy)
+        }
+        for key in edgeRoutes.keys {
+            guard let route = edgeRoutes[key] else { continue }
+            edgeRoutes[key] = route.translatedBy(dx: dx, dy: dy)
+        }
+        for key in edgeLabelPositions.keys {
+            guard let point = edgeLabelPositions[key] else { continue }
+            edgeLabelPositions[key] = CGPoint(x: point.x + dx, y: point.y + dy)
+        }
+        for key in groupBoundingBoxes.keys {
+            guard let rect = groupBoundingBoxes[key] else { continue }
+            groupBoundingBoxes[key] = rect.offsetBy(dx: dx, dy: dy)
+        }
+    }
+
     // MARK: - Edge routing
+
+    private struct RoutedEdge {
+        let edge: CompoundGraph.CardEdge
+        let points: [CGPoint]
+    }
 
     private static func computeEdgeRoutes(
         edges: [CompoundGraph.CardEdge],
         cards: [CompoundGraph.Card],
         indexByID: [CompoundGraph.Card.ID: Int],
-        cardPositions: [CompoundGraph.Card.ID: CGPoint]
+        cardPositions: [CompoundGraph.Card.ID: CGPoint],
+        groups: [CompoundGraph.Group]
     ) -> [EdgeIdentifier: EdgeRoute] {
         var routes: [EdgeIdentifier: EdgeRoute] = [:]
         routes.reserveCapacity(edges.count)
+        var routedEdges: [RoutedEdge] = []
+        routedEdges.reserveCapacity(edges.count)
+        let cardRects = cards.map { card -> CGRect in
+            guard let origin = cardPositions[card.id] else {
+                preconditionFailure("Card \(card.id) missing from cardPositions")
+            }
+            return CGRect(origin: origin, size: card.size)
+        }
+        let ports = edgePortAnchors(
+            edges: edges,
+            cards: cards,
+            indexByID: indexByID,
+            cardRects: cardRects
+        )
         for edge in edges {
             guard
                 let srcIndex = indexByID[edge.source],
@@ -3048,204 +5594,1567 @@ struct KnowledgeGraphLayout: Sendable {
                 continue
             }
 
-            // Canonical perpendicular direction. The bucket containing
-            // this edge may include edges in either direction (the
-            // unordered `PairKey` deliberately merges them), so to
-            // render parallel siblings on consistent opposite sides
-            // we anchor the perpendicular on a canonical ordering of
-            // the two endpoints rather than the per-edge src→tgt
-            // direction. Without this, two mutual edges `A→B` and
-            // `B→A` compute perpendiculars that point in *opposite*
-            // directions; applying signed `parallelIndex` offsets
-            // then places both edges on the same physical side and
-            // the curves still overlap. Anchoring on the smaller
-            // card index gives both edges the same perp basis, so
-            // their signed offsets land on opposite sides.
-            let lowIndex = min(srcIndex, tgtIndex)
-            let highIndex = max(srcIndex, tgtIndex)
-            let lowCenter = (lowIndex == srcIndex) ? srcCenter : tgtCenter
-            let highCenter = (lowIndex == srcIndex) ? tgtCenter : srcCenter
-            _ = highIndex
-            let canonDx = highCenter.x - lowCenter.x
-            let canonDy = highCenter.y - lowCenter.y
-            let canonLen = max(hypot(canonDx, canonDy), 0.001)
-            let perp = CGVector(dx: -canonDy / canonLen, dy: canonDx / canonLen)
-            let offsetMagnitude: CGFloat
-            if edge.parallelCount > 1 {
-                let centered = CGFloat(edge.parallelIndex) - CGFloat(edge.parallelCount - 1) / 2
-                // 28 pt per parallel step, combined with the × 3
-                // multiplier in the control offset below, yields a
-                // curve midpoint deviation of ≈ 21 pt for a 2-edge
-                // bundle (centered = ±0.5 → control offset = ±42 →
-                // mid deviation = ±21). That puts the two parallel
-                // labels comfortably apart instead of stacked.
-                offsetMagnitude = centered * 28
-            } else {
-                offsetMagnitude = 0
+            let preferredSourcePort = ports[EdgeEndpointKey(edgeID: edge.id, isSource: true)]
+                ?? fallbackEdgePort(rect: srcRect, toward: tgtCenter)
+            let preferredTargetPort = ports[EdgeEndpointKey(edgeID: edge.id, isSource: false)]
+                ?? fallbackEdgePort(rect: tgtRect, toward: srcCenter)
+            let excluded = Set([srcIndex, tgtIndex])
+            if
+                edge.parallelCount <= 1,
+                let directPoints = directOrthogonalRoute(sourceRect: srcRect, targetRect: tgtRect),
+                routeClearsNodes(directPoints, cardRects: cardRects, excluding: excluded),
+                routeClearsExistingEdges(directPoints, currentEdge: edge, routedEdges: routedEdges)
+            {
+                let route = edgeRoute(points: directPoints)
+                routes[edge.id] = route
+                routedEdges.append(RoutedEdge(edge: edge, points: route.points.isEmpty ? [route.start, route.end] : route.points))
+                continue
             }
 
-            let control: CGPoint
-            let isCurved: Bool
-            if offsetMagnitude == 0 {
-                control = CGPoint(x: (srcCenter.x + tgtCenter.x) / 2, y: (srcCenter.y + tgtCenter.y) / 2)
-                isCurved = false
-            } else {
-                let midX = (srcCenter.x + tgtCenter.x) / 2
-                let midY = (srcCenter.y + tgtCenter.y) / 2
-                control = CGPoint(
-                    x: midX + perp.dx * offsetMagnitude * 3,
-                    y: midY + perp.dy * offsetMagnitude * 3
-                )
-                isCurved = true
-            }
-
-            // Anchor on the rect boundary by clipping the centre-to-control
-            // line. For straight edges the "control" is the midpoint, which
-            // gives an exit point along the rect edge that faces the target.
-            let srcAnchor = clipFromCenter(rect: srcRect, toward: control)
-            let tgtAnchor = clipFromCenter(rect: tgtRect, toward: control)
-
-            routes[edge.id] = EdgeRoute(
-                start: srcAnchor,
-                end: tgtAnchor,
-                control: control,
-                isCurved: isCurved
+            let points = orthogonalEdgePoints(
+                edge: edge,
+                sourceRect: srcRect,
+                targetRect: tgtRect,
+                preferredSourcePort: preferredSourcePort,
+                preferredTargetPort: preferredTargetPort,
+                sourceIndex: srcIndex,
+                targetIndex: tgtIndex,
+                cardRects: cardRects,
+                routedEdges: routedEdges,
+                currentEdge: edge
             )
+            let midpoint = routePathMidpoint(points).point
+
+            let route = EdgeRoute(
+                start: points.first ?? preferredSourcePort.point,
+                end: points.last ?? preferredTargetPort.point,
+                control: midpoint,
+                isCurved: false,
+                points: points
+            )
+            routes[edge.id] = route
+            routedEdges.append(RoutedEdge(edge: edge, points: route.points.isEmpty ? [route.start, route.end] : route.points))
         }
         return routes
     }
 
-    /// Self-loop: emit an arc tangent to the top edge of the rectangle. The
-    /// parallel index moves successive loops higher so they do not stack.
+    private static func directOrthogonalRoute(
+        sourceRect: CGRect,
+        targetRect: CGRect
+    ) -> [CGPoint]? {
+        let verticalOverlap = min(sourceRect.maxY, targetRect.maxY) - max(sourceRect.minY, targetRect.minY)
+        if verticalOverlap > 0.5 {
+            let y = (max(sourceRect.minY, targetRect.minY) + min(sourceRect.maxY, targetRect.maxY)) * 0.5
+            if sourceRect.maxX <= targetRect.minX {
+                return [
+                    CGPoint(x: sourceRect.maxX, y: y),
+                    CGPoint(x: targetRect.minX, y: y)
+                ]
+            }
+            if targetRect.maxX <= sourceRect.minX {
+                return [
+                    CGPoint(x: sourceRect.minX, y: y),
+                    CGPoint(x: targetRect.maxX, y: y)
+                ]
+            }
+        }
+
+        let horizontalOverlap = min(sourceRect.maxX, targetRect.maxX) - max(sourceRect.minX, targetRect.minX)
+        if horizontalOverlap > 0.5 {
+            let x = (max(sourceRect.minX, targetRect.minX) + min(sourceRect.maxX, targetRect.maxX)) * 0.5
+            if sourceRect.maxY <= targetRect.minY {
+                return [
+                    CGPoint(x: x, y: sourceRect.maxY),
+                    CGPoint(x: x, y: targetRect.minY)
+                ]
+            }
+            if targetRect.maxY <= sourceRect.minY {
+                return [
+                    CGPoint(x: x, y: sourceRect.minY),
+                    CGPoint(x: x, y: targetRect.maxY)
+                ]
+            }
+        }
+        return nil
+    }
+
+    private static func edgeRoute(points: [CGPoint]) -> EdgeRoute {
+        let simplified = simplifyRoutePoints(points)
+        let start = simplified.first ?? .zero
+        let end = simplified.last ?? start
+        let midpoint = routePathMidpoint(simplified).point
+        return EdgeRoute(
+            start: start,
+            end: end,
+            control: midpoint,
+            isCurved: false,
+            points: simplified
+        )
+    }
+
+    private static func routingGroupRects(
+        groups: [CompoundGraph.Group],
+        cardRects: [CGRect],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [Int: CGRect] {
+        var result: [Int: CGRect] = [:]
+        result.reserveCapacity(groups.count)
+        for (groupIndex, group) in groups.enumerated() {
+            var rect = CGRect.null
+            for member in group.members {
+                guard let index = indexByID[member] else { continue }
+                let cardRect = cardRects[index]
+                rect = rect.isNull ? cardRect : rect.union(cardRect)
+            }
+            if !rect.isNull {
+                result[groupIndex] = rect
+            }
+        }
+        return result
+    }
+
+    private static func sharedRoutingGroup(
+        source: Int,
+        target: Int,
+        membership: GroupMembershipIndex,
+        groups: [CompoundGraph.Group]
+    ) -> Int? {
+        guard
+            let sourceGroups = membership.memberToGroups[source],
+            let targetGroups = membership.memberToGroups[target]
+        else { return nil }
+        let shared = sourceGroups.intersection(targetGroups)
+        return shared.min { lhs, rhs in
+            let leftCount = groups.indices.contains(lhs) ? groups[lhs].members.count : Int.max
+            let rightCount = groups.indices.contains(rhs) ? groups[rhs].members.count : Int.max
+            if leftCount != rightCount {
+                return leftCount < rightCount
+            }
+            return lhs < rhs
+        }
+    }
+
+    private static func shouldUseVerticalGroupRoute(
+        sourceRect: CGRect,
+        targetRect: CGRect
+    ) -> Bool {
+        let horizontalOverlap = min(sourceRect.maxX, targetRect.maxX) - max(sourceRect.minX, targetRect.minX)
+        let centerDX = abs(sourceRect.midX - targetRect.midX)
+        let centerDY = abs(sourceRect.midY - targetRect.midY)
+        return horizontalOverlap > min(sourceRect.width, targetRect.width) * 0.35
+            && centerDY > centerDX * 1.35
+    }
+
+    private static func verticalGroupEdgeRoute(
+        edge: CompoundGraph.CardEdge,
+        order: Int,
+        sourceRect: CGRect,
+        targetRect: CGRect,
+        groupRect: CGRect,
+        graphRect: CGRect
+    ) -> EdgeRoute {
+        let groupIsLeftOfGraph = groupRect.midX <= graphRect.midX
+        let side: EdgePortSide = groupIsLeftOfGraph ? .right : .left
+        let downward = targetRect.midY >= sourceRect.midY
+        let sourceAnchor = verticalGroupSideAnchor(
+            rect: sourceRect,
+            side: side,
+            isSource: true,
+            downward: downward
+        )
+        let targetAnchor = verticalGroupSideAnchor(
+            rect: targetRect,
+            side: side,
+            isSource: false,
+            downward: downward
+        )
+        let labelReserve = min(max(edgeLabelSize(edge).width * 0.5 + 18, 44), 104)
+        let laneStep = CGFloat(order % 3) * LayoutSpacing.edgeEdge
+        let laneDistance = labelReserve + laneStep
+        let laneX = side == .right
+            ? max(sourceRect.maxX, targetRect.maxX) + laneDistance
+            : min(sourceRect.minX, targetRect.minX) - laneDistance
+        let points = simplifyRoutePoints([
+            sourceAnchor,
+            CGPoint(x: laneX, y: sourceAnchor.y),
+            CGPoint(x: laneX, y: targetAnchor.y),
+            targetAnchor
+        ])
+        let midpoint = routePathMidpoint(points).point
+        return EdgeRoute(
+            start: sourceAnchor,
+            end: targetAnchor,
+            control: midpoint,
+            isCurved: false,
+            points: points
+        )
+    }
+
+    private static func verticalGroupSideAnchor(
+        rect: CGRect,
+        side: EdgePortSide,
+        isSource: Bool,
+        downward: Bool
+    ) -> CGPoint {
+        let direction: CGFloat = downward == isSource ? 1 : -1
+        let y = rect.midY + direction * min(rect.height * 0.26, 10)
+        let x = side == .right ? rect.maxX : rect.minX
+        return CGPoint(x: x, y: y)
+    }
+
+    private enum EdgePortSide: Hashable {
+        case top
+        case right
+        case bottom
+        case left
+    }
+
+    private struct EdgeEndpointKey: Hashable {
+        let edgeID: EdgeIdentifier
+        let isSource: Bool
+    }
+
+    private struct EdgePortBucket: Hashable {
+        let cardIndex: Int
+        let side: EdgePortSide
+    }
+
+    private struct EdgePortEntry {
+        let edgeID: EdgeIdentifier
+        let isSource: Bool
+        let cardIndex: Int
+        let side: EdgePortSide
+        let order: CGFloat
+    }
+
+    private struct EdgePort {
+        let point: CGPoint
+        let side: EdgePortSide
+    }
+
+    private struct OrthogonalRouteScore {
+        let edgeConflict: Int
+        let edgeClearance: CGFloat
+        let length: CGFloat
+        let corners: Int
+        let portPreference: CGFloat
+
+        func isBetter(than other: OrthogonalRouteScore) -> Bool {
+            if edgeConflict != other.edgeConflict {
+                return edgeConflict < other.edgeConflict
+            }
+            if abs(edgeClearance - other.edgeClearance) > 0.001 {
+                return edgeClearance < other.edgeClearance
+            }
+            if abs(length - other.length) > 0.001 {
+                return length < other.length
+            }
+            if corners != other.corners {
+                return corners < other.corners
+            }
+            return portPreference < other.portPreference
+        }
+    }
+
+    private static func edgePortAnchors(
+        edges: [CompoundGraph.CardEdge],
+        cards: [CompoundGraph.Card],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardRects: [CGRect]
+    ) -> [EdgeEndpointKey: EdgePort] {
+        var buckets: [EdgePortBucket: [EdgePortEntry]] = [:]
+        buckets.reserveCapacity(cards.count * 2)
+
+        for edge in edges where edge.source != edge.target {
+            guard
+                let sourceIndex = indexByID[edge.source],
+                let targetIndex = indexByID[edge.target]
+            else { continue }
+
+            let sourceRect = cardRects[sourceIndex]
+            let targetRect = cardRects[targetIndex]
+            let sourceCenter = CGPoint(x: sourceRect.midX, y: sourceRect.midY)
+            let targetCenter = CGPoint(x: targetRect.midX, y: targetRect.midY)
+            let sourceSide = portSide(from: sourceCenter, toward: targetCenter)
+            let targetSide = portSide(from: targetCenter, toward: sourceCenter)
+
+            let sourceEntry = EdgePortEntry(
+                edgeID: edge.id,
+                isSource: true,
+                cardIndex: sourceIndex,
+                side: sourceSide,
+                order: portOrder(side: sourceSide, neighborCenter: targetCenter)
+            )
+            let targetEntry = EdgePortEntry(
+                edgeID: edge.id,
+                isSource: false,
+                cardIndex: targetIndex,
+                side: targetSide,
+                order: portOrder(side: targetSide, neighborCenter: sourceCenter)
+            )
+            buckets[
+                EdgePortBucket(cardIndex: sourceIndex, side: sourceSide),
+                default: []
+            ].append(sourceEntry)
+            buckets[
+                EdgePortBucket(cardIndex: targetIndex, side: targetSide),
+                default: []
+            ].append(targetEntry)
+        }
+
+        var anchors: [EdgeEndpointKey: EdgePort] = [:]
+        anchors.reserveCapacity(edges.count * 2)
+        for (bucket, entries) in buckets {
+            let rect = cardRects[bucket.cardIndex]
+            let sorted = entries.sorted { lhs, rhs in
+                if lhs.order == rhs.order {
+                    return edgeSortKey(lhs.edgeID) < edgeSortKey(rhs.edgeID)
+                }
+                return lhs.order < rhs.order
+            }
+            for (index, entry) in sorted.enumerated() {
+                let point = portPoint(
+                    side: bucket.side,
+                    rect: rect,
+                    index: index,
+                    count: sorted.count
+                )
+                anchors[EdgeEndpointKey(edgeID: entry.edgeID, isSource: entry.isSource)] = EdgePort(
+                    point: point,
+                    side: bucket.side
+                )
+            }
+        }
+        return anchors
+    }
+
+    private static func fallbackEdgePort(rect: CGRect, toward target: CGPoint) -> EdgePort {
+        let side = portSide(
+            from: CGPoint(x: rect.midX, y: rect.midY),
+            toward: target
+        )
+        let point = portPoint(side: side, rect: rect, index: 0, count: 1)
+        return EdgePort(point: point, side: side)
+    }
+
+    private static func portSide(from center: CGPoint, toward target: CGPoint) -> EdgePortSide {
+        let dx = target.x - center.x
+        let dy = target.y - center.y
+        if abs(dx) >= abs(dy) {
+            return dx >= 0 ? .right : .left
+        }
+        return dy >= 0 ? .bottom : .top
+    }
+
+    private static func portOrder(side: EdgePortSide, neighborCenter: CGPoint) -> CGFloat {
+        switch side {
+        case .top, .bottom:
+            return neighborCenter.x
+        case .left, .right:
+            return neighborCenter.y
+        }
+    }
+
+    private static func portPoint(
+        side: EdgePortSide,
+        rect: CGRect,
+        index: Int,
+        count: Int
+    ) -> CGPoint {
+        let safeCount = max(count, 1)
+        let clampedIndex = min(max(index, 0), safeCount - 1)
+        let availableLength = portAvailableLength(side: side, rect: rect)
+        let step: CGFloat
+        if safeCount <= 1 {
+            step = 0
+        } else {
+            let desiredSpan = LayoutSpacing.edgeEdge * CGFloat(safeCount - 1)
+            step = desiredSpan <= availableLength
+                ? LayoutSpacing.edgeEdge
+                : availableLength / CGFloat(safeCount - 1)
+        }
+        let offset = (CGFloat(clampedIndex) - CGFloat(safeCount - 1) / 2) * step
+        switch side {
+        case .top:
+            return CGPoint(
+                x: clampPortCoordinate(rect.midX + offset, min: rect.minX, max: rect.maxX),
+                y: rect.minY
+            )
+        case .right:
+            return CGPoint(
+                x: rect.maxX,
+                y: clampPortCoordinate(rect.midY + offset, min: rect.minY, max: rect.maxY)
+            )
+        case .bottom:
+            return CGPoint(
+                x: clampPortCoordinate(rect.midX + offset, min: rect.minX, max: rect.maxX),
+                y: rect.maxY
+            )
+        case .left:
+            return CGPoint(
+                x: rect.minX,
+                y: clampPortCoordinate(rect.midY + offset, min: rect.minY, max: rect.maxY)
+            )
+        }
+    }
+
+    private static func portAvailableLength(side: EdgePortSide, rect: CGRect) -> CGFloat {
+        let rawLength: CGFloat
+        switch side {
+        case .top, .bottom:
+            rawLength = rect.width
+        case .left, .right:
+            rawLength = rect.height
+        }
+        let guardDistance = min(LayoutSpacing.portCornerGuard, max(rawLength / 2, 0))
+        return max(rawLength - guardDistance * 2, 0)
+    }
+
+    private static func clampPortCoordinate(_ value: CGFloat, min: CGFloat, max: CGFloat) -> CGFloat {
+        let rawLength = max - min
+        let guardDistance = Swift.min(LayoutSpacing.portCornerGuard, Swift.max(rawLength / 2, 0))
+        return Swift.min(max - guardDistance, Swift.max(min + guardDistance, value))
+    }
+
+    private static func edgePortCandidates(
+        rect: CGRect,
+        otherRect: CGRect,
+        preferred: EdgePort,
+        parallelIndex: Int,
+        parallelCount: Int
+    ) -> [EdgePort] {
+        _ = otherRect
+        _ = parallelIndex
+        _ = parallelCount
+        var candidates: [EdgePort] = []
+        var seen: Set<String> = []
+
+        func append(_ port: EdgePort) {
+            let key = "\(port.side):\(Int(port.point.x.rounded())):\(Int(port.point.y.rounded()))"
+            guard seen.insert(key).inserted else { return }
+            candidates.append(port)
+        }
+
+        append(preferred)
+        for side in allPortSides {
+            append(EdgePort(
+                point: portPoint(side: side, rect: rect, index: 0, count: 1),
+                side: side
+            ))
+        }
+        return candidates
+    }
+
+    private static var allPortSides: [EdgePortSide] {
+        [.right, .bottom, .left, .top]
+    }
+
+    private static func portNormal(_ side: EdgePortSide) -> CGVector {
+        switch side {
+        case .top:
+            return CGVector(dx: 0, dy: -1)
+        case .right:
+            return CGVector(dx: 1, dy: 0)
+        case .bottom:
+            return CGVector(dx: 0, dy: 1)
+        case .left:
+            return CGVector(dx: -1, dy: 0)
+        }
+    }
+
+    private static func vectorFollowsNormal(_ vector: CGVector, side: EdgePortSide) -> Bool {
+        let normal = portNormal(side)
+        let cross = abs(vector.dx * normal.dy - vector.dy * normal.dx)
+        let dot = vector.dx * normal.dx + vector.dy * normal.dy
+        return cross < 0.5 && dot > 0
+    }
+
+    private struct RoutePathSample {
+        let point: CGPoint
+        let tangent: CGVector
+    }
+
+    private static func orthogonalEdgePoints(
+        edge: CompoundGraph.CardEdge,
+        sourceRect: CGRect,
+        targetRect: CGRect,
+        preferredSourcePort: EdgePort,
+        preferredTargetPort: EdgePort,
+        sourceIndex: Int,
+        targetIndex: Int,
+        cardRects: [CGRect],
+        routedEdges: [RoutedEdge],
+        currentEdge: CompoundGraph.CardEdge
+    ) -> [CGPoint] {
+        let centeredParallel = edge.parallelCount > 1
+            ? CGFloat(edge.parallelIndex) - CGFloat(edge.parallelCount - 1) / 2
+            : 0
+        let laneOffset = centeredParallel * LayoutSpacing.edgeEdge
+        let excluded = Set([sourceIndex, targetIndex])
+        let sourcePorts = edgePortCandidates(
+            rect: sourceRect,
+            otherRect: targetRect,
+            preferred: preferredSourcePort,
+            parallelIndex: edge.parallelIndex,
+            parallelCount: edge.parallelCount
+        )
+        let targetPorts = edgePortCandidates(
+            rect: targetRect,
+            otherRect: sourceRect,
+            preferred: preferredTargetPort,
+            parallelIndex: edge.parallelIndex,
+            parallelCount: edge.parallelCount
+        )
+        var best: [CGPoint]?
+        var bestScore: OrthogonalRouteScore?
+        for sourcePort in sourcePorts {
+            for targetPort in targetPorts {
+                let candidates = orthogonalRouteCandidates(
+                    sourcePort: sourcePort,
+                    targetPort: targetPort,
+                    laneOffset: laneOffset,
+                    cardRects: cardRects,
+                    excludedIndices: excluded
+                )
+                for candidate in candidates {
+                    let points = simplifyRoutePoints(candidate)
+                    guard points.count > 1 else { continue }
+                    guard routeIsOrthogonal(points) else { continue }
+                    guard routeUsesPerpendicularPorts(
+                        points,
+                        sourcePort: sourcePort,
+                        targetPort: targetPort
+                    ) else { continue }
+                    guard routeClearsNodes(
+                        points,
+                        cardRects: cardRects,
+                        excluding: excluded
+                    ) else { continue }
+
+                    let edgeClearance = edgeRouteClearanceScore(
+                        points,
+                        currentEdge: currentEdge,
+                        routedEdges: routedEdges
+                    )
+                    let score = OrthogonalRouteScore(
+                        edgeConflict: edgeClearance == 0 ? 0 : 1,
+                        edgeClearance: edgeClearance,
+                        length: routeLength(points),
+                        corners: routeCornerCount(points),
+                        portPreference: hypot(
+                            sourcePort.point.x - preferredSourcePort.point.x,
+                            sourcePort.point.y - preferredSourcePort.point.y
+                        ) + hypot(
+                            targetPort.point.x - preferredTargetPort.point.x,
+                            targetPort.point.y - preferredTargetPort.point.y
+                        )
+                    )
+                    if bestScore.map({ score.isBetter(than: $0) }) ?? true {
+                        bestScore = score
+                        best = points
+                    }
+                }
+            }
+        }
+        return best ?? [
+            preferredSourcePort.point,
+            preferredTargetPort.point
+        ]
+    }
+
+    private static func orthogonalRouteCandidates(
+        sourcePort: EdgePort,
+        targetPort: EdgePort,
+        laneOffset: CGFloat,
+        cardRects: [CGRect],
+        excludedIndices: Set<Int>
+    ) -> [[CGPoint]] {
+        let laneMagnitude = abs(laneOffset)
+        let stubDistances = uniqueCGFloatValues([
+            0,
+            laneMagnitude,
+            LayoutSpacing.edgeNode + laneMagnitude
+        ])
+        let laneOffsets = uniqueCGFloatValues([
+            laneOffset,
+            0,
+            -laneOffset,
+            LayoutSpacing.edgeEdge,
+            -LayoutSpacing.edgeEdge,
+            LayoutSpacing.edgeEdge * 2,
+            -LayoutSpacing.edgeEdge * 2,
+            LayoutSpacing.edgeEdge * 3,
+            -LayoutSpacing.edgeEdge * 3
+        ])
+
+        var candidates: [[CGPoint]] = []
+        var seen: Set<String> = []
+        for sourceDistance in stubDistances {
+            for targetDistance in stubDistances {
+                let sourceOut = offsetPoint(sourcePort.point, side: sourcePort.side, distance: sourceDistance)
+                let targetOut = offsetPoint(targetPort.point, side: targetPort.side, distance: targetDistance)
+                let dx = targetOut.x - sourceOut.x
+                let dy = targetOut.y - sourceOut.y
+                let horizontalFirst = abs(dx) >= abs(dy)
+
+                for offset in laneOffsets {
+                    appendRouteCandidate(
+                        routeWithEndpointStubs(
+                            sourcePoint: sourcePort.point,
+                            sourceOut: sourceOut,
+                            core: orthogonalCandidate(
+                                start: sourceOut,
+                                end: targetOut,
+                                horizontalFirst: horizontalFirst,
+                                laneOffset: offset
+                            ),
+                            targetOut: targetOut,
+                            targetPoint: targetPort.point
+                        ),
+                        to: &candidates,
+                        seen: &seen
+                    )
+                    appendRouteCandidate(
+                        routeWithEndpointStubs(
+                            sourcePoint: sourcePort.point,
+                            sourceOut: sourceOut,
+                            core: orthogonalCandidate(
+                                start: sourceOut,
+                                end: targetOut,
+                                horizontalFirst: !horizontalFirst,
+                                laneOffset: offset == 0 ? 0 : -offset
+                            ),
+                            targetOut: targetOut,
+                            targetPoint: targetPort.point
+                        ),
+                        to: &candidates,
+                        seen: &seen
+                    )
+                }
+
+                appendRouteCandidate(
+                    routeWithEndpointStubs(
+                        sourcePoint: sourcePort.point,
+                        sourceOut: sourceOut,
+                        core: [
+                            sourceOut,
+                            CGPoint(x: targetOut.x, y: sourceOut.y),
+                            targetOut
+                        ],
+                        targetOut: targetOut,
+                        targetPoint: targetPort.point
+                    ),
+                    to: &candidates,
+                    seen: &seen
+                )
+                appendRouteCandidate(
+                    routeWithEndpointStubs(
+                        sourcePoint: sourcePort.point,
+                        sourceOut: sourceOut,
+                        core: [
+                            sourceOut,
+                            CGPoint(x: sourceOut.x, y: targetOut.y),
+                            targetOut
+                        ],
+                        targetOut: targetOut,
+                        targetPoint: targetPort.point
+                    ),
+                    to: &candidates,
+                    seen: &seen
+                )
+
+                if let obstacleAvoidingCore = obstacleAvoidingOrthogonalRoute(
+                    start: sourceOut,
+                    end: targetOut,
+                    laneOffset: laneOffset,
+                    cardRects: cardRects,
+                    excludedIndices: excludedIndices
+                ) {
+                    appendRouteCandidate(
+                        routeWithEndpointStubs(
+                            sourcePoint: sourcePort.point,
+                            sourceOut: sourceOut,
+                            core: obstacleAvoidingCore,
+                            targetOut: targetOut,
+                            targetPoint: targetPort.point
+                        ),
+                        to: &candidates,
+                        seen: &seen
+                    )
+                }
+            }
+        }
+        return candidates
+    }
+
+    private enum RouteAxis: Hashable {
+        case horizontal
+        case vertical
+    }
+
+    private struct RouteSearchState: Hashable {
+        let pointIndex: Int
+        let axis: RouteAxis?
+    }
+
+    private struct RouteSearchCost {
+        let length: CGFloat
+        let corners: Int
+
+        func adding(length addedLength: CGFloat, turns: Int) -> RouteSearchCost {
+            RouteSearchCost(length: length + addedLength, corners: corners + turns)
+        }
+
+        func isBetter(than other: RouteSearchCost) -> Bool {
+            if abs(length - other.length) > 0.001 {
+                return length < other.length
+            }
+            return corners < other.corners
+        }
+    }
+
+    private static func obstacleAvoidingOrthogonalRoute(
+        start: CGPoint,
+        end: CGPoint,
+        laneOffset: CGFloat,
+        cardRects: [CGRect],
+        excludedIndices: Set<Int>
+    ) -> [CGPoint]? {
+        let obstacles = cardRects.enumerated().compactMap { index, rect -> CGRect? in
+            guard !excludedIndices.contains(index) else { return nil }
+            return rect.insetBy(dx: -LayoutSpacing.edgeNode, dy: -LayoutSpacing.edgeNode)
+        }
+        guard !obstacles.isEmpty else { return nil }
+
+        let lanePadding = LayoutSpacing.edgeEdge + abs(laneOffset)
+        var xValues: [CGFloat] = [
+            start.x,
+            end.x,
+            (start.x + end.x) * 0.5 + laneOffset
+        ]
+        var yValues: [CGFloat] = [
+            start.y,
+            end.y,
+            (start.y + end.y) * 0.5 + laneOffset
+        ]
+        for obstacle in obstacles {
+            xValues.append(obstacle.minX - lanePadding)
+            xValues.append(obstacle.maxX + lanePadding)
+            yValues.append(obstacle.minY - lanePadding)
+            yValues.append(obstacle.maxY + lanePadding)
+        }
+        xValues = sortedUniqueCGFloatValues(xValues)
+        yValues = sortedUniqueCGFloatValues(yValues)
+        guard
+            let startX = xValues.firstIndex(where: { abs($0 - start.x) < 0.5 }),
+            let startY = yValues.firstIndex(where: { abs($0 - start.y) < 0.5 }),
+            let endX = xValues.firstIndex(where: { abs($0 - end.x) < 0.5 }),
+            let endY = yValues.firstIndex(where: { abs($0 - end.y) < 0.5 })
+        else { return nil }
+
+        let width = xValues.count
+        let height = yValues.count
+        func pointIndex(x: Int, y: Int) -> Int {
+            y * width + x
+        }
+        func gridPoint(_ index: Int) -> CGPoint {
+            let x = index % width
+            let y = index / width
+            return CGPoint(x: xValues[x], y: yValues[y])
+        }
+        let startIndex = pointIndex(x: startX, y: startY)
+        let endIndex = pointIndex(x: endX, y: endY)
+        let startState = RouteSearchState(pointIndex: startIndex, axis: nil)
+        var distances: [RouteSearchState: RouteSearchCost] = [
+            startState: RouteSearchCost(length: 0, corners: 0)
+        ]
+        var previous: [RouteSearchState: RouteSearchState] = [:]
+        var visited: Set<RouteSearchState> = []
+
+        while true {
+            guard let current = distances
+                .filter({ !visited.contains($0.key) })
+                .min(by: { $0.value.isBetter(than: $1.value) })?
+                .key
+            else { break }
+            if current.pointIndex == endIndex {
+                return reconstructRoute(
+                    endingAt: current,
+                    previous: previous,
+                    pointForIndex: gridPoint
+                )
+            }
+            visited.insert(current)
+            guard let currentDistance = distances[current] else { continue }
+            for (neighborIndex, axis) in orthogonalGridNeighbors(
+                pointIndex: current.pointIndex,
+                width: width,
+                height: height
+            ) {
+                let currentPoint = gridPoint(current.pointIndex)
+                let neighborPoint = gridPoint(neighborIndex)
+                guard segmentClearsObstacles(currentPoint, neighborPoint, obstacles: obstacles) else {
+                    continue
+                }
+                let turns = current.axis == nil || current.axis == axis ? 0 : 1
+                let stepLength = hypot(neighborPoint.x - currentPoint.x, neighborPoint.y - currentPoint.y)
+                let neighborState = RouteSearchState(pointIndex: neighborIndex, axis: axis)
+                let nextCost = currentDistance.adding(length: stepLength, turns: turns)
+                if distances[neighborState].map({ nextCost.isBetter(than: $0) }) ?? true {
+                    distances[neighborState] = nextCost
+                    previous[neighborState] = current
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func sortedUniqueCGFloatValues(_ values: [CGFloat]) -> [CGFloat] {
+        uniqueCGFloatValues(values).sorted()
+    }
+
+    private static func orthogonalGridNeighbors(
+        pointIndex: Int,
+        width: Int,
+        height: Int
+    ) -> [(Int, RouteAxis)] {
+        let x = pointIndex % width
+        let y = pointIndex / width
+        var neighbors: [(Int, RouteAxis)] = []
+        if x > 0 {
+            neighbors.append((y * width + x - 1, .horizontal))
+        }
+        if x + 1 < width {
+            neighbors.append((y * width + x + 1, .horizontal))
+        }
+        if y > 0 {
+            neighbors.append(((y - 1) * width + x, .vertical))
+        }
+        if y + 1 < height {
+            neighbors.append(((y + 1) * width + x, .vertical))
+        }
+        return neighbors
+    }
+
+    private static func reconstructRoute(
+        endingAt end: RouteSearchState,
+        previous: [RouteSearchState: RouteSearchState],
+        pointForIndex: (Int) -> CGPoint
+    ) -> [CGPoint] {
+        var states: [RouteSearchState] = [end]
+        var current = end
+        while let prior = previous[current] {
+            states.append(prior)
+            current = prior
+        }
+        return simplifyRoutePoints(states.reversed().map { pointForIndex($0.pointIndex) })
+    }
+
+    private static func segmentClearsObstacles(
+        _ start: CGPoint,
+        _ end: CGPoint,
+        obstacles: [CGRect]
+    ) -> Bool {
+        for obstacle in obstacles {
+            if segmentIntersectsRect(start, end, obstacle) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func uniqueCGFloatValues(_ values: [CGFloat]) -> [CGFloat] {
+        var result: [CGFloat] = []
+        for value in values {
+            if !result.contains(where: { abs($0 - value) < 0.5 }) {
+                result.append(value)
+            }
+        }
+        return result
+    }
+
+    private static func appendRouteCandidate(
+        _ points: [CGPoint],
+        to candidates: inout [[CGPoint]],
+        seen: inout Set<String>
+    ) {
+        let simplified = simplifyRoutePoints(points)
+        let key = simplified
+            .map { "\(Int($0.x.rounded())):\(Int($0.y.rounded()))" }
+            .joined(separator: "|")
+        guard seen.insert(key).inserted else { return }
+        candidates.append(simplified)
+    }
+
+    private static func routeIsOrthogonal(_ points: [CGPoint]) -> Bool {
+        let simplified = simplifyRoutePoints(points)
+        guard simplified.count > 1 else { return false }
+        for offset in 1..<simplified.count {
+            let previous = simplified[offset - 1]
+            let current = simplified[offset]
+            let sameX = abs(previous.x - current.x) < 0.5
+            let sameY = abs(previous.y - current.y) < 0.5
+            if !sameX && !sameY {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func routeCornerCount(_ points: [CGPoint]) -> Int {
+        let simplified = simplifyRoutePoints(points)
+        guard simplified.count > 2 else { return 0 }
+        var count = 0
+        for index in 1..<(simplified.count - 1) {
+            let previous = simplified[index - 1]
+            let current = simplified[index]
+            let next = simplified[index + 1]
+            let enteringHorizontal = abs(previous.y - current.y) < 0.5
+            let leavingHorizontal = abs(current.y - next.y) < 0.5
+            if enteringHorizontal != leavingHorizontal {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private static func routeLength(_ points: [CGPoint]) -> CGFloat {
+        let simplified = simplifyRoutePoints(points)
+        guard simplified.count > 1 else { return 0 }
+        var length: CGFloat = 0
+        for offset in 1..<simplified.count {
+            length += hypot(
+                simplified[offset].x - simplified[offset - 1].x,
+                simplified[offset].y - simplified[offset - 1].y
+            )
+        }
+        return length
+    }
+
+    private static func offsetPoint(
+        _ point: CGPoint,
+        side: EdgePortSide,
+        distance: CGFloat
+    ) -> CGPoint {
+        let normal = portNormal(side)
+        return CGPoint(
+            x: point.x + normal.dx * distance,
+            y: point.y + normal.dy * distance
+        )
+    }
+
+    private static func routeWithEndpointStubs(
+        sourcePoint: CGPoint,
+        sourceOut: CGPoint,
+        core: [CGPoint],
+        targetOut: CGPoint,
+        targetPoint: CGPoint
+    ) -> [CGPoint] {
+        var points: [CGPoint] = [sourcePoint, sourceOut]
+        points.append(contentsOf: core.dropFirst().dropLast())
+        points.append(targetOut)
+        points.append(targetPoint)
+        return simplifyRoutePoints(points)
+    }
+
+    private static func routeUsesPerpendicularPorts(
+        _ points: [CGPoint],
+        sourcePort: EdgePort,
+        targetPort: EdgePort
+    ) -> Bool {
+        let simplified = simplifyRoutePoints(points)
+        guard simplified.count > 1 else { return false }
+        let sourceVector = CGVector(
+            dx: simplified[1].x - simplified[0].x,
+            dy: simplified[1].y - simplified[0].y
+        )
+        let targetVector = CGVector(
+            dx: simplified[simplified.count - 2].x - simplified[simplified.count - 1].x,
+            dy: simplified[simplified.count - 2].y - simplified[simplified.count - 1].y
+        )
+        return vectorFollowsNormal(sourceVector, side: sourcePort.side)
+            && vectorFollowsNormal(targetVector, side: targetPort.side)
+    }
+
+    private static func orthogonalCandidate(
+        start: CGPoint,
+        end: CGPoint,
+        horizontalFirst: Bool,
+        laneOffset: CGFloat
+    ) -> [CGPoint] {
+        if horizontalFirst {
+            let midX = (start.x + end.x) * 0.5 + laneOffset
+            return [
+                start,
+                CGPoint(x: midX, y: start.y),
+                CGPoint(x: midX, y: end.y),
+                end
+            ]
+        } else {
+            let midY = (start.y + end.y) * 0.5 + laneOffset
+            return [
+                start,
+                CGPoint(x: start.x, y: midY),
+                CGPoint(x: end.x, y: midY),
+                end
+            ]
+        }
+    }
+
+    private static func simplifyRoutePoints(_ points: [CGPoint]) -> [CGPoint] {
+        guard points.count > 2 else { return points }
+        var result: [CGPoint] = []
+        result.reserveCapacity(points.count)
+        for point in points {
+            if let last = result.last, hypot(point.x - last.x, point.y - last.y) < 0.5 {
+                continue
+            }
+            if result.count >= 2 {
+                let previous = result[result.count - 2]
+                let current = result[result.count - 1]
+                let sameVertical = abs(previous.x - current.x) < 0.5 && abs(current.x - point.x) < 0.5
+                let sameHorizontal = abs(previous.y - current.y) < 0.5 && abs(current.y - point.y) < 0.5
+                if sameVertical || sameHorizontal {
+                    result[result.count - 1] = point
+                    continue
+                }
+            }
+            result.append(point)
+        }
+        return result
+    }
+
+    private static func routeClearsNodes(
+        _ points: [CGPoint],
+        cardRects: [CGRect],
+        excluding excludedIndices: Set<Int>
+    ) -> Bool {
+        guard points.count > 1 else { return true }
+        for offset in 1..<points.count {
+            let start = points[offset - 1]
+            let end = points[offset]
+            for (index, rect) in cardRects.enumerated() where !excludedIndices.contains(index) {
+                if segmentIntersectsRect(
+                    start,
+                    end,
+                    rect.insetBy(dx: -LayoutSpacing.edgeNode, dy: -LayoutSpacing.edgeNode)
+                ) {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private static func routeClearsExistingEdges(
+        _ points: [CGPoint],
+        currentEdge: CompoundGraph.CardEdge,
+        routedEdges: [RoutedEdge]
+    ) -> Bool {
+        edgeRouteClearanceScore(
+            points,
+            currentEdge: currentEdge,
+            routedEdges: routedEdges
+        ) == 0
+    }
+
+    private static func edgeRouteClearanceScore(
+        _ points: [CGPoint],
+        currentEdge: CompoundGraph.CardEdge,
+        routedEdges: [RoutedEdge]
+    ) -> CGFloat {
+        guard points.count > 1 else { return 0 }
+        var score: CGFloat = 0
+        for routedEdge in routedEdges {
+            let otherPoints = routedEdge.points
+            guard otherPoints.count > 1 else { continue }
+            let sharedEndpoints = sharedEndpoints(currentEdge, routedEdge.edge)
+            let currentSharedPoints = sharedEndpointPoints(
+                edge: currentEdge,
+                points: points,
+                sharedEndpoints: sharedEndpoints
+            )
+            let otherSharedPoints = sharedEndpointPoints(
+                edge: routedEdge.edge,
+                points: otherPoints,
+                sharedEndpoints: sharedEndpoints
+            )
+            for currentOffset in 1..<points.count {
+                let currentStart = points[currentOffset - 1]
+                let currentEnd = points[currentOffset]
+                guard let currentSegment = edgeClearanceSegment(
+                    start: currentStart,
+                    end: currentEnd,
+                    sharedEndpointPoints: currentSharedPoints
+                ) else { continue }
+                for otherOffset in 1..<otherPoints.count {
+                    let otherStart = otherPoints[otherOffset - 1]
+                    let otherEnd = otherPoints[otherOffset]
+                    guard let otherSegment = edgeClearanceSegment(
+                        start: otherStart,
+                        end: otherEnd,
+                        sharedEndpointPoints: otherSharedPoints
+                    ) else { continue }
+                    let distance = segmentDistance(
+                        currentSegment.start,
+                        currentSegment.end,
+                        otherSegment.start,
+                        otherSegment.end
+                    )
+                    if !sharedEndpoints.isEmpty && distance >= 0.5 {
+                        continue
+                    }
+                    guard distance < LayoutSpacing.edgeEdge else { continue }
+                    score += (LayoutSpacing.edgeEdge - distance) * 120
+                    if distance < 0.5 {
+                        score += 10_000
+                    }
+                }
+            }
+        }
+        return score
+    }
+
+    private static func sharedEndpoints(
+        _ lhs: CompoundGraph.CardEdge,
+        _ rhs: CompoundGraph.CardEdge
+    ) -> Set<CompoundGraph.Card.ID> {
+        Set([lhs.source, lhs.target]).intersection(Set([rhs.source, rhs.target]))
+    }
+
+    private static func sharedEndpointPoints(
+        edge: CompoundGraph.CardEdge,
+        points: [CGPoint],
+        sharedEndpoints: Set<CompoundGraph.Card.ID>
+    ) -> [CGPoint] {
+        guard !sharedEndpoints.isEmpty else { return [] }
+        var result: [CGPoint] = []
+        if sharedEndpoints.contains(edge.source), let first = points.first {
+            result.append(first)
+        }
+        if sharedEndpoints.contains(edge.target), let last = points.last {
+            result.append(last)
+        }
+        return result
+    }
+
+    private static func edgeClearanceSegment(
+        start: CGPoint,
+        end: CGPoint,
+        sharedEndpointPoints: [CGPoint]
+    ) -> (start: CGPoint, end: CGPoint)? {
+        var trimmedStart = start
+        var trimmedEnd = end
+        for endpoint in sharedEndpointPoints {
+            if pointsAreClose(trimmedStart, endpoint) {
+                trimmedStart = pointAlongSegment(
+                    from: trimmedStart,
+                    to: trimmedEnd,
+                    distance: LayoutSpacing.edgeEdge
+                )
+            }
+            if pointsAreClose(trimmedEnd, endpoint) {
+                trimmedEnd = pointAlongSegment(
+                    from: trimmedEnd,
+                    to: trimmedStart,
+                    distance: LayoutSpacing.edgeEdge
+                )
+            }
+        }
+        guard hypot(trimmedEnd.x - trimmedStart.x, trimmedEnd.y - trimmedStart.y) > 0.5 else {
+            return nil
+        }
+        return (trimmedStart, trimmedEnd)
+    }
+
+    private static func pointAlongSegment(
+        from start: CGPoint,
+        to end: CGPoint,
+        distance: CGFloat
+    ) -> CGPoint {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let length = hypot(dx, dy)
+        guard length > 0.5 else { return start }
+        let clampedDistance = min(distance, length)
+        return CGPoint(
+            x: start.x + dx / length * clampedDistance,
+            y: start.y + dy / length * clampedDistance
+        )
+    }
+
+    private static func pointsAreClose(_ lhs: CGPoint, _ rhs: CGPoint) -> Bool {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y) < 0.5
+    }
+
+    private static func segmentDistance(
+        _ a: CGPoint,
+        _ b: CGPoint,
+        _ c: CGPoint,
+        _ d: CGPoint
+    ) -> CGFloat {
+        if segmentsIntersect(a, b, c, d) {
+            return 0
+        }
+        return min(
+            pointSegmentDistance(a, c, d),
+            pointSegmentDistance(b, c, d),
+            pointSegmentDistance(c, a, b),
+            pointSegmentDistance(d, a, b)
+        )
+    }
+
+    private static func pointSegmentDistance(
+        _ point: CGPoint,
+        _ start: CGPoint,
+        _ end: CGPoint
+    ) -> CGFloat {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0.001 else {
+            return hypot(point.x - start.x, point.y - start.y)
+        }
+        let rawT = ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared
+        let t = min(1, max(0, rawT))
+        let projection = CGPoint(x: start.x + dx * t, y: start.y + dy * t)
+        return hypot(point.x - projection.x, point.y - projection.y)
+    }
+
+    private static func routePathSample(_ points: [CGPoint], fraction: CGFloat) -> RoutePathSample {
+        guard let first = points.first else {
+            return RoutePathSample(point: .zero, tangent: CGVector(dx: 1, dy: 0))
+        }
+        guard points.count > 1 else {
+            return RoutePathSample(point: first, tangent: CGVector(dx: 1, dy: 0))
+        }
+
+        var totalLength: CGFloat = 0
+        for offset in 1..<points.count {
+            totalLength += hypot(
+                points[offset].x - points[offset - 1].x,
+                points[offset].y - points[offset - 1].y
+            )
+        }
+        let clampedFraction = min(1, max(0, fraction))
+        let target = totalLength * clampedFraction
+        var accumulated: CGFloat = 0
+        for offset in 1..<points.count {
+            let start = points[offset - 1]
+            let end = points[offset]
+            let length = hypot(end.x - start.x, end.y - start.y)
+            guard length > 0.001 else { continue }
+            if accumulated + length >= target {
+                let t = (target - accumulated) / length
+                return RoutePathSample(
+                    point: CGPoint(
+                        x: start.x + (end.x - start.x) * t,
+                        y: start.y + (end.y - start.y) * t
+                    ),
+                    tangent: CGVector(dx: end.x - start.x, dy: end.y - start.y)
+                )
+            }
+            accumulated += length
+        }
+        let previous = points[points.count - 2]
+        let last = points[points.count - 1]
+        return RoutePathSample(
+            point: last,
+            tangent: CGVector(dx: last.x - previous.x, dy: last.y - previous.y)
+        )
+    }
+
+    private static func routePathMidpoint(_ points: [CGPoint]) -> RoutePathSample {
+        routePathSample(points, fraction: 0.5)
+    }
+
+    private static func segmentIntersectsRect(
+        _ start: CGPoint,
+        _ end: CGPoint,
+        _ rect: CGRect
+    ) -> Bool {
+        if rect.contains(start) || rect.contains(end) { return true }
+        let topLeft = CGPoint(x: rect.minX, y: rect.minY)
+        let topRight = CGPoint(x: rect.maxX, y: rect.minY)
+        let bottomRight = CGPoint(x: rect.maxX, y: rect.maxY)
+        let bottomLeft = CGPoint(x: rect.minX, y: rect.maxY)
+        return segmentsIntersect(start, end, topLeft, topRight)
+            || segmentsIntersect(start, end, topRight, bottomRight)
+            || segmentsIntersect(start, end, bottomRight, bottomLeft)
+            || segmentsIntersect(start, end, bottomLeft, topLeft)
+    }
+
+    private static func segmentsIntersect(
+        _ a: CGPoint,
+        _ b: CGPoint,
+        _ c: CGPoint,
+        _ d: CGPoint
+    ) -> Bool {
+        func orientation(_ p: CGPoint, _ q: CGPoint, _ r: CGPoint) -> CGFloat {
+            (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y)
+        }
+        func containsOnSegment(_ p: CGPoint, _ q: CGPoint, _ r: CGPoint) -> Bool {
+            q.x >= min(p.x, r.x) - 0.001
+                && q.x <= max(p.x, r.x) + 0.001
+                && q.y >= min(p.y, r.y) - 0.001
+                && q.y <= max(p.y, r.y) + 0.001
+        }
+        let o1 = orientation(a, b, c)
+        let o2 = orientation(a, b, d)
+        let o3 = orientation(c, d, a)
+        let o4 = orientation(c, d, b)
+        if o1 == 0 && containsOnSegment(a, c, b) { return true }
+        if o2 == 0 && containsOnSegment(a, d, b) { return true }
+        if o3 == 0 && containsOnSegment(c, a, d) { return true }
+        if o4 == 0 && containsOnSegment(c, b, d) { return true }
+        return (o1 > 0) != (o2 > 0) && (o3 > 0) != (o4 > 0)
+    }
+
+    private static func edgeSortKey(_ id: EdgeIdentifier) -> String {
+        "\(id.source.kind):\(id.source.key)|\(id.predicate)|\(id.target.kind):\(id.target.key)|\(id.namedGraph ?? "")"
+    }
+
+    /// Self-loop: emit an orthogonal loop from the top edge back to the top
+    /// edge. The parallel index moves successive loops higher so they do not
+    /// stack.
     private static func selfLoopRoute(
         center: CGPoint,
         size: CGSize,
         parallelIndex: Int
     ) -> EdgeRoute {
         let yOffset = CGFloat(parallelIndex) * 16
-        let top = CGPoint(x: center.x, y: center.y - size.height / 2)
-        let left = CGPoint(x: top.x - 24, y: top.y - 8 - yOffset)
-        let right = CGPoint(x: top.x + 24, y: top.y - 8 - yOffset)
-        let control = CGPoint(x: top.x, y: top.y - 48 - yOffset)
-        // Re-use the curved-edge model: start and end on the top edge with a
-        // control above so the renderer draws a single quadratic arc.
-        _ = right
-        return EdgeRoute(start: left, end: right, control: control, isCurved: true)
-    }
-
-    /// Clip a ray from the centre of `rect` toward `target` to the rectangle
-    /// boundary. `rect.midPoint` must be strictly inside the rect (true by
-    /// construction).
-    private static func clipFromCenter(rect: CGRect, toward target: CGPoint) -> CGPoint {
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let dx = target.x - center.x
-        let dy = target.y - center.y
-        if abs(dx) < 0.001 && abs(dy) < 0.001 { return center }
-
-        var tMin: CGFloat = .infinity
-        if dx > 0 {
-            tMin = min(tMin, (rect.maxX - center.x) / dx)
-        } else if dx < 0 {
-            tMin = min(tMin, (rect.minX - center.x) / dx)
-        }
-        if dy > 0 {
-            tMin = min(tMin, (rect.maxY - center.y) / dy)
-        } else if dy < 0 {
-            tMin = min(tMin, (rect.minY - center.y) / dy)
-        }
-        guard tMin.isFinite, tMin > 0 else { return center }
-        return CGPoint(x: center.x + dx * tMin, y: center.y + dy * tMin)
+        let topY = center.y - size.height / 2
+        let xOffset = min(size.width * 0.28, 24)
+        let start = CGPoint(x: center.x - xOffset, y: topY)
+        let end = CGPoint(x: center.x + xOffset, y: topY)
+        let laneY = topY - 42 - yOffset
+        let points = simplifyRoutePoints([
+            start,
+            CGPoint(x: start.x, y: laneY),
+            CGPoint(x: end.x, y: laneY),
+            end
+        ])
+        let midpoint = routePathMidpoint(points).point
+        return EdgeRoute(
+            start: start,
+            end: end,
+            control: midpoint,
+            isCurved: false,
+            points: points
+        )
     }
 
     // MARK: - Edge labels
 
-    /// Place each edge label near its curve midpoint, then nudge through a
-    /// deterministic set of perpendicular / tangent candidates until it avoids
-    /// cards and already-placed labels. Pure local optimisation — we do not run
-    /// a global solver because the graph sizes here do not justify it.
+    private struct EdgeLabelPlacementScore {
+        let collision: CGFloat
+        let sampleIndex: Int
+
+        func isBetter(than other: EdgeLabelPlacementScore) -> Bool {
+            if abs(collision - other.collision) > 0.001 {
+                return collision < other.collision
+            }
+            return sampleIndex < other.sampleIndex
+        }
+    }
+
+    private struct EdgeLabelCandidateSet {
+        let edge: CompoundGraph.CardEdge
+        let size: CGSize
+        let samples: [RoutePathSample]
+    }
+
+    private struct EdgeRouteSegment {
+        let start: CGPoint
+        let end: CGPoint
+    }
+
+    /// Place each edge label on the rendered route itself. Collision handling
+    /// may only choose another point along the route; it must never move the
+    /// label centre perpendicular to the edge.
     private static func placeEdgeLabels(
         edges: [CompoundGraph.CardEdge],
         routes: [EdgeIdentifier: EdgeRoute],
         cardRects: [CGRect]
     ) -> [EdgeIdentifier: CGPoint] {
+        let placementEdges = edges.sorted { lhs, rhs in
+            let leftSize = edgeLabelSize(lhs)
+            let rightSize = edgeLabelSize(rhs)
+            if abs(leftSize.width - rightSize.width) > 0.5 {
+                return leftSize.width > rightSize.width
+            }
+            return edgeSortKey(lhs.id) < edgeSortKey(rhs.id)
+        }
+        let candidateSets = placementEdges.compactMap { edge -> EdgeLabelCandidateSet? in
+            guard let route = routes[edge.id] else { return nil }
+            let samples = edgeLabelAnchorSamples(route)
+            return EdgeLabelCandidateSet(
+                edge: edge,
+                size: edgeLabelSize(edge),
+                samples: samples
+            )
+        }
+
         var placed: [EdgeIdentifier: CGPoint] = [:]
-        placed.reserveCapacity(edges.count)
-        var occupiedLabelRects: [CGRect] = []
-        occupiedLabelRects.reserveCapacity(edges.count)
-        let perpendicularOffsets: [CGFloat] = [0, 18, -18, 36, -36, 56, -56, 78, -78]
-        let tangentOffsets: [CGFloat] = [0, 28, -28, 56, -56]
-        for edge in edges {
-            guard let route = routes[edge.id] else { continue }
-            let mid: CGPoint
-            if route.isCurved {
-                // Quadratic Bezier midpoint.
-                mid = CGPoint(
-                    x: 0.25 * route.start.x + 0.5 * route.control.x + 0.25 * route.end.x,
-                    y: 0.25 * route.start.y + 0.5 * route.control.y + 0.25 * route.end.y
-                )
-            } else {
-                mid = CGPoint(
-                    x: (route.start.x + route.end.x) / 2,
-                    y: (route.start.y + route.end.y) / 2
-                )
-            }
-            let dx = route.end.x - route.start.x
-            let dy = route.end.y - route.start.y
-            let len = max(hypot(dx, dy), 0.001)
-            let perpX = -dy / len
-            let perpY = dx / len
-            let tangentX = dx / len
-            let tangentY = dy / len
-            let estimatedLabelSize = edgeLabelSize(edge)
+        placed.reserveCapacity(candidateSets.count)
+        for candidateSet in candidateSets {
+            placed[candidateSet.edge.id] = candidateSet.samples.first?.point ?? .zero
+        }
 
-            var chosen = mid
-            var chosenRect = edgeLabelRect(center: mid, size: estimatedLabelSize)
-            var fallbackScore = CGFloat.greatestFiniteMagnitude
-            var fallbackPoint = mid
-            var fallbackRect = chosenRect
-
-            for tangentOffset in tangentOffsets {
-                for perpOffset in perpendicularOffsets {
-                    let candidate = CGPoint(
-                        x: mid.x + perpX * perpOffset + tangentX * tangentOffset,
-                        y: mid.y + perpY * perpOffset + tangentY * tangentOffset
+        for _ in 0..<4 {
+            for candidateSet in candidateSets {
+                let occupiedLabelRects = candidateSets.compactMap { otherSet -> CGRect? in
+                    guard
+                        otherSet.edge.id != candidateSet.edge.id,
+                        let center = placed[otherSet.edge.id]
+                    else { return nil }
+                    return edgeLabelRect(center: center, size: otherSet.size).insetBy(
+                        dx: -LayoutSpacing.edgeEdge * 0.5,
+                        dy: -LayoutSpacing.edgeEdge * 0.25
                     )
-                    let rect = edgeLabelRect(center: candidate, size: estimatedLabelSize)
-                    let score = edgeLabelCollisionScore(
-                        rect,
-                        cardRects: cardRects,
-                        occupiedLabelRects: occupiedLabelRects
+                }
+                placed[candidateSet.edge.id] = bestEdgeLabelPosition(
+                    samples: candidateSet.samples,
+                    size: candidateSet.size,
+                    cardRects: cardRects,
+                    occupiedLabelRects: occupiedLabelRects,
+                    blockingRouteSegments: edgeLabelBlockingRouteSegments(
+                        routes: routes,
+                        excluding: candidateSet.edge.id
                     )
-                    if score == 0 {
-                        chosen = candidate
-                        chosenRect = rect
-                        fallbackScore = 0
-                        break
-                    }
-                    if score < fallbackScore {
-                        fallbackScore = score
-                        fallbackPoint = candidate
-                        fallbackRect = rect
-                    }
-                }
-                if fallbackScore == 0 {
-                    break
-                }
+                )
             }
-            if fallbackScore > 0 {
-                chosen = fallbackPoint
-                chosenRect = fallbackRect
-            }
-            placed[edge.id] = chosen
-            occupiedLabelRects.append(chosenRect.insetBy(dx: -4, dy: -3))
         }
         return placed
+    }
+
+    private static func bestEdgeLabelPosition(
+        samples: [RoutePathSample],
+        size: CGSize,
+        cardRects: [CGRect],
+        occupiedLabelRects: [CGRect],
+        blockingRouteSegments: [EdgeRouteSegment]
+    ) -> CGPoint {
+        let fallback = samples.first?.point ?? .zero
+        var chosen = fallback
+        var chosenScore: EdgeLabelPlacementScore?
+        for (sampleIndex, sample) in samples.enumerated() {
+            let candidate = sample.point
+            let rect = edgeLabelRect(center: candidate, size: size)
+            let score = edgeLabelCollisionScore(
+                rect,
+                cardRects: cardRects,
+                occupiedLabelRects: occupiedLabelRects,
+                blockingRouteSegments: blockingRouteSegments
+            )
+            let placementScore = EdgeLabelPlacementScore(
+                collision: score,
+                sampleIndex: sampleIndex
+            )
+            if chosenScore.map({ placementScore.isBetter(than: $0) }) ?? true {
+                chosen = candidate
+                chosenScore = placementScore
+            }
+        }
+        return chosen
+    }
+
+    private static func edgeLabelBlockingRouteSegments(
+        routes: [EdgeIdentifier: EdgeRoute],
+        excluding excludedID: EdgeIdentifier
+    ) -> [EdgeRouteSegment] {
+        var segments: [EdgeRouteSegment] = []
+        for (edgeID, route) in routes where edgeID != excludedID {
+            let points = route.points.isEmpty ? [route.start, route.end] : route.points
+            guard points.count > 1 else { continue }
+            for offset in 1..<points.count {
+                segments.append(EdgeRouteSegment(
+                    start: points[offset - 1],
+                    end: points[offset]
+                ))
+            }
+        }
+        return segments
+    }
+
+    private static func edgeLabelAnchorSamples(_ route: EdgeRoute) -> [RoutePathSample] {
+        let fractions: [CGFloat] = [
+            0.38, 0.62,
+            0.30, 0.70,
+            0.50,
+            0.24, 0.76,
+            0.44, 0.56,
+            0.18, 0.82,
+            0.12, 0.88,
+            0.33, 0.67,
+            0.27, 0.73,
+            0.06, 0.94,
+            0.03, 0.97,
+            0.48, 0.52,
+            0.01, 0.99
+        ]
+        if route.isCurved {
+            return fractions.map { curvedRouteSample(route, fraction: $0) }
+        }
+        let points = route.points.isEmpty ? [route.start, route.end] : route.points
+        var samples = fractions.map { routePathSample(points, fraction: $0) }
+        samples.append(contentsOf: edgeLabelSegmentSamples(points))
+        return samples
+    }
+
+    private static func edgeLabelSegmentSamples(_ points: [CGPoint]) -> [RoutePathSample] {
+        guard points.count > 1 else { return [] }
+        var samples: [RoutePathSample] = []
+        samples.reserveCapacity((points.count - 1) * 3)
+        for offset in 1..<points.count {
+            let start = points[offset - 1]
+            let end = points[offset]
+            samples.append(routeSegmentSample(start: start, end: end, fraction: 0.5))
+            samples.append(routeSegmentSample(start: start, end: end, fraction: 0.25))
+            samples.append(routeSegmentSample(start: start, end: end, fraction: 0.75))
+        }
+        return samples
+    }
+
+    private static func routeSegmentSample(
+        start: CGPoint,
+        end: CGPoint,
+        fraction: CGFloat
+    ) -> RoutePathSample {
+        let t = min(1, max(0, fraction))
+        return RoutePathSample(
+            point: CGPoint(
+                x: start.x + (end.x - start.x) * t,
+                y: start.y + (end.y - start.y) * t
+            ),
+            tangent: CGVector(dx: end.x - start.x, dy: end.y - start.y)
+        )
+    }
+
+    private static func curvedRouteSample(_ route: EdgeRoute, fraction: CGFloat) -> RoutePathSample {
+        let t = min(1, max(0, fraction))
+        let inverseT = 1 - t
+        let point = CGPoint(
+            x: inverseT * inverseT * route.start.x
+                + 2 * inverseT * t * route.control.x
+                + t * t * route.end.x,
+            y: inverseT * inverseT * route.start.y
+                + 2 * inverseT * t * route.control.y
+                + t * t * route.end.y
+        )
+        let tangent = CGVector(
+            dx: 2 * inverseT * (route.control.x - route.start.x)
+                + 2 * t * (route.end.x - route.control.x),
+            dy: 2 * inverseT * (route.control.y - route.start.y)
+                + 2 * t * (route.end.y - route.control.y)
+        )
+        return RoutePathSample(point: point, tangent: tangent)
     }
 
     private static func edgeLabelSize(_ edge: CompoundGraph.CardEdge) -> CGSize {
         CGSize(
             width: min(CGFloat(edge.predicate.count) * 7 + 24, 190),
-            height: 18
+            height: LayoutSpacing.labelHeight
         )
     }
 
@@ -3261,20 +7170,35 @@ struct KnowledgeGraphLayout: Sendable {
     private static func edgeLabelCollisionScore(
         _ rect: CGRect,
         cardRects: [CGRect],
-        occupiedLabelRects: [CGRect]
+        occupiedLabelRects: [CGRect],
+        blockingRouteSegments: [EdgeRouteSegment]
     ) -> CGFloat {
         var score: CGFloat = 0
         for card in cardRects {
-            let intersection = rect.intersection(card.insetBy(dx: -6, dy: -4))
+            let intersection = rect.intersection(card.insetBy(
+                dx: -LayoutSpacing.edgeNode,
+                dy: -LayoutSpacing.edgeNode
+            ))
             if !intersection.isNull {
-                score += intersection.width * intersection.height * 6
+                score += intersection.width * intersection.height * 1_000
             }
         }
         for occupied in occupiedLabelRects {
             let intersection = rect.intersection(occupied)
             if !intersection.isNull {
-                score += intersection.width * intersection.height
+                score += intersection.width * intersection.height * 100
             }
+        }
+        let routeRect = rect.insetBy(
+            dx: -LayoutSpacing.edgeEdge * 0.25,
+            dy: -LayoutSpacing.edgeEdge * 0.25
+        )
+        for segment in blockingRouteSegments where segmentIntersectsRect(
+            segment.start,
+            segment.end,
+            routeRect
+        ) {
+            score += rect.width * rect.height * 4
         }
         return score
     }

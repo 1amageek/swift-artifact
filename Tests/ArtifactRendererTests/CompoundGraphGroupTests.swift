@@ -87,6 +87,188 @@ struct CompoundGraphGroupTests {
         #expect(g2?.members.count == 1)
     }
 
+    @Test
+    func labelOnlyNamedGraphResourceIsUsedAsGroupMetadataOnly() {
+        let graphID = "http://example.org/layer/context"
+        let graphNode = NodeIdentifier.iri(graphID)
+        let graphLabel = NodeIdentifier.literal(value: "Context")
+        let graph = KnowledgeGraph(
+            nodes: [
+                Node(id: graphNode),
+                Node(id: graphLabel),
+                Node(id: Self.alice),
+                Node(id: Self.bob)
+            ],
+            edges: [
+                Self.edge(
+                    from: graphNode,
+                    to: graphLabel,
+                    predicate: "https://schema.org/name"
+                ),
+                Self.edge(
+                    from: Self.alice,
+                    to: Self.bob,
+                    predicate: Self.knows,
+                    namedGraph: graphID
+                )
+            ],
+            namedGraphs: [
+                NamedGraph(id: graphID, nodes: [Self.alice, Self.bob])
+            ]
+        )
+        let compound = CompoundGraph.decompose(graph, groupingStrategy: .namedGraphs())
+
+        #expect(compound.cards.map(\.id.nodeID).contains(graphNode) == false)
+        #expect(compound.cards.map(\.id.nodeID).contains(graphLabel) == false)
+        #expect(compound.groups.count == 1)
+        #expect(compound.groups.first?.label == "Context")
+        #expect(compound.groups.first?.members.count == 2)
+    }
+
+    @Test
+    func nestedNamedGraphsRenderLayerAsSupersetOfCategoryGroups() {
+        let layerID = "http://example.org/layer/context"
+        let categoryOneID = "http://example.org/category/context/market"
+        let categoryTwoID = "http://example.org/category/context/demand"
+        let layerNode = NodeIdentifier.iri(layerID)
+        let categoryOneNode = NodeIdentifier.iri(categoryOneID)
+        let categoryTwoNode = NodeIdentifier.iri(categoryTwoID)
+        let layerLabel = NodeIdentifier.literal(value: "Context")
+        let categoryOneLabel = NodeIdentifier.literal(value: "Market")
+        let categoryTwoLabel = NodeIdentifier.literal(value: "Demand")
+        let graph = KnowledgeGraph(
+            nodes: [
+                Node(id: layerNode),
+                Node(id: categoryOneNode),
+                Node(id: categoryTwoNode),
+                Node(id: layerLabel),
+                Node(id: categoryOneLabel),
+                Node(id: categoryTwoLabel),
+                Node(id: Self.alice),
+                Node(id: Self.bob),
+                Node(id: Self.carol),
+                Node(id: Self.dave)
+            ],
+            edges: [
+                Self.edge(
+                    from: layerNode,
+                    to: layerLabel,
+                    predicate: "https://schema.org/name"
+                ),
+                Self.edge(
+                    from: categoryOneNode,
+                    to: categoryOneLabel,
+                    predicate: "https://schema.org/name",
+                    namedGraph: layerID
+                ),
+                Self.edge(
+                    from: categoryTwoNode,
+                    to: categoryTwoLabel,
+                    predicate: "https://schema.org/name",
+                    namedGraph: layerID
+                ),
+                Self.edge(
+                    from: Self.alice,
+                    to: Self.bob,
+                    predicate: Self.knows,
+                    namedGraph: categoryOneID
+                ),
+                Self.edge(
+                    from: Self.carol,
+                    to: Self.dave,
+                    predicate: Self.knows,
+                    namedGraph: categoryTwoID
+                )
+            ],
+            namedGraphs: [
+                NamedGraph(id: layerID),
+                NamedGraph(id: categoryOneID),
+                NamedGraph(id: categoryTwoID)
+            ]
+        )
+        let compound = CompoundGraph.decompose(graph, groupingStrategy: .namedGraphs())
+
+        #expect(compound.cards.map(\.id.nodeID).contains(layerNode) == false)
+        #expect(compound.cards.map(\.id.nodeID).contains(categoryOneNode) == false)
+        #expect(compound.cards.map(\.id.nodeID).contains(categoryTwoNode) == false)
+        let layer = compound.groupByID[CompoundGraph.Group.ID(key: "namedGraph:\(layerID)")]
+        let categoryOne = compound.groupByID[CompoundGraph.Group.ID(key: "namedGraph:\(categoryOneID)")]
+        let categoryTwo = compound.groupByID[CompoundGraph.Group.ID(key: "namedGraph:\(categoryTwoID)")]
+        #expect(layer?.label == "Context")
+        #expect(categoryOne?.label == "Market")
+        #expect(categoryTwo?.label == "Demand")
+        #expect(Set(layer?.members ?? []) == [
+            Self.cardID(Self.alice),
+            Self.cardID(Self.bob),
+            Self.cardID(Self.carol),
+            Self.cardID(Self.dave)
+        ])
+        #expect(Set(categoryOne?.members ?? []) == [
+            Self.cardID(Self.alice),
+            Self.cardID(Self.bob)
+        ])
+        #expect(Set(categoryTwo?.members ?? []) == [
+            Self.cardID(Self.carol),
+            Self.cardID(Self.dave)
+        ])
+    }
+
+    @Test
+    func jsonLDViewGroupsUseTitlesAndNestLayerCategoryMembership() {
+        let payload = #"""
+        {
+          "@context": {
+            "ex": "http://example.org/"
+          },
+          "view": {
+            "groups": [
+              {
+                "id": "group:layer/context",
+                "kind": "layer",
+                "title": "Context",
+                "children": [
+                  {
+                    "id": "group:category/context/market",
+                    "kind": "category",
+                    "title": "Market",
+                    "members": ["ex:alice", "ex:bob"]
+                  },
+                  {
+                    "id": "group:category/context/demand",
+                    "kind": "category",
+                    "title": "Demand",
+                    "members": ["ex:carol"]
+                  }
+                ]
+              }
+            ]
+          },
+          "@graph": []
+        }
+        """#
+        let groups = JSONLDViewGroupExtractor.explicitGroups(from: payload)
+
+        #expect(groups?.count == 3)
+        #expect(groups?[0].id == "group:layer/context")
+        #expect(groups?[0].label == "Context")
+        #expect(groups?[0].memberNodeIDs == [
+            NodeIdentifier.iri("http://example.org/alice"),
+            NodeIdentifier.iri("http://example.org/bob"),
+            NodeIdentifier.iri("http://example.org/carol")
+        ])
+        #expect(groups?[1].id == "group:category/context/market")
+        #expect(groups?[1].label == "Market")
+        #expect(groups?[1].memberNodeIDs == [
+            NodeIdentifier.iri("http://example.org/alice"),
+            NodeIdentifier.iri("http://example.org/bob")
+        ])
+        #expect(groups?[2].id == "group:category/context/demand")
+        #expect(groups?[2].label == "Demand")
+        #expect(groups?[2].memberNodeIDs == [
+            NodeIdentifier.iri("http://example.org/carol")
+        ])
+    }
+
     // MARK: - G.emptyGroupsAreFilteredAfterLiteralFolding
 
     @Test

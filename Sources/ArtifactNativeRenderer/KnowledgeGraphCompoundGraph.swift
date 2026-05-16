@@ -159,11 +159,13 @@ extension CompoundGraph {
             leafEdgesByParent[parent, default: []].append(edge)
             foldedEdgeIDs.insert(edge.id)
         }
+        let hiddenMetadataNodes = labelOnlyNamedGraphNodes(in: graph)
 
         // Step 3: build cards in stable insertion order.
         var cards: [Card] = []
         cards.reserveCapacity(graph.nodes.count)
         for node in graph.nodes {
+            if hiddenMetadataNodes.contains(node.id) { continue }
             switch node.id.kind {
             case .iri, .blank:
                 let attributes = (leafEdgesByParent[node.id] ?? []).map { edge -> Card.Attribute in
@@ -275,6 +277,53 @@ extension CompoundGraph {
             edges: cardEdges,
             groups: filtered
         )
+    }
+
+    private static func labelOnlyNamedGraphNodes(in graph: KnowledgeGraph) -> Set<NodeIdentifier> {
+        let namedGraphIDs = Set(graph.namedGraphs.map(\.id))
+        guard !namedGraphIDs.isEmpty else { return [] }
+
+        let candidateIDs = Set(graph.nodes.compactMap { node -> NodeIdentifier? in
+            switch node.id.kind {
+            case .iri:
+                return namedGraphIDs.contains(node.id.key) ? node.id : nil
+            case .blank:
+                return namedGraphIDs.contains(node.id.key) ? node.id : nil
+            case .literal:
+                return nil
+            }
+        })
+        guard !candidateIDs.isEmpty else { return [] }
+
+        var result: Set<NodeIdentifier> = []
+        for candidate in candidateIDs {
+            let incident = graph.edges.filter { $0.source == candidate || $0.target == candidate }
+            guard !incident.isEmpty else { continue }
+            let onlyLabelEdges = incident.allSatisfy { edge in
+                edge.source == candidate
+                    && edge.target.kind == .literal
+                    && isNamedGraphLabelPredicate(edge.predicate)
+            }
+            if onlyLabelEdges {
+                result.insert(candidate)
+            }
+        }
+        return result
+    }
+
+    private static func isNamedGraphLabelPredicate(_ predicate: String) -> Bool {
+        switch predicate {
+        case "http://www.w3.org/2000/01/rdf-schema#label",
+             "http://schema.org/name",
+             "https://schema.org/name",
+             "http://schema.org/title",
+             "https://schema.org/title",
+             "http://purl.org/dc/terms/title",
+             "http://purl.org/dc/elements/1.1/title":
+            return true
+        default:
+            return false
+        }
     }
 }
 
