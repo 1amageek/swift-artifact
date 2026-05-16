@@ -12,12 +12,14 @@ import KnowledgeGraph
 struct KnowledgeGraphCardView: View {
 
     let card: CompoundGraph.Card
+    let theme: KnowledgeGraphVisualTheme
 
     var body: some View {
         VStack(spacing: 0) {
             header
             if !card.attributes.isEmpty {
                 Divider()
+                    .overlay(theme.innerStroke)
                 attributesList
             }
         }
@@ -25,7 +27,7 @@ struct KnowledgeGraphCardView: View {
         .background(cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(border)
-        .shadow(color: Color.black.opacity(0.18), radius: 3, x: 0, y: 1)
+        .shadow(color: theme.cardShadow, radius: 5, x: 0, y: 2)
         .help(card.qualifiedTitle)
     }
 
@@ -35,13 +37,14 @@ struct KnowledgeGraphCardView: View {
         HStack(spacing: 6) {
             Image(systemName: headerIcon)
                 .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(accent)
             Text(card.title)
                 .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.foreground)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
         }
-        .foregroundStyle(.white)
         .padding(.horizontal, CardSizing.horizontalPad)
         .frame(height: CardSizing.headerHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -64,20 +67,20 @@ struct KnowledgeGraphCardView: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(attribute.predicate)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.muted)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
             HStack(spacing: 2) {
                 Text(attribute.value)
                     .font(.system(size: 11))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(theme.foreground)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if let qualifier = attribute.valueQualifier {
                     Text(qualifier)
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(theme.muted.opacity(0.78))
                         .lineLimit(1)
                 }
             }
@@ -95,17 +98,16 @@ struct KnowledgeGraphCardView: View {
         }
     }
 
-    private var headerBackground: Color {
-        switch card.kind {
-        case .resource(.iri): return Color.accentColor
-        case .resource(.blank): return Color.accentColor.opacity(0.65)
-        case .resource(.literal): return Color.orange.opacity(0.85)
-        case .literal: return Color.orange.opacity(0.85)
-        }
+    private var accent: Color {
+        theme.cardAccent(for: card.kind)
     }
 
-    private var cardBackground: some ShapeStyle {
-        Color(.sRGB, white: 0.16, opacity: 1.0).opacity(0.96)
+    private var headerBackground: Color {
+        accent.opacity(theme.cardHeaderOpacity)
+    }
+
+    private var cardBackground: Color {
+        theme.surfaceRaised
     }
 
     @ViewBuilder
@@ -114,12 +116,12 @@ struct KnowledgeGraphCardView: View {
         case .resource(.blank):
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(
-                    Color.accentColor.opacity(0.55),
+                    accent.opacity(0.58),
                     style: StrokeStyle(lineWidth: 1, dash: [3, 3])
                 )
         default:
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+                .strokeBorder(theme.border, lineWidth: 1)
         }
     }
 }

@@ -30,6 +30,7 @@ struct KnowledgeGraphView: View {
 
     @State private var layout: KnowledgeGraphLayout.Result?
     @State private var layoutTask: Task<Void, Never>?
+    @Environment(\.colorScheme) private var colorScheme
 
     /// Canonical viewport between gestures. Live gesture state is layered
     /// on top in `effectiveViewport`.
@@ -124,12 +125,13 @@ struct KnowledgeGraphView: View {
     // MARK: - Canvas
 
     private func canvasContent(layout: KnowledgeGraphLayout.Result) -> some View {
+        let theme = KnowledgeGraphVisualTheme(colorScheme: colorScheme)
         // Pre-compute per-group SwiftUI values (Color, Text) once per layout
         // snapshot so Canvas's per-frame redraw does not reconstruct them on
         // every pan/zoom tick. `context.resolve` and `Text.measure` still run
         // inside the Canvas closure because they need a `GraphicsContext`,
         // but the inputs feeding them are now stable values.
-        let groupRenderInfos = makeGroupRenderInfos(layout: layout)
+        let groupRenderInfos = makeGroupRenderInfos(layout: layout, theme: theme)
         let canvas = Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { context, size in
             let viewport = effectiveViewport
             let visibleRect = CGRect(origin: .zero, size: size)
@@ -144,16 +146,17 @@ struct KnowledgeGraphView: View {
                 visibleRect: visibleRect,
                 context: &context
             )
-            drawEdges(layout: layout, viewport: viewport, visibleRect: visibleRect, context: &context)
-            drawEdgeLabels(layout: layout, viewport: viewport, visibleRect: visibleRect, context: &context)
+            drawEdges(layout: layout, viewport: viewport, visibleRect: visibleRect, theme: theme, context: &context)
+            drawEdgeLabels(layout: layout, viewport: viewport, visibleRect: visibleRect, theme: theme, context: &context)
             drawCards(layout: layout, viewport: viewport, visibleRect: visibleRect, context: &context)
         } symbols: {
             ForEach(layout.compoundGraph.cards) { card in
-                KnowledgeGraphCardView(card: card)
+                KnowledgeGraphCardView(card: card, theme: theme)
                     .tag(card.id)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.background)
 
         // `KnowledgeGraphCanvasHost` taps the native scroll-wheel (macOS) /
         // two-finger trackpad pan (iOS / Catalyst / visionOS) events that
@@ -185,6 +188,7 @@ struct KnowledgeGraphView: View {
         layout: KnowledgeGraphLayout.Result,
         viewport: KnowledgeGraphViewport,
         visibleRect: CGRect,
+        theme: KnowledgeGraphVisualTheme,
         context: inout GraphicsContext
     ) {
         var strokePath = Path()
@@ -227,12 +231,12 @@ struct KnowledgeGraphView: View {
         if !strokePath.isEmpty {
             context.stroke(
                 strokePath,
-                with: .color(Color.secondary.opacity(0.75)),
+                with: .color(theme.line),
                 style: StrokeStyle(lineWidth: edgeLineWidth, lineCap: .round)
             )
         }
         if !headPath.isEmpty {
-            context.fill(headPath, with: .color(Color.secondary.opacity(0.9)))
+            context.fill(headPath, with: .color(theme.arrow))
         }
     }
 
@@ -266,6 +270,7 @@ struct KnowledgeGraphView: View {
         layout: KnowledgeGraphLayout.Result,
         viewport: KnowledgeGraphViewport,
         visibleRect: CGRect,
+        theme: KnowledgeGraphVisualTheme,
         context: inout GraphicsContext
     ) {
         for edge in layout.compoundGraph.edges {
@@ -275,24 +280,24 @@ struct KnowledgeGraphView: View {
 
             let resolved = context.resolve(
                 Text(edge.predicate)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Color.primary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(theme.muted)
             )
             let textSize = resolved.measure(in: CGSize(width: 180, height: 60))
-            let hPad: CGFloat = 6
-            let vPad: CGFloat = 2
+            let hPad: CGFloat = 8
+            let vPad: CGFloat = 4
             let bgRect = CGRect(
                 x: screenPos.x - textSize.width / 2 - hPad,
                 y: screenPos.y - textSize.height / 2 - vPad,
                 width: textSize.width + hPad * 2,
                 height: textSize.height + vPad * 2
             )
-            let capsule = Capsule(style: .continuous).path(in: bgRect)
-            context.fill(capsule, with: .color(Color(.sRGB, white: 0.16, opacity: 0.92)))
+            let labelPath = Path(roundedRect: bgRect, cornerRadius: 4)
+            context.fill(labelPath, with: .color(theme.edgeLabelFill))
             context.stroke(
-                capsule,
-                with: .color(Color.primary.opacity(0.08)),
-                lineWidth: 0.5
+                labelPath,
+                with: .color(theme.edgeLabelStroke),
+                lineWidth: 1
             )
             context.draw(resolved, at: screenPos)
         }
@@ -382,8 +387,8 @@ struct KnowledgeGraphView: View {
     }
 
     /// Place the group label outside the bbox while avoiding other group
-    /// labels and group rectangles. The text is drawn directly — no pill
-    /// background — to keep the visual weight low.
+    /// labels and group rectangles. The pill background keeps labels readable
+    /// when several translucent group boxes overlap.
     @discardableResult
     private func drawGroupLabel(
         info: GroupRenderInfo,
@@ -395,12 +400,25 @@ struct KnowledgeGraphView: View {
     ) -> CGRect? {
         let resolved = context.resolve(info.labelText)
         let textSize = resolved.measure(in: CGSize(width: max(bbox.width, 80), height: 40))
+        let hPad: CGFloat = 8
+        let vPad: CGFloat = 3
+        let labelSize = CGSize(
+            width: ceil(textSize.width + hPad * 2),
+            height: ceil(textSize.height + vPad * 2)
+        )
         let labelRect = groupLabelRect(
             bbox: bbox,
-            textSize: textSize,
+            labelSize: labelSize,
             occupiedLabelRects: occupiedLabelRects,
             groupRects: groupRects,
             visibleRect: visibleRect
+        )
+        let labelPath = Path(roundedRect: labelRect, cornerRadius: 5)
+        context.fill(labelPath, with: .color(info.labelFillColor))
+        context.stroke(
+            labelPath,
+            with: .color(info.labelStrokeColor),
+            lineWidth: 1
         )
         context.draw(
             resolved,
@@ -411,16 +429,12 @@ struct KnowledgeGraphView: View {
 
     private func groupLabelRect(
         bbox: CGRect,
-        textSize: CGSize,
+        labelSize: CGSize,
         occupiedLabelRects: [CGRect],
         groupRects: [CGRect],
         visibleRect: CGRect
     ) -> CGRect {
         let gap: CGFloat = 5
-        let labelSize = CGSize(
-            width: ceil(textSize.width),
-            height: ceil(textSize.height)
-        )
         let candidates = [
             CGPoint(x: bbox.minX, y: bbox.minY - labelSize.height - gap),
             CGPoint(x: bbox.maxX - labelSize.width, y: bbox.minY - labelSize.height - gap),
@@ -478,10 +492,13 @@ struct KnowledgeGraphView: View {
         let labelText: Text
         let fillColor: Color
         let strokeColor: Color
+        let labelFillColor: Color
+        let labelStrokeColor: Color
     }
 
     private func makeGroupRenderInfos(
-        layout: KnowledgeGraphLayout.Result
+        layout: KnowledgeGraphLayout.Result,
+        theme: KnowledgeGraphVisualTheme
     ) -> [GroupRenderInfo] {
         layout.compoundGraph.groups.enumerated().map { groupIndex, group in
             let style = group.style
@@ -495,7 +512,9 @@ struct KnowledgeGraphView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(baseColor.opacity(min(style.opacity * 5.0, 0.95))),
                 fillColor: baseColor.opacity(style.opacity),
-                strokeColor: baseColor.opacity(min(style.opacity * 3.0, 0.9))
+                strokeColor: baseColor.opacity(min(style.opacity * 3.0, 0.9)),
+                labelFillColor: theme.groupLabelFill,
+                labelStrokeColor: baseColor.opacity(min(style.opacity * 4.0, 0.9))
             )
         }
     }
