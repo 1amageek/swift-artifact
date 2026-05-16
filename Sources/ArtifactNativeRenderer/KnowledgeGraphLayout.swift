@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import KnowledgeGraph
 
-/// Force-directed layout for a `KnowledgeGraph`.
+/// Constraint-based layout for a `KnowledgeGraph`.
 ///
 /// The pipeline is:
 ///
@@ -11,37 +11,33 @@ import KnowledgeGraph
 ///    rather than raw nodes, which eliminates the foaf:name "Alice" pattern
 ///    as an independent vertex.
 ///
-/// 2. **Golden-angle seeding** — newcomer cards are placed on a Vogel spiral
-///    (`angle = i · 137.5°`, `radius ∝ √i`) around the warm-restart centroid.
-///    Spiral seeding gives every card a roughly equal share of canvas area
-///    at the start, which avoids the "all on one ring" collapse that
-///    same-radius seeding produced when many cards shared an initial angle.
+/// 2. **Constraint planning** — every card receives a personal radius from
+///    its size, direct degree, edge-label load, and group memberships. Every
+///    edge receives an ideal length from the endpoint radii, endpoint degree,
+///    label span, and whether the edge crosses group boundaries. High-degree
+///    or multi-group cards therefore reserve more radial and angular space.
 ///
-/// 3. **Fruchterman–Reingold** force-directed relaxation. Each iteration
-///    accumulates two forces per card:
-///      - **Coulomb repulsion** between every pair, magnitude `k² / d`.
-///        `k` is local: high-degree cards receive a larger personal radius,
-///        so dense hubs reserve more whitespace before labels and neighbours
-///        collide.
-///      - **Spring attraction** along each direct graph edge, magnitude
-///        `d² / ideal_ij` where `ideal_ij` includes card radii, group
-///        crossing cost, endpoint degree, and label span. Attraction is
-///        therefore size- and topology-aware: hubs anchor their neighbours
-///        farther out than low-degree pairs.
-///    Per-iteration movement is capped by a temperature that cools as
-///    `t₀ · (1 - i/N)^1.3`, so the layout settles smoothly without
-///    oscillating across the final iterations.
+/// 3. **Component seeding** — connected components are seeded independently.
+///    The highest-degree card starts each component and the remaining cards
+///    are placed by BFS order on a golden-angle spiral around it. Warm-start
+///    positions are preserved when available.
 ///
-/// 4. **Separation constraints**. After FR converges we run overlap-removal
-///    passes: any pair whose padded rectangles overlap is projected apart
-///    along the axis of smaller penetration. This corrects the residual
-///    near-overlaps that a continuous force model alone cannot eliminate.
+/// 4. **Constraint solving** — each iteration combines card repulsion,
+///    Hookean edge springs, same-group pseudo-springs, group cohesion, group
+///    bbox separation, a weak global gravity, and a cardinal-axis bias. This
+///    makes edge length, edge angle, hub fan-out, and group distance part of
+///    the same energy model instead of separate after-the-fact patches.
 ///
-/// 5. **Edge routing**. Each edge anchors on the boundary of its source and
+/// 5. **Projection cleanup** — final passes project edge lengths toward their
+///    planned ideals, spread high-degree incident edges, compact sparse
+///    groups, eject non-members from group bboxes, and enforce card/group
+///    non-overlap. Non-overlap wins over exact spring length at the end.
+///
+/// 6. **Edge routing**. Each edge anchors on the boundary of its source and
 ///    target rectangles, biased perpendicularly for parallel edges. Bezier
 ///    control points are derived from the same perpendicular offset.
 ///
-/// 6. **Edge label slotting**. Labels start at the curve midpoint and slide
+/// 7. **Edge label slotting**. Labels start at the curve midpoint and slide
 ///    perpendicular through a small ladder of offsets until they no longer
 ///    overlap any card rectangle.
 ///
@@ -138,231 +134,33 @@ struct KnowledgeGraphLayout: Sendable {
             compound.cards.enumerated().map { ($0.element.id, $0.offset) }
         )
 
-        // Estimate canvas size from total card area so the spiral seed has
-        // room to breathe before the relaxation runs.
-        let totalAttrArea = compound.cards.reduce(0.0) { acc, card in
-            acc + Double(card.size.width * card.size.height)
-        }
-        let canvasSeed = max(520.0, sqrt(totalAttrArea) * 3.0)
-
-        var positions = seedPositions(
-            cards: compound.cards,
-            initial: initial,
-            canvasSeed: canvasSeed
-        )
-
         let sizes = compound.cards.map { $0.size }
         let radii = sizes.map { Double(hypot($0.width, $0.height)) / 2.0 }
-
-        // Step 2.5: intra-group pre-pass. For each group, run a localised
-        // FR pass on its members alone — no external repulsion, no
-        // cross-group springs, no other groups in scope. This packs the
-        // group's members into a tight cluster around their seed centroid
-        // *before* any cross-group force has a chance to pull them apart.
-        // Without this pre-pass, a member whose only real edge crosses
-        // the group boundary (e.g. `org:hr/payroll → carol`) starts the
-        // global FR being pulled outward at full edge strength while the
-        // weaker intra-group pseudo-spring loses the race — the member
-        // ends up scattered to the far edge of the group's bbox. By
-        // converging members locally first, the global FR begins with
-        // members already adjacent; cross-group springs can then only
-        // translate the cluster as a whole rather than tear it apart.
-        intraGroupPrePass(
-            positions: &positions,
-            radii: radii,
+        let plan = makeLayoutPlan(
             edges: compound.edges,
-            indexByID: indexByID,
-            groups: compound.groups
+            groups: compound.groups,
+            radii: radii,
+            sizes: sizes,
+            indexByID: indexByID
+        )
+        var positions = seedConstraintPositions(
+            cards: compound.cards,
+            edges: compound.edges,
+            initial: initial,
+            plan: plan
         )
 
-        // Step 3: Fruchterman–Reingold relaxation with size-aware springs
-        // and an optional cohesion pull toward the centroid of each card's
-        // groups. Cohesion is per-group so a card in two groups feels both
-        // pulls — visually they overlap, which matches the rendering model.
-        fruchtermanReingold(
+        solveConstraintLayout(
             positions: &positions,
-            radii: radii,
-            edges: compound.edges,
-            indexByID: indexByID,
-            groups: compound.groups,
+            plan: plan,
             iterations: iterations
         )
-        let edgeLengthConstraints = edgeLengthConstraints(
-            positions: positions,
-            edges: compound.edges,
-            indexByID: indexByID
-        )
-
-        // Step 3.5: orthogonal alignment of group centroids. FR's repulsion
-        // (gated to a 2.5k cutoff) keeps disjoint groups within force range
-        // of each other but settles them at whatever diagonal minimises
-        // pairwise energy — which visually reads as scattered. After FR has
-        // converged we run a rigid-body snap pass that pulls each group pair's
-        // centroids onto a shared row or column. Every snap iteration is
-        // followed by an edge-length projection, so groups use the available
-        // angular freedom without stretching the edges that connect them.
-        snapGroupCentroidsToAxes(
+        finalizeConstraintLayout(
             positions: &positions,
-            sizes: sizes,
-            edges: compound.edges,
-            edgeLengthConstraints: edgeLengthConstraints,
-            groups: compound.groups,
-            indexByID: indexByID
-        )
-
-        // Step 3.6: eject non-member cards from group bboxes. FR's
-        // equilibrium can place a card connected to members of multiple
-        // groups at a position that falls inside one of those groups'
-        // rendered bboxes — e.g. a shared `rdf:type` target whose
-        // connection centroid lands inside one of the connected
-        // groups. The rendered group bbox then visually encloses a
-        // card that is not actually a member. Project any such card
-        // outward to the nearest bbox edge before overlap resolution
-        // so the rendered group reads as containing only its members.
-        ejectNonMembersFromGroups(
-            positions: &positions,
-            sizes: sizes,
-            groups: compound.groups,
-            indexByID: indexByID
-        )
-
-        // Step 4: separation constraints (card-vs-card non-overlap). Runs
-        // after the orthogonal snap so any residual overlaps caused by
-        // rigid group translation are corrected here.
-        resolveOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            margin: 48,
-            iterations: 60
-        )
-
-        // Step 4.5: edge-angle relaxation. At this point edge lengths,
-        // group spacing, and card separation are already acceptable. These
-        // passes therefore work in the angular dimension: first rotate edges
-        // toward cardinal axes, then allocate stable radial slots around
-        // high-degree hubs so dense neighbourhoods do not collapse into one
-        // arc. A short cleanup pass re-applies containment / overlap
-        // constraints after the angular nudges.
-        relaxEdgeAngles(
-            positions: &positions,
-            edges: compound.edges,
-            indexByID: indexByID,
-            iterations: 28,
-            strength: 0.22
-        )
-        spreadHubIncidentEdges(
-            positions: &positions,
-            edges: compound.edges,
-            indexByID: indexByID,
-            iterations: 28,
-            strength: 0.48
-        )
-        orientBridgeEdgesByGroupOrder(
-            positions: &positions,
+            plan: plan,
             edges: compound.edges,
             groups: compound.groups,
             indexByID: indexByID
-        )
-        fanOutGroupsAroundBridgeEdges(
-            positions: &positions,
-            edges: compound.edges,
-            groups: compound.groups,
-            indexByID: indexByID
-        )
-        projectEdgeLengths(
-            positions: &positions,
-            constraints: edgeLengthConstraints,
-            iterations: 10
-        )
-        ejectNonMembersFromGroups(
-            positions: &positions,
-            sizes: sizes,
-            groups: compound.groups,
-            indexByID: indexByID
-        )
-        resolveOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            margin: 48,
-            iterations: 24
-        )
-        projectEdgeLengths(
-            positions: &positions,
-            constraints: edgeLengthConstraints,
-            iterations: 10
-        )
-        // Cleanup can partially compress hub neighbourhoods while resolving
-        // collisions. Re-apply slotting once, then project lengths back to
-        // the captured FR distances.
-        spreadHubIncidentEdges(
-            positions: &positions,
-            edges: compound.edges,
-            indexByID: indexByID,
-            iterations: 20,
-            strength: 0.45
-        )
-        resolveOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            margin: 48,
-            iterations: 12
-        )
-        projectEdgeLengths(
-            positions: &positions,
-            constraints: edgeLengthConstraints,
-            iterations: 8
-        )
-        // Final hard separation. Edge-length projection can reintroduce small
-        // card collisions and overlapping disjoint group bboxes; from this
-        // point on, non-overlap wins over preserving spring lengths exactly.
-        resolveOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            margin: 56,
-            iterations: 80
-        )
-        resolveGroupOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            groups: compound.groups,
-            indexByID: indexByID,
-            margin: 36,
-            iterations: 40
-        )
-        resolveOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            margin: 56,
-            iterations: 80
-        )
-        compactSparseGroups(
-            positions: &positions,
-            radii: radii,
-            edges: compound.edges,
-            groups: compound.groups,
-            indexByID: indexByID,
-            cardCount: compound.cards.count,
-            iterations: 40
-        )
-        resolveOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            margin: 56,
-            iterations: 80
-        )
-        resolveGroupOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            groups: compound.groups,
-            indexByID: indexByID,
-            margin: 36,
-            iterations: 32
-        )
-        resolveOverlaps(
-            positions: &positions,
-            sizes: sizes,
-            margin: 56,
-            iterations: 80
         )
 
         // Translate to a non-negative coordinate space and finalise canvas.
@@ -411,6 +209,760 @@ struct KnowledgeGraphLayout: Sendable {
             groupBoundingBoxes: groupBoxes,
             canvasSize: canvasSize
         )
+    }
+
+    // MARK: - Constraint layout model
+
+    private struct LayoutPlan: Sendable {
+        let sizes: [CGSize]
+        let radii: [Double]
+        let baseGap: Double
+        let nodeBudgets: [NodeBudget]
+        let edgeSprings: [LayoutSpring]
+        let groupSprings: [LayoutSpring]
+        let groups: [GroupPlan]
+        let linkedGroupPairs: Set<UInt64>
+    }
+
+    private struct NodeBudget: Sendable {
+        let degree: Int
+        let personalRadius: Double
+    }
+
+    private struct LayoutSpring: Sendable {
+        let i: Int
+        let j: Int
+        let ideal: Double
+        let strength: Double
+        let axisBias: Double
+    }
+
+    private struct GroupPlan: Sendable {
+        let indices: [Int]
+        let memberSet: Set<Int>
+        let padding: Double
+        let cohesionStrength: Double
+    }
+
+    private static func makeLayoutPlan(
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        radii: [Double],
+        sizes: [CGSize],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> LayoutPlan {
+        let n = radii.count
+        let baseGap = adaptiveEdgeGap(cardCount: n)
+
+        var groupPlans: [GroupPlan] = []
+        groupPlans.reserveCapacity(groups.count)
+        for group in groups {
+            let indices = group.members.compactMap { indexByID[$0] }
+            guard !indices.isEmpty else { continue }
+            groupPlans.append(GroupPlan(
+                indices: indices,
+                memberSet: Set(indices),
+                padding: Double(group.style.padding),
+                cohesionStrength: group.cohesionStrength
+            ))
+        }
+
+        var memberToGroups: [Int: Set<Int>] = [:]
+        for (groupIndex, group) in groupPlans.enumerated() {
+            for index in group.indices {
+                memberToGroups[index, default: []].insert(groupIndex)
+            }
+        }
+
+        var degree = [Int](repeating: 0, count: n)
+        var labelLoad = [Double](repeating: 0, count: n)
+        var edgePairs: Set<UInt64> = []
+        edgePairs.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            let key = pairKey(i, j)
+            if edgePairs.insert(key).inserted {
+                degree[i] += 1
+                degree[j] += 1
+            }
+            let span = estimatedEdgeLabelSpan(edge)
+            labelLoad[i] += span
+            labelLoad[j] += span
+        }
+
+        var externalGroupsByNode: [Int: Set<Int>] = [:]
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            let gi = memberToGroups[i] ?? []
+            let gj = memberToGroups[j] ?? []
+            let externalForI = gj.subtracting(gi)
+            let externalForJ = gi.subtracting(gj)
+            if !externalForI.isEmpty {
+                externalGroupsByNode[i, default: []].formUnion(externalForI)
+            }
+            if !externalForJ.isEmpty {
+                externalGroupsByNode[j, default: []].formUnion(externalForJ)
+            }
+        }
+
+        let degreeWeights = degree.map { min(log2(Double($0) + 1.0), 4.0) }
+        let labelWeights = labelLoad.map { min($0 / 260.0, 2.2) }
+        var nodeBudgets: [NodeBudget] = []
+        nodeBudgets.reserveCapacity(n)
+        for index in 0..<n {
+            let groupLoad = min(Double(memberToGroups[index]?.count ?? 0), 3.0)
+            let personal = radii[index]
+                + 44
+                + baseGap * (
+                    0.18 * degreeWeights[index]
+                    + 0.08 * labelWeights[index]
+                    + 0.10 * groupLoad
+                )
+            nodeBudgets.append(NodeBudget(
+                degree: degree[index],
+                personalRadius: personal
+            ))
+        }
+
+        var realPairKeys: Set<UInt64> = []
+        realPairKeys.reserveCapacity(edges.count)
+        var edgeSprings: [LayoutSpring] = []
+        edgeSprings.reserveCapacity(edges.count)
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            let key = pairKey(i, j)
+            guard realPairKeys.insert(key).inserted else { continue }
+            let gi = memberToGroups[i] ?? []
+            let gj = memberToGroups[j] ?? []
+            let sharesGroup = !gi.isDisjoint(with: gj)
+            let externalCount = max(
+                externalGroupsByNode[i]?.count ?? 0,
+                externalGroupsByNode[j]?.count ?? 0
+            )
+            let degreeLoad = max(degreeWeights[i], degreeWeights[j])
+            let labelWeight = max(labelWeights[i], labelWeights[j])
+            let membershipLoad = min(Double(max(gi.count, gj.count)), 3.0)
+            let relationMultiplier = 1.0
+                + 0.18 * degreeLoad
+                + 0.08 * labelWeight
+                + 0.12 * Double(externalCount)
+                + 0.10 * membershipLoad
+            let groupMultiplier = sharesGroup ? 0.78 : 1.65
+            let spanGap = min(90.0, estimatedEdgeLabelSpan(edge) * 0.16)
+            let ideal = radii[i] + radii[j] + baseGap * groupMultiplier * relationMultiplier + spanGap
+            edgeSprings.append(LayoutSpring(
+                i: i,
+                j: j,
+                ideal: ideal,
+                strength: sharesGroup ? 0.030 : 0.022,
+                axisBias: 0.050
+            ))
+        }
+
+        var groupSprings: [LayoutSpring] = []
+        for group in groupPlans where group.indices.count > 1 && group.cohesionStrength > 0 {
+            let perPairStrength = (0.050 + group.cohesionStrength * 0.40)
+                / Double(max(group.indices.count - 1, 1))
+            for a in 0..<(group.indices.count - 1) {
+                for b in (a + 1)..<group.indices.count {
+                    let i = group.indices[a]
+                    let j = group.indices[b]
+                    if realPairKeys.contains(pairKey(i, j)) { continue }
+                    let degreeLoad = max(degreeWeights[i], degreeWeights[j])
+                    let ideal = radii[i] + radii[j] + baseGap * (0.42 + min(0.24, 0.05 * degreeLoad))
+                    groupSprings.append(LayoutSpring(
+                        i: i,
+                        j: j,
+                        ideal: ideal,
+                        strength: perPairStrength,
+                        axisBias: 0.025
+                    ))
+                }
+            }
+        }
+
+        var linkedGroupPairs: Set<UInt64> = []
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            let gi = memberToGroups[i] ?? []
+            let gj = memberToGroups[j] ?? []
+            if !gi.isDisjoint(with: gj) { continue }
+            for a in gi {
+                for b in gj where a != b && groupPlans[a].memberSet.isDisjoint(with: groupPlans[b].memberSet) {
+                    linkedGroupPairs.insert(pairKey(a, b))
+                }
+            }
+        }
+
+        return LayoutPlan(
+            sizes: sizes,
+            radii: radii,
+            baseGap: baseGap,
+            nodeBudgets: nodeBudgets,
+            edgeSprings: edgeSprings,
+            groupSprings: groupSprings,
+            groups: groupPlans,
+            linkedGroupPairs: linkedGroupPairs
+        )
+    }
+
+    private static func seedConstraintPositions(
+        cards: [CompoundGraph.Card],
+        edges: [CompoundGraph.CardEdge],
+        initial: [NodeIdentifier: CGPoint],
+        plan: LayoutPlan
+    ) -> [CGPoint] {
+        let n = cards.count
+        let totalArea = cards.reduce(0.0) { result, card in
+            result + Double(card.size.width * card.size.height)
+        }
+        let canvasSeed = max(640.0, sqrt(totalArea) * 3.8)
+        let center = CGPoint(x: canvasSeed / 2, y: canvasSeed / 2)
+
+        var adjacency = Array(repeating: [Int](), count: n)
+        let indexByID = Dictionary(uniqueKeysWithValues:
+            cards.enumerated().map { ($0.element.id, $0.offset) }
+        )
+        for edge in edges {
+            guard
+                let i = indexByID[edge.source],
+                let j = indexByID[edge.target],
+                i != j
+            else { continue }
+            adjacency[i].append(j)
+            adjacency[j].append(i)
+        }
+        for index in adjacency.indices {
+            adjacency[index].sort()
+        }
+
+        var components: [[Int]] = []
+        var visited = Set<Int>()
+        for start in 0..<n where !visited.contains(start) {
+            var queue = [start]
+            var cursor = 0
+            visited.insert(start)
+            while cursor < queue.count {
+                let current = queue[cursor]
+                cursor += 1
+                for next in adjacency[current] where !visited.contains(next) {
+                    visited.insert(next)
+                    queue.append(next)
+                }
+            }
+            components.append(queue.sorted())
+        }
+
+        let goldenAngle = Double.pi * (3.0 - sqrt(5.0))
+        let componentStep = max(canvasSeed / max(sqrt(Double(components.count)), 1.0), plan.baseGap * 3.0)
+        var positions = Array(repeating: center, count: n)
+        for (componentIndex, component) in components.enumerated() {
+            let warmPoints = component.compactMap { initial[cards[$0].id.nodeID] }
+            let componentCenter: CGPoint
+            if warmPoints.isEmpty {
+                let angle = Double(componentIndex) * goldenAngle
+                let radius = componentIndex == 0 ? 0 : componentStep * sqrt(Double(componentIndex))
+                componentCenter = CGPoint(
+                    x: center.x + CGFloat(cos(angle) * radius),
+                    y: center.y + CGFloat(sin(angle) * radius)
+                )
+            } else {
+                componentCenter = CGPoint(
+                    x: warmPoints.reduce(0) { $0 + $1.x } / CGFloat(warmPoints.count),
+                    y: warmPoints.reduce(0) { $0 + $1.y } / CGFloat(warmPoints.count)
+                )
+            }
+
+            let root = component.max { lhs, rhs in
+                if plan.nodeBudgets[lhs].degree == plan.nodeBudgets[rhs].degree {
+                    return lhs > rhs
+                }
+                return plan.nodeBudgets[lhs].degree < plan.nodeBudgets[rhs].degree
+            } ?? component[0]
+            let order = breadthFirstOrder(root: root, component: component, adjacency: adjacency)
+            let localStep = max(plan.baseGap * 0.82, 130.0)
+            for (localIndex, index) in order.enumerated() {
+                if let warm = initial[cards[index].id.nodeID] {
+                    positions[index] = warm
+                    continue
+                }
+                guard localIndex > 0 else {
+                    positions[index] = componentCenter
+                    continue
+                }
+                let angle = Double(localIndex - 1) * goldenAngle
+                let radius = localStep * sqrt(Double(localIndex))
+                positions[index] = CGPoint(
+                    x: componentCenter.x + CGFloat(cos(angle) * radius),
+                    y: componentCenter.y + CGFloat(sin(angle) * radius)
+                )
+            }
+        }
+        return positions
+    }
+
+    private static func breadthFirstOrder(
+        root: Int,
+        component: [Int],
+        adjacency: [[Int]]
+    ) -> [Int] {
+        let componentSet = Set(component)
+        var visited: Set<Int> = [root]
+        var queue = [root]
+        var cursor = 0
+        while cursor < queue.count {
+            let current = queue[cursor]
+            cursor += 1
+            for next in adjacency[current] where componentSet.contains(next) && !visited.contains(next) {
+                visited.insert(next)
+                queue.append(next)
+            }
+        }
+        for index in component where !visited.contains(index) {
+            queue.append(index)
+        }
+        return queue
+    }
+
+    private static func solveConstraintLayout(
+        positions: inout [CGPoint],
+        plan: LayoutPlan,
+        iterations: Int
+    ) {
+        let n = positions.count
+        guard n > 1, iterations > 0 else { return }
+
+        var working = positions
+        var dispX = Array(repeating: 0.0, count: n)
+        var dispY = Array(repeating: 0.0, count: n)
+        let initialTemperature = max(plan.baseGap * 1.8, 180.0)
+
+        for step in 0..<iterations {
+            for index in 0..<n {
+                dispX[index] = 0
+                dispY[index] = 0
+            }
+
+            accumulateNodeRepulsion(
+                positions: working,
+                plan: plan,
+                dispX: &dispX,
+                dispY: &dispY
+            )
+            accumulateSpringForces(
+                springs: plan.edgeSprings,
+                positions: working,
+                dispX: &dispX,
+                dispY: &dispY
+            )
+            accumulateSpringForces(
+                springs: plan.groupSprings,
+                positions: working,
+                dispX: &dispX,
+                dispY: &dispY
+            )
+            accumulateGroupCohesion(
+                positions: working,
+                plan: plan,
+                dispX: &dispX,
+                dispY: &dispY
+            )
+            accumulateGroupSeparation(
+                positions: working,
+                plan: plan,
+                dispX: &dispX,
+                dispY: &dispY,
+                strength: 0.08
+            )
+            accumulateGravity(
+                positions: working,
+                dispX: &dispX,
+                dispY: &dispY,
+                strength: 0.012
+            )
+
+            let progress = Double(step) / Double(iterations)
+            let temperature = initialTemperature * pow(max(1.0 - progress, 0.0), 1.35)
+            for index in 0..<n {
+                let magnitude = sqrt(dispX[index] * dispX[index] + dispY[index] * dispY[index])
+                guard magnitude > 0.0001 else { continue }
+                let scale = min(magnitude, temperature) / magnitude
+                working[index].x += CGFloat(dispX[index] * scale)
+                working[index].y += CGFloat(dispY[index] * scale)
+            }
+        }
+
+        positions = working
+    }
+
+    private static func finalizeConstraintLayout(
+        positions: inout [CGPoint],
+        plan: LayoutPlan,
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) {
+        for _ in 0..<3 {
+            projectPlannedEdgeLengths(
+                positions: &positions,
+                springs: plan.edgeSprings,
+                iterations: 10,
+                stiffness: 0.35
+            )
+            relaxEdgeAngles(
+                positions: &positions,
+                edges: edges,
+                indexByID: indexByID,
+                iterations: 16,
+                strength: 0.16
+            )
+            spreadHubIncidentEdges(
+                positions: &positions,
+                edges: edges,
+                indexByID: indexByID,
+                iterations: 18,
+                strength: 0.40
+            )
+            resolveOverlaps(
+                positions: &positions,
+                sizes: plan.sizes,
+                margin: 56,
+                iterations: 48
+            )
+            resolvePlannedGroupGaps(
+                positions: &positions,
+                plan: plan,
+                iterations: 22,
+                strength: 0.70
+            )
+            compactSparseGroups(
+                positions: &positions,
+                radii: plan.radii,
+                edges: edges,
+                groups: groups,
+                indexByID: indexByID,
+                cardCount: plan.sizes.count,
+                iterations: 24
+            )
+        }
+
+        ejectNonMembersFromGroups(
+            positions: &positions,
+            sizes: plan.sizes,
+            groups: groups,
+            indexByID: indexByID
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: plan.sizes,
+            margin: 58,
+            iterations: 72
+        )
+        resolveGroupOverlaps(
+            positions: &positions,
+            sizes: plan.sizes,
+            groups: groups,
+            indexByID: indexByID,
+            margin: 48,
+            iterations: 48
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: plan.sizes,
+            margin: 58,
+            iterations: 72
+        )
+        compactSparseGroups(
+            positions: &positions,
+            radii: plan.radii,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            cardCount: plan.sizes.count,
+            iterations: 36
+        )
+        resolveOverlaps(
+            positions: &positions,
+            sizes: plan.sizes,
+            margin: 58,
+            iterations: 72
+        )
+    }
+
+    private static func accumulateNodeRepulsion(
+        positions: [CGPoint],
+        plan: LayoutPlan,
+        dispX: inout [Double],
+        dispY: inout [Double]
+    ) {
+        let n = positions.count
+        guard n > 1 else { return }
+        for i in 0..<(n - 1) {
+            let xi = Double(positions[i].x)
+            let yi = Double(positions[i].y)
+            for j in (i + 1)..<n {
+                let dx = xi - Double(positions[j].x)
+                let dy = yi - Double(positions[j].y)
+                let distance = max(sqrt(dx * dx + dy * dy), 0.01)
+                let target = plan.nodeBudgets[i].personalRadius + plan.nodeBudgets[j].personalRadius
+                let cutoff = target * 2.75
+                guard distance < cutoff else { continue }
+                let ux = dx / distance
+                let uy = dy / distance
+                let collision = max(0, target - distance) * 0.55
+                let field = (target * target) / distance * 0.012
+                let force = collision + field
+                dispX[i] += ux * force
+                dispY[i] += uy * force
+                dispX[j] -= ux * force
+                dispY[j] -= uy * force
+            }
+        }
+    }
+
+    private static func accumulateSpringForces(
+        springs: [LayoutSpring],
+        positions: [CGPoint],
+        dispX: inout [Double],
+        dispY: inout [Double]
+    ) {
+        for spring in springs {
+            let i = spring.i
+            let j = spring.j
+            let dx = Double(positions[j].x - positions[i].x)
+            let dy = Double(positions[j].y - positions[i].y)
+            let distance = max(sqrt(dx * dx + dy * dy), 0.01)
+            let ux = dx / distance
+            let uy = dy / distance
+            let force = (distance - spring.ideal) * spring.strength
+            dispX[i] += ux * force
+            dispY[i] += uy * force
+            dispX[j] -= ux * force
+            dispY[j] -= uy * force
+
+            if abs(dx) >= abs(dy) {
+                let correction = dy * spring.axisBias
+                dispY[i] += correction
+                dispY[j] -= correction
+            } else {
+                let correction = dx * spring.axisBias
+                dispX[i] += correction
+                dispX[j] -= correction
+            }
+        }
+    }
+
+    private static func accumulateGroupCohesion(
+        positions: [CGPoint],
+        plan: LayoutPlan,
+        dispX: inout [Double],
+        dispY: inout [Double]
+    ) {
+        for group in plan.groups where group.indices.count > 1 && group.cohesionStrength > 0 {
+            var cx = 0.0
+            var cy = 0.0
+            for index in group.indices {
+                cx += Double(positions[index].x)
+                cy += Double(positions[index].y)
+            }
+            let invCount = 1.0 / Double(group.indices.count)
+            cx *= invCount
+            cy *= invCount
+            let strength = group.cohesionStrength * 1.20
+            for index in group.indices {
+                dispX[index] += (cx - Double(positions[index].x)) * strength
+                dispY[index] += (cy - Double(positions[index].y)) * strength
+            }
+        }
+    }
+
+    private static func accumulateGroupSeparation(
+        positions: [CGPoint],
+        plan: LayoutPlan,
+        dispX: inout [Double],
+        dispY: inout [Double],
+        strength: Double
+    ) {
+        let rects = groupRects(positions: positions, plan: plan)
+        guard rects.count > 1 else { return }
+        for a in 0..<(rects.count - 1) {
+            for b in (a + 1)..<rects.count {
+                guard plan.groups[a].memberSet.isDisjoint(with: plan.groups[b].memberSet) else {
+                    continue
+                }
+                let linked = plan.linkedGroupPairs.contains(pairKey(a, b))
+                let targetGap = linked ? 190.0 : 90.0
+                let vector = groupSeparationVector(
+                    first: rects[a],
+                    second: rects[b],
+                    targetGap: targetGap,
+                    forceHorizontal: true
+                )
+                guard vector.dx != 0 || vector.dy != 0 else { continue }
+                let dx = vector.dx * strength
+                let dy = vector.dy * strength
+                for index in plan.groups[a].indices {
+                    dispX[index] -= dx
+                    dispY[index] -= dy
+                }
+                for index in plan.groups[b].indices {
+                    dispX[index] += dx
+                    dispY[index] += dy
+                }
+            }
+        }
+    }
+
+    private static func accumulateGravity(
+        positions: [CGPoint],
+        dispX: inout [Double],
+        dispY: inout [Double],
+        strength: Double
+    ) {
+        guard !positions.isEmpty else { return }
+        var cx = 0.0
+        var cy = 0.0
+        for position in positions {
+            cx += Double(position.x)
+            cy += Double(position.y)
+        }
+        cx /= Double(positions.count)
+        cy /= Double(positions.count)
+        for index in positions.indices {
+            dispX[index] += (cx - Double(positions[index].x)) * strength
+            dispY[index] += (cy - Double(positions[index].y)) * strength
+        }
+    }
+
+    private static func projectPlannedEdgeLengths(
+        positions: inout [CGPoint],
+        springs: [LayoutSpring],
+        iterations: Int,
+        stiffness: Double
+    ) {
+        guard !springs.isEmpty, iterations > 0 else { return }
+        for _ in 0..<iterations {
+            for spring in springs {
+                let dx = Double(positions[spring.j].x - positions[spring.i].x)
+                let dy = Double(positions[spring.j].y - positions[spring.i].y)
+                let distance = max(sqrt(dx * dx + dy * dy), 0.001)
+                let error = distance - spring.ideal
+                guard abs(error) > 0.01 else { continue }
+                let ux = dx / distance
+                let uy = dy / distance
+                let correction = error * 0.5 * stiffness
+                positions[spring.i].x += CGFloat(ux * correction)
+                positions[spring.i].y += CGFloat(uy * correction)
+                positions[spring.j].x -= CGFloat(ux * correction)
+                positions[spring.j].y -= CGFloat(uy * correction)
+            }
+        }
+    }
+
+    private static func resolvePlannedGroupGaps(
+        positions: inout [CGPoint],
+        plan: LayoutPlan,
+        iterations: Int,
+        strength: Double
+    ) {
+        guard plan.groups.count > 1, iterations > 0 else { return }
+        for _ in 0..<iterations {
+            let rects = groupRects(positions: positions, plan: plan)
+            for a in 0..<(rects.count - 1) {
+                for b in (a + 1)..<rects.count {
+                    guard plan.groups[a].memberSet.isDisjoint(with: plan.groups[b].memberSet) else {
+                        continue
+                    }
+                    let linked = plan.linkedGroupPairs.contains(pairKey(a, b))
+                    let targetGap = linked ? 190.0 : 90.0
+                    let vector = groupSeparationVector(
+                        first: rects[a],
+                        second: rects[b],
+                        targetGap: targetGap,
+                        forceHorizontal: true
+                    )
+                    guard vector.dx != 0 || vector.dy != 0 else { continue }
+                    let dx = vector.dx * strength
+                    let dy = vector.dy * strength
+                    for index in plan.groups[a].indices {
+                        positions[index].x -= CGFloat(dx)
+                        positions[index].y -= CGFloat(dy)
+                    }
+                    for index in plan.groups[b].indices {
+                        positions[index].x += CGFloat(dx)
+                        positions[index].y += CGFloat(dy)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func groupRects(
+        positions: [CGPoint],
+        plan: LayoutPlan
+    ) -> [CGRect] {
+        plan.groups.map { group in
+            var rect = CGRect.null
+            for index in group.indices {
+                let size = plan.sizes[index]
+                let origin = CGPoint(
+                    x: positions[index].x - size.width / 2,
+                    y: positions[index].y - size.height / 2
+                )
+                let cardRect = CGRect(origin: origin, size: size)
+                rect = rect.isNull ? cardRect : rect.union(cardRect)
+            }
+            return rect.insetBy(dx: -group.padding, dy: -group.padding)
+        }
+    }
+
+    private static func groupSeparationVector(
+        first: CGRect,
+        second: CGRect,
+        targetGap: Double,
+        forceHorizontal: Bool
+    ) -> CGVector {
+        let centerDX = Double(second.midX - first.midX)
+        let centerDY = Double(second.midY - first.midY)
+        if forceHorizontal || abs(centerDX) >= abs(centerDY) {
+            let direction = forceHorizontal ? 1.0 : (centerDX >= 0 ? 1.0 : -1.0)
+            let gap = direction > 0
+                ? Double(second.minX - first.maxX)
+                : Double(first.minX - second.maxX)
+            let deficit = targetGap - gap
+            guard deficit > 0 else { return .zero }
+            return CGVector(dx: direction * deficit * 0.5, dy: 0)
+        } else {
+            let direction = centerDY >= 0 ? 1.0 : -1.0
+            let gap = direction > 0
+                ? Double(second.minY - first.maxY)
+                : Double(first.minY - second.maxY)
+            let deficit = targetGap - gap
+            guard deficit > 0 else { return .zero }
+            return CGVector(dx: 0, dy: direction * deficit * 0.5)
+        }
+    }
+
+    private static func pairKey(_ a: Int, _ b: Int) -> UInt64 {
+        let lo = UInt64(min(a, b))
+        let hi = UInt64(max(a, b))
+        return (lo << 32) | hi
     }
 
     // MARK: - Group bounding boxes
