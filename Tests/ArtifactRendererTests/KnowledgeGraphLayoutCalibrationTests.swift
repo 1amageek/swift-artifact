@@ -208,6 +208,46 @@ struct KnowledgeGraphLayoutCalibrationTests {
     }
 
     @Test
+    func overlappingNamedGraphMembersDoNotInheritExternalBlockGap() throws {
+        let alice = Self.exampleOrgIRI("alice")
+        let bob = Self.exampleOrgIRI("bob")
+        let carol = Self.exampleOrgIRI("carol")
+        let dave = Self.exampleOrgIRI("dave")
+        let eve = Self.exampleOrgIRI("eve")
+        let g1 = "http://example.org/g1"
+        let g2 = "http://example.org/g2"
+        let bridge = "http://example.org/bridge"
+        let graph = KnowledgeGraph(
+            nodes: [alice, bob, carol, dave, eve].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: alice, to: bob, namedGraph: g1),
+                Self.edge(from: bob, to: carol, namedGraph: g1),
+                Self.edge(from: carol, to: dave, namedGraph: g2),
+                Self.edge(from: dave, to: eve, namedGraph: g2),
+                Self.edge(from: carol, to: dave, predicate: bridge, namedGraph: bridge)
+            ],
+            namedGraphs: [
+                NamedGraph(id: g1, nodes: [alice, bob, carol]),
+                NamedGraph(id: g2, nodes: [carol, dave, eve]),
+                NamedGraph(id: bridge, nodes: [carol, dave])
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let bobRect = try cardRect(of: CompoundGraph.Card.ID(nodeID: bob), in: result)
+        let carolRect = try cardRect(of: CompoundGraph.Card.ID(nodeID: carol), in: result)
+        let daveRect = try cardRect(of: CompoundGraph.Card.ID(nodeID: dave), in: result)
+        let eveRect = try cardRect(of: CompoundGraph.Card.ID(nodeID: eve), in: result)
+
+        let leftInternalGap = carolRect.minX - bobRect.maxX
+        let rightInternalGap = eveRect.minX - daveRect.maxX
+        #expect(leftInternalGap >= 80)
+        #expect(leftInternalGap < 130)
+        #expect(rightInternalGap >= 80)
+        #expect(rightInternalGap < 130)
+    }
+
+    @Test
     func highDegreeEdgesReceiveLongerDistanceBudget() throws {
         let pairA = Self.iri("pair-a")
         let pairB = Self.iri("pair-b")
@@ -312,7 +352,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         for (actual, expectedValue) in zip(coordinates, expected) {
             #expect(abs(actual - expectedValue) < 0.5)
         }
-        #expect(abs((coordinates[1] - coordinates[0]) - 18) < 0.5)
+        #expect(abs((coordinates[1] - coordinates[0]) - 14) < 0.5)
         #expect(abs((coordinates[0] + coordinates[1]) * 0.5 - sideCenterCoordinate(of: hubRect, side: side)) < 0.5)
     }
 
@@ -345,11 +385,98 @@ struct KnowledgeGraphLayoutCalibrationTests {
         }
         try #require(!gaps.isEmpty)
         let firstGap = try #require(gaps.first)
-        #expect(firstGap < 18)
+        #expect(firstGap < 14)
         for gap in gaps {
             #expect(abs(gap - firstGap) < 0.5)
         }
         #expect(abs((coordinates[0] + coordinates[coordinates.count - 1]) * 0.5 - sideCenterCoordinate(of: hubRect, side: side)) < 0.5)
+    }
+
+    @Test
+    func incomingPortsCenterOnTargetAndKeepSingletonSourcesCentered() throws {
+        let alice = Self.iri("incoming-alice")
+        let bob = Self.iri("incoming-bob")
+        let carol = Self.iri("incoming-carol")
+        let graph = KnowledgeGraph(
+            nodes: [alice, bob, carol].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: alice, to: carol, namedGraph: "incoming"),
+                Self.edge(from: bob, to: carol, namedGraph: "incoming")
+            ],
+            namedGraphs: [NamedGraph(id: "incoming", nodes: [alice, bob, carol])]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let targetID = CompoundGraph.Card.ID(nodeID: carol)
+        let targetRect = try cardRect(of: targetID, in: result)
+        let ports = try targetPorts(for: targetID, in: targetRect, result: result)
+        try #require(ports.count == 2)
+        let sides = Set(ports.map(\.side))
+        try #require(sides.count == 1)
+        let side = try #require(sides.first)
+        let coordinates = ports.map { portAxisCoordinate($0.point, side: side) }.sorted()
+        let expected = expectedCenteredPortCoordinates(rect: targetRect, side: side, count: ports.count)
+
+        for (actual, expectedValue) in zip(coordinates, expected) {
+            #expect(abs(actual - expectedValue) < 0.5)
+        }
+        #expect(abs((coordinates[0] + coordinates[1]) * 0.5 - sideCenterCoordinate(of: targetRect, side: side)) < 0.5)
+
+        for edge in result.compoundGraph.edges where edge.target == targetID {
+            let route = try #require(result.edgeRoutes[edge.id])
+            let sourceRect = try cardRect(of: edge.source, in: result)
+            let sourceSide = try #require(boundarySide(of: route.start, in: sourceRect))
+            let coordinate = portAxisCoordinate(route.start, side: sourceSide)
+            let center = sideCenterCoordinate(of: sourceRect, side: sourceSide)
+            #expect(abs(coordinate - center) < 0.5)
+        }
+    }
+
+    @Test
+    func outgoingPortsCenterOnSourceAndKeepSingletonTargetsCentered() throws {
+        let source = Self.iri("outgoing-source-with-metadata")
+        let eve = Self.iri("outgoing-eve")
+        let frank = Self.iri("outgoing-frank")
+        let literals = (0..<6).map { NodeIdentifier.literal(value: "metadata-\($0)") }
+        let attributeEdges = literals.enumerated().map { index, literal in
+            Self.edge(
+                from: source,
+                to: literal,
+                predicate: "http://example.org/metadata/\(index)"
+            )
+        }
+        let graph = KnowledgeGraph(
+            nodes: ([source, eve, frank] + literals).map { Node(id: $0) },
+            edges: attributeEdges + [
+                Self.edge(from: source, to: eve),
+                Self.edge(from: source, to: frank)
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .none)
+        let sourceID = CompoundGraph.Card.ID(nodeID: source)
+        let sourceRect = try cardRect(of: sourceID, in: result)
+        let ports = try sourcePorts(for: sourceID, in: sourceRect, result: result)
+        try #require(ports.count == 2)
+        let sides = Set(ports.map(\.side))
+        try #require(sides.count == 1)
+        let side = try #require(sides.first)
+        let coordinates = ports.map { portAxisCoordinate($0.point, side: side) }.sorted()
+        let expected = expectedCenteredPortCoordinates(rect: sourceRect, side: side, count: ports.count)
+
+        for (actual, expectedValue) in zip(coordinates, expected) {
+            #expect(abs(actual - expectedValue) < 0.5)
+        }
+        #expect(abs((coordinates[0] + coordinates[1]) * 0.5 - sideCenterCoordinate(of: sourceRect, side: side)) < 0.5)
+
+        for edge in result.compoundGraph.edges where edge.source == sourceID {
+            let route = try #require(result.edgeRoutes[edge.id])
+            let targetRect = try cardRect(of: edge.target, in: result)
+            let targetSide = try #require(boundarySide(of: route.end, in: targetRect))
+            let coordinate = portAxisCoordinate(route.end, side: targetSide)
+            let center = sideCenterCoordinate(of: targetRect, side: targetSide)
+            #expect(abs(coordinate - center) < 0.5)
+        }
     }
 
     @Test
@@ -487,7 +614,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
                 let distance = routeDistanceAwayFromSharedEndpointFanout(routedEdges[i], routedEdges[j])
                 guard distance.isFinite else { continue }
                 checkedPairs += 1
-                #expect(distance >= 17)
+                #expect(distance >= 13)
             }
         }
         #expect(checkedPairs > 0)
@@ -537,9 +664,15 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .none)
         let outline = try nodeOutlineRect(result: result)
         let aspect = Double(outline.width / outline.height)
+        let cardRects = try cardRects(result: result)
 
         #expect(aspect > 0.95)
         #expect(aspect < 2.05)
+        for i in 0..<(cardRects.count - 1) {
+            for j in (i + 1)..<cardRects.count {
+                #expect(rectanglesAreSeparated(cardRects[i], cardRects[j], horizontal: 80, vertical: 40))
+            }
+        }
     }
 
     @Test
@@ -610,9 +743,19 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let maxX = try #require(xValues.max())
         let minX = try #require(xValues.min())
 
-        #expect(maxX - minX < 2)
+        #expect(maxX - minX < 12)
         for offset in 1..<centers.count {
             #expect(centers[offset].y > centers[offset - 1].y)
+        }
+        let memberRects = try nodes.map { node in
+            try cardRect(of: CompoundGraph.Card.ID(nodeID: node), in: result)
+        }
+        let verticalGaps = zip(memberRects.dropFirst(), memberRects).map { next, previous in
+            next.minY - previous.maxY
+        }
+        for gap in verticalGaps {
+            #expect(gap < 42)
+            #expect(gap >= 28)
         }
 
         let groupCardIDs = Set(nodes.map { CompoundGraph.Card.ID(nodeID: $0) })
@@ -624,8 +767,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
             let labelCenter = try #require(result.edgeLabelPositions[edge.id])
             let labelRect = edgeLabelRect(center: labelCenter, edge: edge)
 
-            #expect(routePoints.count == 2)
-            #expect(abs(routePoints[0].x - routePoints[1].x) < 1)
+            #expect(routePoints.count <= 4)
             #expect(!labelRect.intersects(sourceRect.insetBy(dx: -2, dy: -2)))
             #expect(!labelRect.intersects(targetRect.insetBy(dx: -2, dy: -2)))
         }
@@ -767,9 +909,16 @@ struct KnowledgeGraphLayoutCalibrationTests {
 
         let result = KnowledgeGraphLayout.compute(graph: graph)
         let cardRects = try cardRects(result: result)
+        let sameGroupPairs = sameGroupCardPairs(result: result)
         for i in 0..<(cardRects.count - 1) {
             for j in (i + 1)..<cardRects.count {
-                #expect(rectanglesAreSeparated(cardRects[i], cardRects[j], byAtLeast: 40))
+                let isSameGroup = sameGroupPairs.contains(pairKey(i, j))
+                #expect(rectanglesAreSeparated(
+                    cardRects[i],
+                    cardRects[j],
+                    horizontal: isSameGroup ? 40 : 80,
+                    vertical: isSameGroup ? 28 : 40
+                ))
             }
         }
 
@@ -825,6 +974,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         for i in 0..<(labelRects.count - 1) {
             for j in (i + 1)..<labelRects.count {
                 #expect(!labelRects[i].intersects(labelRects[j]))
+                #expect(rectDistance(labelRects[i], labelRects[j]) >= 3.5)
             }
         }
         for edge in result.compoundGraph.edges {
@@ -832,6 +982,40 @@ struct KnowledgeGraphLayoutCalibrationTests {
             let labelCenter = try #require(result.edgeLabelPositions[edge.id])
             #expect(distanceToRoute(labelCenter, route: route) <= 1)
         }
+    }
+
+    @Test
+    func multiJointEdgeLabelsUseSecondSourceSegment() throws {
+        let source = Self.iri("label-route-source-with-metadata")
+        let eve = Self.iri("label-route-eve")
+        let frank = Self.iri("label-route-frank")
+        let literals = (0..<6).map { NodeIdentifier.literal(value: "route-metadata-\($0)") }
+        let attributeEdges = literals.enumerated().map { index, literal in
+            Self.edge(
+                from: source,
+                to: literal,
+                predicate: "http://example.org/routeMetadata/\(index)"
+            )
+        }
+        let graph = KnowledgeGraph(
+            nodes: ([source, eve, frank] + literals).map { Node(id: $0) },
+            edges: attributeEdges + [
+                Self.edge(from: source, to: eve, predicate: "http://example.org/knows"),
+                Self.edge(from: source, to: frank, predicate: "http://example.org/supports")
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .none)
+        var checked = 0
+        for edge in result.compoundGraph.edges {
+            let route = try #require(result.edgeRoutes[edge.id])
+            let points = route.points.isEmpty ? [route.start, route.end] : route.points
+            guard points.count >= 4 else { continue }
+            let labelCenter = try #require(result.edgeLabelPositions[edge.id])
+            #expect(pointLiesOnSegment(labelCenter, start: points[1], end: points[2]))
+            checked += 1
+        }
+        #expect(checked > 0)
     }
 
     @Test
@@ -870,6 +1054,79 @@ struct KnowledgeGraphLayoutCalibrationTests {
     }
 
     @Test
+    func skipEdgesPreferShortestSideBypassAroundIntermediateNodes() throws {
+        let alice = Self.exampleOrgIRI("shortest-alice")
+        let bob = Self.exampleOrgIRI("shortest-bob")
+        let carol = Self.exampleOrgIRI("shortest-carol")
+        let dave = Self.exampleOrgIRI("shortest-dave")
+        let eve = Self.exampleOrgIRI("shortest-eve")
+        let frank = Self.exampleOrgIRI("shortest-frank")
+        let graph = KnowledgeGraph(
+            nodes: [alice, bob, carol, dave, eve, frank].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: alice, to: bob, namedGraph: "g1"),
+                Self.edge(from: bob, to: carol, namedGraph: "g1"),
+                Self.edge(from: alice, to: carol, namedGraph: "g1"),
+                Self.edge(from: dave, to: eve, namedGraph: "g2"),
+                Self.edge(from: eve, to: frank, namedGraph: "g2"),
+                Self.edge(from: dave, to: frank, namedGraph: "g2")
+            ],
+            namedGraphs: [
+                NamedGraph(id: "g1", nodes: [alice, bob, carol]),
+                NamedGraph(id: "g2", nodes: [dave, eve, frank])
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let skipPairs = [
+            (alice, carol, bob),
+            (dave, frank, eve)
+        ]
+        var endpointCounts: [EndpointBucket: Int] = [:]
+        var endpoints: [(bucket: EndpointBucket, port: BoundaryPort, rect: CGRect)] = []
+        for edge in result.compoundGraph.edges {
+            let route = try #require(result.edgeRoutes[edge.id])
+            let sourceRect = try cardRect(of: edge.source, in: result)
+            let targetRect = try cardRect(of: edge.target, in: result)
+            let sourceSide = try #require(boundarySide(of: route.start, in: sourceRect))
+            let targetSide = try #require(boundarySide(of: route.end, in: targetRect))
+            let sourceBucket = EndpointBucket(cardID: edge.source, side: sourceSide)
+            let targetBucket = EndpointBucket(cardID: edge.target, side: targetSide)
+            endpointCounts[sourceBucket, default: 0] += 1
+            endpointCounts[targetBucket, default: 0] += 1
+            endpoints.append((sourceBucket, BoundaryPort(point: route.start, side: sourceSide), sourceRect))
+            endpoints.append((targetBucket, BoundaryPort(point: route.end, side: targetSide), targetRect))
+        }
+
+        for endpoint in endpoints where endpointCounts[endpoint.bucket] == 1 {
+            let coordinate = portAxisCoordinate(endpoint.port.point, side: endpoint.port.side)
+            let center = sideCenterCoordinate(of: endpoint.rect, side: endpoint.port.side)
+            #expect(abs(coordinate - center) < 0.5)
+        }
+
+        for (source, target, blocker) in skipPairs {
+            let sourceID = CompoundGraph.Card.ID(nodeID: source)
+            let targetID = CompoundGraph.Card.ID(nodeID: target)
+            let blockerID = CompoundGraph.Card.ID(nodeID: blocker)
+            let edge = try #require(result.compoundGraph.edges.first {
+                $0.source == sourceID && $0.target == targetID
+            })
+            let route = try #require(result.edgeRoutes[edge.id])
+            let points = route.points.isEmpty ? [route.start, route.end] : route.points
+            let sourceRect = try cardRect(of: sourceID, in: result)
+            let targetRect = try cardRect(of: targetID, in: result)
+            let blockerRect = try cardRect(of: blockerID, in: result)
+            let sourceSide = try #require(boundarySide(of: route.start, in: sourceRect))
+            let targetSide = try #require(boundarySide(of: route.end, in: targetRect))
+
+            #expect(sourceSide == targetSide)
+            #expect(sourceSide == .left || sourceSide == .right)
+            #expect(routeCornerCount(points) <= 4)
+            #expect(!routeIntersectsRect(points, blockerRect.insetBy(dx: -18, dy: -18)))
+        }
+    }
+
+    @Test
     func namespacePreviewKeepsGroupsCompactAndLabelsSeparated() throws {
         let graph = byNamespacePreviewGraph()
         let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .byNamespace())
@@ -883,6 +1140,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         for i in 0..<(labelRects.count - 1) {
             for j in (i + 1)..<labelRects.count {
                 #expect(!labelRects[i].intersects(labelRects[j]))
+                #expect(rectDistance(labelRects[i], labelRects[j]) >= 3.5)
             }
         }
     }
@@ -912,10 +1170,42 @@ struct KnowledgeGraphLayoutCalibrationTests {
         _ rhs: CGRect,
         byAtLeast gap: CGFloat
     ) -> Bool {
+        rectanglesAreSeparated(lhs, rhs, horizontal: gap, vertical: gap)
+    }
+
+    private func rectanglesAreSeparated(
+        _ lhs: CGRect,
+        _ rhs: CGRect,
+        horizontal: CGFloat,
+        vertical: CGFloat
+    ) -> Bool {
         let horizontalGap = max(lhs.minX - rhs.maxX, rhs.minX - lhs.maxX)
         let verticalGap = max(lhs.minY - rhs.maxY, rhs.minY - lhs.maxY)
         let tolerance: CGFloat = 1
-        return horizontalGap >= gap - tolerance || verticalGap >= gap - tolerance
+        return horizontalGap >= horizontal - tolerance || verticalGap >= vertical - tolerance
+    }
+
+    private func sameGroupCardPairs(result: KnowledgeGraphLayout.Result) -> Set<UInt64> {
+        let indexByID = Dictionary(uniqueKeysWithValues:
+            result.compoundGraph.cards.enumerated().map { ($0.element.id, $0.offset) }
+        )
+        var pairs: Set<UInt64> = []
+        for group in result.compoundGraph.groups {
+            let indices = group.members.compactMap { indexByID[$0] }
+            guard indices.count > 1 else { continue }
+            for a in 0..<(indices.count - 1) {
+                for b in (a + 1)..<indices.count {
+                    pairs.insert(pairKey(indices[a], indices[b]))
+                }
+            }
+        }
+        return pairs
+    }
+
+    private func pairKey(_ a: Int, _ b: Int) -> UInt64 {
+        let lo = UInt64(min(a, b))
+        let hi = UInt64(max(a, b))
+        return (lo << 32) | hi
     }
 
     private func pointIsOnBoundary(_ point: CGPoint, of rect: CGRect) -> Bool {
@@ -937,6 +1227,11 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let side: BoundarySide
     }
 
+    private struct EndpointBucket: Hashable {
+        let cardID: CompoundGraph.Card.ID
+        let side: BoundarySide
+    }
+
     private struct RoutedTestEdge {
         let edge: CompoundGraph.CardEdge
         let points: [CGPoint]
@@ -952,6 +1247,20 @@ struct KnowledgeGraphLayoutCalibrationTests {
             let route = try #require(result.edgeRoutes[edge.id])
             let side = try #require(boundarySide(of: route.start, in: rect))
             ports.append(BoundaryPort(point: route.start, side: side))
+        }
+        return ports
+    }
+
+    private func targetPorts(
+        for cardID: CompoundGraph.Card.ID,
+        in rect: CGRect,
+        result: KnowledgeGraphLayout.Result
+    ) throws -> [BoundaryPort] {
+        var ports: [BoundaryPort] = []
+        for edge in result.compoundGraph.edges where edge.target == cardID {
+            let route = try #require(result.edgeRoutes[edge.id])
+            let side = try #require(boundarySide(of: route.end, in: rect))
+            ports.append(BoundaryPort(point: route.end, side: side))
         }
         return ports
     }
@@ -996,9 +1305,9 @@ struct KnowledgeGraphLayoutCalibrationTests {
         if safeCount <= 1 {
             step = 0
         } else {
-            let desiredSpan = CGFloat(18) * CGFloat(safeCount - 1)
+            let desiredSpan = CGFloat(14) * CGFloat(safeCount - 1)
             step = desiredSpan <= availableLength
-                ? 18
+                ? 14
                 : availableLength / CGFloat(safeCount - 1)
         }
         let center = sideCenterCoordinate(of: rect, side: side)
@@ -1393,7 +1702,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         edge: CompoundGraph.CardEdge
     ) -> CGRect {
         let size = CGSize(
-            width: min(CGFloat(edge.predicate.count) * 7 + 24, 190),
+            width: min(CGFloat(edge.predicate.count) * 7 + 20, 190),
             height: 18
         )
         return CGRect(
@@ -1402,6 +1711,29 @@ struct KnowledgeGraphLayoutCalibrationTests {
             width: size.width,
             height: size.height
         )
+    }
+
+    private func rectDistance(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let dx = max(max(lhs.minX - rhs.maxX, rhs.minX - lhs.maxX), 0)
+        let dy = max(max(lhs.minY - rhs.maxY, rhs.minY - lhs.maxY), 0)
+        return hypot(dx, dy)
+    }
+
+    private func pointLiesOnSegment(
+        _ point: CGPoint,
+        start: CGPoint,
+        end: CGPoint
+    ) -> Bool {
+        let tolerance: CGFloat = 0.5
+        let minX = min(start.x, end.x) - tolerance
+        let maxX = max(start.x, end.x) + tolerance
+        let minY = min(start.y, end.y) - tolerance
+        let maxY = max(start.y, end.y) + tolerance
+        return point.x >= minX
+            && point.x <= maxX
+            && point.y >= minY
+            && point.y <= maxY
+            && pointSegmentDistance(point, start, end) <= tolerance
     }
 
     private func groupMemberFillRatio(

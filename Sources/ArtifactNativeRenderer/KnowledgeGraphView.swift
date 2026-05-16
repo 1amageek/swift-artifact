@@ -53,7 +53,10 @@ struct KnowledgeGraphView: View {
     private let arrowSize: CGFloat = 9
     private let edgeLineWidth: CGFloat = 1.4
     private let edgeSourceMarkerRadius: CGFloat = 2.2
-    private let edgeLabelGuideInset: CGFloat = 3
+    private let edgeLabelHorizontalPadding: CGFloat = 6
+    private let edgeLabelVerticalPadding: CGFloat = 3
+    private let edgeLabelCornerRadius: CGFloat = 7
+    private let edgeLabelGuideInset: CGFloat = 2
     private let cullingMargin: CGFloat = 120
     private let zoomStep: CGFloat = 1.25
     private let groupLabelMeasurementWidth: CGFloat = 2048
@@ -317,15 +320,13 @@ struct KnowledgeGraphView: View {
                     .foregroundStyle(theme.muted)
             )
             let textSize = resolved.measure(in: CGSize(width: 180, height: 60))
-            let hPad: CGFloat = 8
-            let vPad: CGFloat = 4
             let bgRect = CGRect(
-                x: screenPos.x - textSize.width / 2 - hPad,
-                y: screenPos.y - textSize.height / 2 - vPad,
-                width: textSize.width + hPad * 2,
-                height: textSize.height + vPad * 2
+                x: screenPos.x - textSize.width / 2 - edgeLabelHorizontalPadding,
+                y: screenPos.y - textSize.height / 2 - edgeLabelVerticalPadding,
+                width: textSize.width + edgeLabelHorizontalPadding * 2,
+                height: textSize.height + edgeLabelVerticalPadding * 2
             )
-            let labelPath = Path(roundedRect: bgRect, cornerRadius: 4)
+            let labelPath = Path(roundedRect: bgRect, cornerRadius: edgeLabelCornerRadius)
             context.fill(labelPath, with: .color(theme.edgeLabelFill))
             drawEdgeLabelGuide(
                 in: bgRect,
