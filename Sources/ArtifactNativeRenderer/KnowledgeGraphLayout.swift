@@ -6998,7 +6998,7 @@ struct KnowledgeGraphLayout: Sendable {
         }
 
         func nodes(in rect: CGRect) -> [IndexedNodeRect] {
-            index.query(rect).map(\.item)
+            return index.query(rect).map(\.item)
         }
     }
 
@@ -8099,7 +8099,7 @@ struct KnowledgeGraphLayout: Sendable {
         var optimized = routes
         var routeCandidateCache = FixedEndpointRouteCandidateCache()
         let edgeByID = Dictionary(uniqueKeysWithValues: edges.map { ($0.id, $0) })
-        for _ in 0..<6 {
+        for _ in 0..<2 {
             let endpoints = routeEndpoints(
                 routes: optimized,
                 edges: edges,
@@ -8128,65 +8128,63 @@ struct KnowledgeGraphLayout: Sendable {
                 }
 
                 for lhsIndex in 0..<(sortedEntries.count - 1) {
-                    for rhsIndex in (lhsIndex + 1)..<sortedEntries.count {
-                        let lhs = sortedEntries[lhsIndex]
-                        let rhs = sortedEntries[rhsIndex]
-                        let affectedEdgeIDs = Set([lhs.edgeID, rhs.edgeID])
-                        guard !affectedEdgeIDs.isDisjoint(with: currentConflict.edgeIDs) else {
-                            continue
-                        }
-                        let affectedEdgeList = affectedEdges(
-                            lhs: lhs.edgeID,
-                            rhs: rhs.edgeID,
-                            edgeByID: edgeByID
-                        )
-                        guard !affectedEdgeList.isEmpty else { continue }
-                        let baseRouteSegmentIndex = routeSegmentIndex(
-                            edges: edges,
-                            routes: optimized,
-                            excluding: affectedEdgeIDs
-                        )
-                        let currentLength = routeLengthSum(
-                            routes: optimized,
-                            affectedEdges: affectedEdgeList
-                        )
-                        let currentLocalConflict = localRouteConflictScore(
-                            routes: optimized,
-                            affectedEdges: affectedEdgeList,
-                            baseRouteSegmentIndex: baseRouteSegmentIndex
-                        )
-                        guard let candidate = routesBySwappingEndpointPorts(
-                            lhs: lhs,
-                            rhs: rhs,
-                            endpoints: endpoints,
-                            routes: optimized,
-                            edges: edges,
-                            indexByID: indexByID,
-                            nodeIndex: nodeIndex,
-                            affectedEdges: affectedEdgeList,
-                            routeCandidateCache: &routeCandidateCache
-                        ) else { continue }
-                        let candidateLength = routeLengthSum(
-                            routes: candidate,
-                            affectedEdges: affectedEdgeList
-                        )
-                        guard candidateLength <= currentLength + 0.5 else { continue }
+                    let lhs = sortedEntries[lhsIndex]
+                    let rhs = sortedEntries[lhsIndex + 1]
+                    let affectedEdgeIDs = Set([lhs.edgeID, rhs.edgeID])
+                    guard !affectedEdgeIDs.isDisjoint(with: currentConflict.edgeIDs) else {
+                        continue
+                    }
+                    let affectedEdgeList = affectedEdges(
+                        lhs: lhs.edgeID,
+                        rhs: rhs.edgeID,
+                        edgeByID: edgeByID
+                    )
+                    guard !affectedEdgeList.isEmpty else { continue }
+                    let baseRouteSegmentIndex = routeSegmentIndex(
+                        edges: edges,
+                        routes: optimized,
+                        excluding: affectedEdgeIDs
+                    )
+                    let currentLength = routeLengthSum(
+                        routes: optimized,
+                        affectedEdges: affectedEdgeList
+                    )
+                    let currentLocalConflict = localRouteConflictScore(
+                        routes: optimized,
+                        affectedEdges: affectedEdgeList,
+                        baseRouteSegmentIndex: baseRouteSegmentIndex
+                    )
+                    guard let candidate = routesBySwappingEndpointPorts(
+                        lhs: lhs,
+                        rhs: rhs,
+                        endpoints: endpoints,
+                        routes: optimized,
+                        edges: edges,
+                        indexByID: indexByID,
+                        nodeIndex: nodeIndex,
+                        affectedEdges: affectedEdgeList,
+                        routeCandidateCache: &routeCandidateCache
+                    ) else { continue }
+                    let candidateLength = routeLengthSum(
+                        routes: candidate,
+                        affectedEdges: affectedEdgeList
+                    )
+                    guard candidateLength <= currentLength + 0.5 else { continue }
 
-                        let candidateLocalConflict = localRouteConflictScore(
-                            routes: candidate,
-                            affectedEdges: affectedEdgeList,
-                            baseRouteSegmentIndex: baseRouteSegmentIndex
-                        )
-                        let improvement = PortSwapImprovement(
-                            routes: candidate,
-                            lengthDelta: candidateLength - currentLength,
-                            conflictBefore: currentLocalConflict,
-                            conflictAfter: candidateLocalConflict
-                        )
-                        guard improvement.isValid else { continue }
-                        if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
-                            bestImprovement = improvement
-                        }
+                    let candidateLocalConflict = localRouteConflictScore(
+                        routes: candidate,
+                        affectedEdges: affectedEdgeList,
+                        baseRouteSegmentIndex: baseRouteSegmentIndex
+                    )
+                    let improvement = PortSwapImprovement(
+                        routes: candidate,
+                        lengthDelta: candidateLength - currentLength,
+                        conflictBefore: currentLocalConflict,
+                        conflictAfter: candidateLocalConflict
+                    )
+                    guard improvement.isValid else { continue }
+                    if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
+                        bestImprovement = improvement
                     }
                 }
             }
@@ -8487,14 +8485,12 @@ struct KnowledgeGraphLayout: Sendable {
         let jointEnd = simplified[2]
         let jointAxis = routeSegmentAxis(start: jointStart, end: jointEnd, orientation: orientation)
         var load: CGFloat = 0
-        var visited: Set<RouteSegmentKey> = []
         routeSegmentIndex.forEachSegmentNear(
             start: jointStart,
             end: jointEnd,
             padding: LayoutSpacing.edgeEdgeRoute * 4
         ) { other in
             guard other.edge.id != edge.id else { return true }
-            guard visited.insert(other.key).inserted else { return true }
             guard routeSegmentOrientation(start: other.start, end: other.end) == orientation else {
                 return true
             }
@@ -8706,7 +8702,7 @@ struct KnowledgeGraphLayout: Sendable {
         var optimized = routes
         var routeCandidateCache = FixedEndpointRouteCandidateCache()
         let edgeByID = Dictionary(uniqueKeysWithValues: edges.map { ($0.id, $0) })
-        for _ in 0..<6 {
+        for _ in 0..<2 {
             let endpoints = routeEndpoints(
                 routes: optimized,
                 edges: edges,
@@ -8728,52 +8724,50 @@ struct KnowledgeGraphLayout: Sendable {
                 }
 
                 for lhsIndex in 0..<(sortedEntries.count - 1) {
-                    for rhsIndex in (lhsIndex + 1)..<sortedEntries.count {
-                        let lhs = sortedEntries[lhsIndex]
-                        let rhs = sortedEntries[rhsIndex]
-                        let affectedEdgeIDs = Set([lhs.edgeID, rhs.edgeID])
-                        let affectedEdgeList = affectedEdges(
-                            lhs: lhs.edgeID,
-                            rhs: rhs.edgeID,
-                            edgeByID: edgeByID
-                        )
-                        guard !affectedEdgeList.isEmpty else { continue }
-                        let baseRouteSegmentIndex = routeSegmentIndex(
-                            edges: edges,
-                            routes: optimized,
-                            excluding: affectedEdgeIDs
-                        )
-                        let currentScore = portAssignmentScore(
-                            routes: optimized,
-                            affectedEdges: affectedEdgeList,
-                            baseRouteSegmentIndex: baseRouteSegmentIndex
-                        )
-                        guard let candidate = routesBySwappingEndpointPorts(
-                            lhs: lhs,
-                            rhs: rhs,
-                            endpoints: endpoints,
-                            routes: optimized,
-                            edges: edges,
-                            indexByID: indexByID,
-                            nodeIndex: nodeIndex,
-                            affectedEdges: affectedEdgeList,
-                            routeCandidateCache: &routeCandidateCache
-                        ) else { continue }
-                        let candidateScore = portAssignmentScore(
-                            routes: candidate,
-                            affectedEdges: affectedEdgeList,
-                            baseRouteSegmentIndex: baseRouteSegmentIndex
-                        )
-                        let improvement = PortAssignmentImprovement(
-                            routes: candidate,
-                            affectedEdgeIDs: affectedEdgeIDs,
-                            scoreBefore: currentScore,
-                            scoreAfter: candidateScore
-                        )
-                        guard improvement.isValid else { continue }
-                        if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
-                            bestImprovement = improvement
-                        }
+                    let lhs = sortedEntries[lhsIndex]
+                    let rhs = sortedEntries[lhsIndex + 1]
+                    let affectedEdgeIDs = Set([lhs.edgeID, rhs.edgeID])
+                    let affectedEdgeList = affectedEdges(
+                        lhs: lhs.edgeID,
+                        rhs: rhs.edgeID,
+                        edgeByID: edgeByID
+                    )
+                    guard !affectedEdgeList.isEmpty else { continue }
+                    let baseRouteSegmentIndex = routeSegmentIndex(
+                        edges: edges,
+                        routes: optimized,
+                        excluding: affectedEdgeIDs
+                    )
+                    let currentScore = portAssignmentScore(
+                        routes: optimized,
+                        affectedEdges: affectedEdgeList,
+                        baseRouteSegmentIndex: baseRouteSegmentIndex
+                    )
+                    guard let candidate = routesBySwappingEndpointPorts(
+                        lhs: lhs,
+                        rhs: rhs,
+                        endpoints: endpoints,
+                        routes: optimized,
+                        edges: edges,
+                        indexByID: indexByID,
+                        nodeIndex: nodeIndex,
+                        affectedEdges: affectedEdgeList,
+                        routeCandidateCache: &routeCandidateCache
+                    ) else { continue }
+                    let candidateScore = portAssignmentScore(
+                        routes: candidate,
+                        affectedEdges: affectedEdgeList,
+                        baseRouteSegmentIndex: baseRouteSegmentIndex
+                    )
+                    let improvement = PortAssignmentImprovement(
+                        routes: candidate,
+                        affectedEdgeIDs: affectedEdgeIDs,
+                        scoreBefore: currentScore,
+                        scoreAfter: candidateScore
+                    )
+                    guard improvement.isValid else { continue }
+                    if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
+                        bestImprovement = improvement
                     }
                 }
             }
@@ -9805,10 +9799,11 @@ struct KnowledgeGraphLayout: Sendable {
             parallelIndex: edge.parallelIndex,
             parallelCount: edge.parallelCount
         )
-        var best: [CGPoint]?
-        var bestScore: OrthogonalRouteScore?
-        for sourcePort in sourcePorts {
-            for targetPort in targetPorts {
+
+        func bestRoute(portPairs: [(source: EdgePort, target: EdgePort)]) -> [CGPoint]? {
+            var best: [CGPoint]?
+            var bestScore: OrthogonalRouteScore?
+            for (sourcePort, targetPort) in portPairs {
                 if let directPoints = directFixedEndpointRoute(
                     sourcePort: sourcePort,
                     targetPort: targetPort,
@@ -9825,12 +9820,11 @@ struct KnowledgeGraphLayout: Sendable {
                         edgeClearance: edgeClearance,
                         length: metrics.length,
                         corners: metrics.corners,
-                        portPreference: hypot(
-                            sourcePort.point.x - preferredSourcePort.point.x,
-                            sourcePort.point.y - preferredSourcePort.point.y
-                        ) + hypot(
-                            targetPort.point.x - preferredTargetPort.point.x,
-                            targetPort.point.y - preferredTargetPort.point.y
+                        portPreference: portPreference(
+                            sourcePort: sourcePort,
+                            targetPort: targetPort,
+                            preferredSourcePort: preferredSourcePort,
+                            preferredTargetPort: preferredTargetPort
                         )
                     )
                     if bestScore.map({ score.isBetter(than: $0) }) ?? true {
@@ -9846,8 +9840,7 @@ struct KnowledgeGraphLayout: Sendable {
                     nodeIndex: nodeIndex,
                     excludedIndices: excluded
                 )
-                for candidate in candidates {
-                    let points = candidate
+                for points in candidates {
                     guard points.count > 1 else { continue }
                     guard simplifiedRouteIsOrthogonal(points) else { continue }
                     guard routeUsesPerpendicularPorts(
@@ -9876,12 +9869,11 @@ struct KnowledgeGraphLayout: Sendable {
                         edgeClearance: edgeClearance,
                         length: metrics.length,
                         corners: metrics.corners,
-                        portPreference: hypot(
-                            sourcePort.point.x - preferredSourcePort.point.x,
-                            sourcePort.point.y - preferredSourcePort.point.y
-                        ) + hypot(
-                            targetPort.point.x - preferredTargetPort.point.x,
-                            targetPort.point.y - preferredTargetPort.point.y
+                        portPreference: portPreference(
+                            sourcePort: sourcePort,
+                            targetPort: targetPort,
+                            preferredSourcePort: preferredSourcePort,
+                            preferredTargetPort: preferredTargetPort
                         )
                     )
                     if bestScore.map({ score.isBetter(than: $0) }) ?? true {
@@ -9890,14 +9882,145 @@ struct KnowledgeGraphLayout: Sendable {
                     }
                 }
             }
+            return best
         }
-        return best ?? fallbackOrthogonalRoute(
+
+        func bestRoute(sourcePorts: [EdgePort], targetPorts: [EdgePort]) -> [CGPoint]? {
+            var portPairs: [(source: EdgePort, target: EdgePort)] = []
+            portPairs.reserveCapacity(sourcePorts.count * targetPorts.count)
+            for sourcePort in sourcePorts {
+                for targetPort in targetPorts {
+                    portPairs.append((sourcePort, targetPort))
+                }
+            }
+            return bestRoute(portPairs: portPairs)
+        }
+
+        let sourceCenterPort = EdgePort(
+            point: portPoint(side: preferredSourcePort.side, rect: sourceRect, index: 0, count: 1),
+            side: preferredSourcePort.side,
+            bucketCount: 1
+        )
+        let targetCenterPort = EdgePort(
+            point: portPoint(side: preferredTargetPort.side, rect: targetRect, index: 0, count: 1),
+            side: preferredTargetPort.side,
+            bucketCount: 1
+        )
+        let primarySourcePorts = uniqueEdgePorts([preferredSourcePort, sourceCenterPort])
+        let primaryTargetPorts = uniqueEdgePorts([preferredTargetPort, targetCenterPort])
+        var primaryPairs: [(source: EdgePort, target: EdgePort)] = []
+        primaryPairs.reserveCapacity(primarySourcePorts.count * primaryTargetPorts.count + 4)
+        for sourcePort in primarySourcePorts {
+            for targetPort in primaryTargetPorts {
+                primaryPairs.append((sourcePort, targetPort))
+            }
+        }
+        primaryPairs.append(contentsOf: sideBypassPortPairs(
+            sourceRect: sourceRect,
+            targetRect: targetRect,
+            sourceIndex: sourceIndex,
+            targetIndex: targetIndex,
+            nodeIndex: nodeIndex
+        ))
+        if let centeredRoute = bestRoute(portPairs: uniqueEdgePortPairs(primaryPairs)) {
+            return centeredRoute
+        }
+
+        if let expandedRoute = bestRoute(sourcePorts: sourcePorts, targetPorts: targetPorts) {
+            return expandedRoute
+        }
+        return fallbackOrthogonalRoute(
             sourcePort: preferredSourcePort,
             targetPort: preferredTargetPort,
             laneOffset: laneOffset,
             nodeIndex: nodeIndex,
             excludedIndices: excluded
         )
+    }
+
+    private static func portPreference(
+        sourcePort: EdgePort,
+        targetPort: EdgePort,
+        preferredSourcePort: EdgePort,
+        preferredTargetPort: EdgePort
+    ) -> CGFloat {
+        hypot(
+            sourcePort.point.x - preferredSourcePort.point.x,
+            sourcePort.point.y - preferredSourcePort.point.y
+        ) + hypot(
+            targetPort.point.x - preferredTargetPort.point.x,
+            targetPort.point.y - preferredTargetPort.point.y
+        )
+    }
+
+    private static func uniqueEdgePorts(_ ports: [EdgePort]) -> [EdgePort] {
+        var result: [EdgePort] = []
+        var seen: Set<String> = []
+        for port in ports {
+            let key = "\(port.side):\(Int(port.point.x.rounded())):\(Int(port.point.y.rounded()))"
+            guard seen.insert(key).inserted else { continue }
+            result.append(port)
+        }
+        return result
+    }
+
+    private static func uniqueEdgePortPairs(
+        _ pairs: [(source: EdgePort, target: EdgePort)]
+    ) -> [(source: EdgePort, target: EdgePort)] {
+        var result: [(source: EdgePort, target: EdgePort)] = []
+        var seen: Set<String> = []
+        for pair in pairs {
+            let key = [
+                pair.source.side,
+                Int(pair.source.point.x.rounded()),
+                Int(pair.source.point.y.rounded()),
+                pair.target.side,
+                Int(pair.target.point.x.rounded()),
+                Int(pair.target.point.y.rounded())
+            ]
+                .map(String.init(describing:))
+                .joined(separator: ":")
+            guard seen.insert(key).inserted else { continue }
+            result.append(pair)
+        }
+        return result
+    }
+
+    private static func sideBypassPortPairs(
+        sourceRect: CGRect,
+        targetRect: CGRect,
+        sourceIndex: Int,
+        targetIndex: Int,
+        nodeIndex: RouteNodeIndex
+    ) -> [(source: EdgePort, target: EdgePort)] {
+        let preferredSides = preferredPortSides(sourceRect: sourceRect, targetRect: targetRect)
+        let bypassSides: [EdgePortSide]
+        switch (preferredSides.source, preferredSides.target) {
+        case (.top, .bottom), (.bottom, .top):
+            bypassSides = [.left, .right]
+        case (.left, .right), (.right, .left):
+            bypassSides = [.top, .bottom]
+        default:
+            bypassSides = []
+        }
+        guard !bypassSides.isEmpty else { return [] }
+
+        let sourcePoint = portPoint(side: preferredSides.source, rect: sourceRect, index: 0, count: 1)
+        let targetPoint = portPoint(side: preferredSides.target, rect: targetRect, index: 0, count: 1)
+        guard nodeIndex.segmentIntersectsNode(
+            start: sourcePoint,
+            end: targetPoint,
+            excluding: Set([sourceIndex, targetIndex])
+        ) else {
+            return []
+        }
+
+        return bypassSides.map { side in
+            (
+                EdgePort(point: portPoint(side: side, rect: sourceRect, index: 0, count: 1), side: side, bucketCount: 1),
+                EdgePort(point: portPoint(side: side, rect: targetRect, index: 0, count: 1), side: side, bucketCount: 1)
+            )
+        }
     }
 
     private static func shortestFixedEndpointRoute(
@@ -10724,8 +10847,6 @@ struct KnowledgeGraphLayout: Sendable {
         }
         var crossings = 0
         var clearance: CGFloat = 0
-        var visited: Set<RouteSegmentPairKey> = []
-        let currentEdgeKey = edgeSortKey(currentEdge.id)
         for currentOffset in 1..<points.count {
             let currentStart = points[currentOffset - 1]
             let currentEnd = points[currentOffset]
@@ -10735,11 +10856,6 @@ struct KnowledgeGraphLayout: Sendable {
                 padding: LayoutSpacing.edgeEdgeRoute
             ) { other in
                 guard other.edge.id != currentEdge.id else { return true }
-                let pairKey = RouteSegmentPairKey(
-                    RouteSegmentKey(edgeKey: currentEdgeKey, segmentIndex: currentOffset),
-                    other.key
-                )
-                guard visited.insert(pairKey).inserted else { return true }
                 let score = routeSegmentConflictScore(
                     lhsEdge: currentEdge,
                     lhsPoints: points,
@@ -10762,8 +10878,6 @@ struct KnowledgeGraphLayout: Sendable {
     ) -> CGFloat {
         guard points.count > 1 else { return 0 }
         var score: CGFloat = 0
-        var visited: Set<RouteSegmentPairKey> = []
-        let currentEdgeKey = edgeSortKey(currentEdge.id)
         for currentOffset in 1..<points.count {
             let currentStart = points[currentOffset - 1]
             let currentEnd = points[currentOffset]
@@ -10773,11 +10887,6 @@ struct KnowledgeGraphLayout: Sendable {
                 padding: LayoutSpacing.edgeEdgeRoute * 4
             ) { other in
                 guard other.edge.id != currentEdge.id else { return true }
-                let pairKey = RouteSegmentPairKey(
-                    RouteSegmentKey(edgeKey: currentEdgeKey, segmentIndex: currentOffset),
-                    other.key
-                )
-                guard visited.insert(pairKey).inserted else { return true }
                 score += routeSegmentRhythmScore(
                     lhsEdge: currentEdge,
                     lhsPoints: points,
@@ -11061,7 +11170,24 @@ struct KnowledgeGraphLayout: Sendable {
         _ end: CGPoint,
         _ rect: CGRect
     ) -> Bool {
+        let minX = min(start.x, end.x)
+        let maxX = max(start.x, end.x)
+        let minY = min(start.y, end.y)
+        let maxY = max(start.y, end.y)
+        if maxX < rect.minX || minX > rect.maxX || maxY < rect.minY || minY > rect.maxY {
+            return false
+        }
         if rect.contains(start) || rect.contains(end) { return true }
+        if abs(start.x - end.x) < 0.5 {
+            let x = (start.x + end.x) * 0.5
+            return x >= rect.minX && x <= rect.maxX
+                && maxY >= rect.minY && minY <= rect.maxY
+        }
+        if abs(start.y - end.y) < 0.5 {
+            let y = (start.y + end.y) * 0.5
+            return y >= rect.minY && y <= rect.maxY
+                && maxX >= rect.minX && minX <= rect.maxX
+        }
         let topLeft = CGPoint(x: rect.minX, y: rect.minY)
         let topRight = CGPoint(x: rect.maxX, y: rect.minY)
         let bottomRight = CGPoint(x: rect.maxX, y: rect.maxY)
