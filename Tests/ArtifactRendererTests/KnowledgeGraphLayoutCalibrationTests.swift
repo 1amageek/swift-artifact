@@ -123,6 +123,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         #expect(abs(left.minY - nestedTargetTop) < 1.5)
         #expect(abs(right.minY - nestedTargetTop) < 1.5)
         #expect(abs(left.minY - right.minY) < 1.5)
+        #expect(rectsAreSeparatedHorizontally(left, right, gap: 14))
     }
 
     @Test
@@ -145,6 +146,92 @@ struct KnowledgeGraphLayoutCalibrationTests {
         #expect(topGap >= 52 - 0.5)
         #expect(sideGap >= 24 - 0.5)
         #expect(bottomGap >= 24 - 0.5)
+    }
+
+    @Test
+    func outermostGroupsAndUngroupedNodesDefineGlobalDistance() throws {
+        let parentNode = Self.iri("global-parent")
+        let childNode = Self.iri("global-child")
+        let ungrouped = Self.iri("global-ungrouped")
+        let graph = KnowledgeGraph(
+            nodes: [parentNode, childNode, ungrouped].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: parentNode, to: childNode)
+            ]
+        )
+        let initial: [NodeIdentifier: CGPoint] = [
+            parentNode: CGPoint(x: 0, y: 0),
+            childNode: CGPoint(x: 0, y: 70),
+            ungrouped: CGPoint(x: 260, y: 20)
+        ]
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: initial,
+            groupingStrategy: .explicit(groups: [
+                .init(id: "outer", label: "Outer", memberNodeIDs: [parentNode, childNode]),
+                .init(id: "inner", label: "Inner", memberNodeIDs: [childNode])
+            ])
+        )
+
+        let outer = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:outer")])
+        let freeRect = try cardRect(of: CompoundGraph.Card.ID(nodeID: ungrouped), in: result)
+        let distance = rectDistance(outer, freeRect)
+
+        #expect(distance >= 32 - 0.5)
+        #expect(distance <= 48 + 1.5)
+    }
+
+    @Test
+    func globalOutlinePackingChoosesSmallerAreaCandidate() throws {
+        let primaryNodes = (0..<4).map { Self.iri("packing-primary-\($0)") }
+        let secondaryNodes = (0..<4).map { Self.iri("packing-secondary-\($0)") }
+        var graphNodes = (primaryNodes + secondaryNodes).map { Node(id: $0) }
+        var edges: [Edge] = []
+        for (nodeIndex, node) in primaryNodes.enumerated() {
+            for attributeIndex in 0..<40 {
+                let literal = NodeIdentifier.literal(value: "value-\(nodeIndex)-\(attributeIndex)")
+                graphNodes.append(Node(id: literal))
+                edges.append(Self.edge(
+                    from: node,
+                    to: literal,
+                    predicate: "http://example.org/attribute/\(attributeIndex)"
+                ))
+            }
+        }
+        let graph = KnowledgeGraph(nodes: graphNodes, edges: edges)
+        var initial: [NodeIdentifier: CGPoint] = [:]
+        for offset in primaryNodes.indices {
+            initial[primaryNodes[offset]] = CGPoint(x: CGFloat(offset) * 600, y: 0)
+            initial[secondaryNodes[offset]] = CGPoint(x: CGFloat(offset) * 600, y: 260)
+        }
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: initial,
+            groupingStrategy: .explicit(groups: primaryNodes.indices.flatMap { offset in
+                [
+                    .init(
+                        id: "packing-\(offset)",
+                        label: "Packing \(offset)",
+                        memberNodeIDs: [primaryNodes[offset], secondaryNodes[offset]]
+                    ),
+                    .init(
+                        id: "packing-\(offset)/inner",
+                        label: "Inner \(offset)",
+                        memberNodeIDs: [primaryNodes[offset]]
+                    )
+                ]
+            })
+        )
+        let boxes = try primaryNodes.enumerated().map { offset, _ in
+            try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:packing-\(offset)")])
+        }
+        let outline = unionRect(boxes)
+        let singleRowWidth = boxes.reduce(CGFloat(0)) { partial, rect in
+            partial + rect.width
+        } + CGFloat(boxes.count - 1) * 72
+        let singleRowArea = singleRowWidth * (boxes.map(\.height).max() ?? 0)
+
+        #expect(layoutArea(outline) < singleRowArea)
     }
 
     // MARK: - D3: disjoint-group tightness
@@ -523,9 +610,10 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let aliceID = CompoundGraph.Card.ID(nodeID: Self.exampleOrgIRI("alice"))
         let aliceRect = try cardRect(of: aliceID, in: result)
         let ports = try sourcePorts(for: aliceID, in: aliceRect, result: result)
+        try #require(ports.count == 3)
         let portsBySide = Dictionary(grouping: ports, by: \.side)
         let sidePorts = try #require(portsBySide.values.max(by: { $0.count < $1.count }))
-        try #require(sidePorts.count >= 4)
+        try #require(sidePorts.count == ports.count)
         let side = try #require(sidePorts.first?.side)
         let coordinates = sidePorts.map { portAxisCoordinate($0.point, side: side) }.sorted()
         let expected = expectedCenteredPortCoordinates(rect: aliceRect, side: side, count: coordinates.count)
@@ -650,27 +738,38 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let incoming = result.compoundGraph.edges.filter { $0.target == carolID }
         try #require(incoming.count == 2)
 
-        let directEdge = try #require(incoming.first { edge in
-            guard let route = result.edgeRoutes[edge.id] else { return false }
+        var routedIncoming: [(
+            edge: CompoundGraph.CardEdge,
+            points: [CGPoint],
+            side: BoundarySide,
+            coordinate: CGFloat,
+            sourceCoordinate: CGFloat
+        )] = []
+        for edge in incoming {
+            let route = try #require(result.edgeRoutes[edge.id])
             let points = route.points.isEmpty ? [route.start, route.end] : route.points
-            return routeCornerCount(points) == 0
-        })
-        let jointedEdge = try #require(incoming.first { $0.id != directEdge.id })
-        let directRoute = try #require(result.edgeRoutes[directEdge.id])
-        let jointedRoute = try #require(result.edgeRoutes[jointedEdge.id])
-        let directSide = try #require(boundarySide(of: directRoute.end, in: carolRect))
-        let jointedSide = try #require(boundarySide(of: jointedRoute.end, in: carolRect))
-        try #require(directSide == jointedSide)
+            let side = try #require(boundarySide(of: route.end, in: carolRect))
+            let sourceRect = try cardRect(of: edge.source, in: result)
+            routedIncoming.append((
+                edge: edge,
+                points: points,
+                side: side,
+                coordinate: portAxisCoordinate(route.end, side: side),
+                sourceCoordinate: sideCenterCoordinate(of: sourceRect, side: side)
+            ))
+        }
+        let targetSide = try #require(routedIncoming.first?.side)
+        try #require(routedIncoming.allSatisfy { $0.side == targetSide })
 
-        let center = sideCenterCoordinate(of: carolRect, side: directSide)
-        let directCoordinate = portAxisCoordinate(directRoute.end, side: directSide)
-        let jointedCoordinate = portAxisCoordinate(jointedRoute.end, side: jointedSide)
-        let jointedSourceRect = try cardRect(of: jointedEdge.source, in: result)
-        let sourceCoordinate = sideCenterCoordinate(of: jointedSourceRect, side: directSide)
-        let incomingCoordinates = [directCoordinate, jointedCoordinate].sorted()
+        for route in routedIncoming {
+            #expect(routeSegmentsAreOrthogonal(route.points))
+        }
+
+        let center = sideCenterCoordinate(of: carolRect, side: targetSide)
+        let incomingCoordinates = routedIncoming.map(\.coordinate).sorted()
         let expected = expectedCenteredPortCoordinates(
             rect: carolRect,
-            side: directSide,
+            side: targetSide,
             count: incomingCoordinates.count
         )
 
@@ -678,11 +777,14 @@ struct KnowledgeGraphLayoutCalibrationTests {
             #expect(abs(actual - expectedValue) < 0.5)
         }
         #expect(abs((incomingCoordinates[0] + incomingCoordinates[1]) * 0.5 - center) < 0.5)
-        if sourceCoordinate > center {
-            #expect(jointedCoordinate > directCoordinate)
-        } else {
-            #expect(jointedCoordinate < directCoordinate)
+
+        let orderedBySource = routedIncoming.sorted { lhs, rhs in
+            lhs.sourceCoordinate < rhs.sourceCoordinate
         }
+        let orderedByTarget = routedIncoming.sorted { lhs, rhs in
+            lhs.coordinate < rhs.coordinate
+        }
+        #expect(orderedBySource.map { $0.edge.id } == orderedByTarget.map { $0.edge.id })
     }
 
     @Test
@@ -827,6 +929,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
                    {"@id": "http://example.org/alice",
                     "@type": ["http://xmlns.com/foaf/0.1/Person",
                               "http://example.org/Engineer"],
+                    "http://example.org/role": {"@id": "http://example.org/Engineer"},
                     "http://xmlns.com/foaf/0.1/knows": {"@id": "http://example.org/bob"}},
                    {"@id": "http://example.org/bob",
                     "@type": ["http://xmlns.com/foaf/0.1/Person",
@@ -981,6 +1084,101 @@ struct KnowledgeGraphLayoutCalibrationTests {
                 )
                 #expect(renderedRouteLength(route) <= shortestBoundaryLength + 1)
             }
+        }
+    }
+
+    @Test
+    func nestedFactorGraphGroupsPackAndRoutesStayOrthogonal() throws {
+        let market = Self.exampleOrgIRI("factor/ai-semiconductor-market-growth")
+        let forecast = Self.exampleOrgIRI("factor/market-size-forecast")
+        let demand = Self.exampleOrgIRI("factor/datacenter-compute-demand")
+        let workload = Self.exampleOrgIRI("factor/ai-workload-growth-evidence")
+        let bottleneck = Self.exampleOrgIRI("factor/hbm-supply-bottleneck")
+        let question = Self.exampleOrgIRI("factor/supply-constraint-resolution-question")
+        let export = Self.exampleOrgIRI("factor/export-control-risk")
+        let friction = Self.exampleOrgIRI("factor/regulatory-friction-insight")
+        let supports = "https://deep-analysis.dev/relation#supports"
+        let derivedFrom = "https://deep-analysis.dev/relation#derivedFrom"
+        let asksAbout = "https://deep-analysis.dev/relation#asksAbout"
+        let contextNodes = [market, forecast, demand, workload]
+        let issueNodes = [bottleneck, question, export, friction]
+        let allNodes = contextNodes + issueNodes
+        let graph = KnowledgeGraph(
+            nodes: allNodes.map { Node(id: $0) },
+            edges: [
+                Self.edge(from: forecast, to: market, predicate: supports),
+                Self.edge(from: workload, to: demand, predicate: supports),
+                Self.edge(from: bottleneck, to: forecast, predicate: derivedFrom),
+                Self.edge(from: bottleneck, to: market, predicate: derivedFrom),
+                Self.edge(from: bottleneck, to: demand, predicate: derivedFrom),
+                Self.edge(from: question, to: bottleneck, predicate: asksAbout),
+                Self.edge(from: friction, to: export, predicate: derivedFrom),
+                Self.edge(from: friction, to: bottleneck, predicate: derivedFrom)
+            ]
+        )
+        let initial: [NodeIdentifier: CGPoint] = [
+            bottleneck: CGPoint(x: 0, y: 300),
+            question: CGPoint(x: 0, y: 460),
+            export: CGPoint(x: 0, y: 620),
+            friction: CGPoint(x: 220, y: 620),
+            market: CGPoint(x: 620, y: 0),
+            forecast: CGPoint(x: 620, y: 150),
+            demand: CGPoint(x: 620, y: 330),
+            workload: CGPoint(x: 620, y: 480)
+        ]
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: initial,
+            groupingStrategy: .explicit(groups: [
+                .init(id: "layer/context", label: "Context", memberNodeIDs: contextNodes),
+                .init(id: "category/context/market", label: "AI semiconductor market", memberNodeIDs: [
+                    market,
+                    forecast
+                ]),
+                .init(id: "category/context/demand", label: "Compute demand", memberNodeIDs: [
+                    demand,
+                    workload
+                ]),
+                .init(id: "layer/issue", label: "Issue", memberNodeIDs: issueNodes),
+                .init(id: "category/issue/supply", label: "Supply constraint", memberNodeIDs: [
+                    bottleneck,
+                    question
+                ]),
+                .init(id: "category/issue/geopolitical", label: "Geopolitical risk", memberNodeIDs: [
+                    export,
+                    friction
+                ])
+            ])
+        )
+        let contextBox = try #require(
+            result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:layer/context")]
+        )
+        let marketBox = try #require(
+            result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:category/context/market")]
+        )
+        let demandBox = try #require(
+            result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:category/context/demand")]
+        )
+        let issueBox = try #require(
+            result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:layer/issue")]
+        )
+        let contextChildTop = contextBox.minY + CardSizing.headerHeight + 14
+        let outerGroupGap = rectDistance(contextBox, issueBox)
+        let requiredOuterGroupGap = CGFloat(72 + 3 * 14)
+        let outerGroupsShareRowOrColumn = abs(contextBox.midY - issueBox.midY) < 1.5
+            || abs(contextBox.midX - issueBox.midX) < 1.5
+
+        #expect(abs(marketBox.minY - contextChildTop) < 1.5)
+        #expect(abs(demandBox.minY - contextChildTop) < 1.5)
+        #expect(rectsAreSeparatedHorizontally(marketBox, demandBox, gap: 14))
+        #expect(outerGroupsShareRowOrColumn)
+        #expect(outerGroupGap >= requiredOuterGroupGap - 0.5)
+        #expect(outerGroupGap <= requiredOuterGroupGap + 1.5)
+
+        for edge in result.compoundGraph.edges {
+            let route = try #require(result.edgeRoutes[edge.id])
+            let routePoints = route.points.isEmpty ? [route.start, route.end] : route.points
+            #expect(routeSegmentsAreOrthogonal(routePoints))
         }
     }
 
@@ -2286,6 +2484,21 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let dx = max(max(lhs.minX - rhs.maxX, rhs.minX - lhs.maxX), 0)
         let dy = max(max(lhs.minY - rhs.maxY, rhs.minY - lhs.maxY), 0)
         return hypot(dx, dy)
+    }
+
+    private func unionRect(_ rects: [CGRect]) -> CGRect {
+        rects.reduce(CGRect.null) { partial, rect in
+            partial.isNull ? rect : partial.union(rect)
+        }
+    }
+
+    private func layoutArea(_ rect: CGRect) -> CGFloat {
+        guard !rect.isNull else { return 0 }
+        return max(rect.width, 0) * max(rect.height, 0)
+    }
+
+    private func rectsAreSeparatedHorizontally(_ lhs: CGRect, _ rhs: CGRect, gap: CGFloat) -> Bool {
+        lhs.maxX + gap <= rhs.minX + 0.5 || rhs.maxX + gap <= lhs.minX + 0.5
     }
 
     private func pointRectDistance(_ point: CGPoint, _ rect: CGRect) -> CGFloat {

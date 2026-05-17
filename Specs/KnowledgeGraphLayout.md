@@ -404,15 +404,28 @@ Group と Edge は干渉しないため、Edge は Group outline を横切って
 
 ### 4.3 全体 outline 最小化
 
-Edge / Node / Group の最小距離を満たした後、すべての Node と Group を囲む
+Edge / Node / Group の最小距離と Edge の最短性を満たした後、global layout elements を囲む
 outline 面積を最小化する。
+
+global layout elements は次だけである。
+
+| 要素 | global outline 対象 |
+|---|---|
+| Outermost Group | 対象。ほかの Group の strict subset ではない Group |
+| Nested Group | 対象外。外側の Outermost Group の内側要素として扱う |
+| Ungrouped Node | 対象。どの Group にも所属しない Node |
+| Group member Node | 対象外。所属する Outermost Group の outline に含める |
+
+Nested Group 同士の距離は親 Group 内の内部制約として扱い、外側の Group-Group 距離計算には使わない。
+直下の Nested Group sibling は親 Group header 下端から `14 pt` の位置へ top alignment し、
+sibling 間も `14 pt` 以上離す。
 
 ```text
 優先順位
 
 1. 干渉しない
 2. 必要な最小距離を満たす
-3. Group / Node 全体の外接面積を小さくする
+3. global layout elements 全体の外接面積を小さくする
 4. Edge を短くする
 5. Edge 長が同程度なら角数を少なくする
 ```
@@ -422,17 +435,21 @@ outline 面積を最小化する。
 ```text
 距離制約投影
   ↓
-Group overlap component を compaction unit に変換
+Outermost Group / Ungrouped Node を compaction unit に変換
   ↓
-現在の分離軸（X/Y）を固定
+現在の分離軸（X/Y）による longest-path compaction 候補を作る
   ↓
-X / Y それぞれを longest-path compaction で最小化
+ネストした outermost Group layout では MaxRects + 候補幅探索で packing 候補を列挙する
+  ↓
+outline 面積が最小の候補を採用する
   ↓
 距離制約を再投影
 ```
 
-このため、crossing reduction で決まった相対順序と、現在の X/Y 分離軸を固定した範囲では、
-全体 outline の幅と高さはそれ以上縮められない状態になる。
+MaxRects packing では全 pair の最小距離要求の最大値を item gap として使う。
+候補幅は `max item width`、`sqrt(total area)` 近傍、各 order の累積幅、`sum item width` から列挙する。
+これにより、2 つの outermost Group は横並びまたは縦並びのどちらか小さい方になり、
+3 つ以上では固定幅ごとの 2D rectangle packing 候補から global outline 面積が最小のものを選ぶ。
 
 Group が member Node を共有する場合は、別々の compaction unit に分けない。
 共有 member を持つ Group 群は 1 つの overlap component として扱い、bridge group の endpoint を

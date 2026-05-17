@@ -1822,6 +1822,24 @@ struct KnowledgeGraphLayout: Sendable {
             indexByID: indexByID,
             iterations: 3
         )
+        let packed = packAxisAlignedGlobalOutline(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID
+        )
+        if !packed && hasNestedGroupStructure(groups: groups, indexByID: indexByID) {
+            let finalGroupEdgeCounts = disjointGroupEdgeCounts(edges: edges, groups: groups, indexByID: indexByID)
+            _ = resolveGroupDistances(
+                positions: &positions,
+                sizes: sizes,
+                groups: groups,
+                indexByID: indexByID,
+                groupEdgeCounts: finalGroupEdgeCounts,
+                iterations: 12
+            )
+        }
     }
 
     private struct LayeredGroupBox {
@@ -1909,13 +1927,14 @@ struct KnowledgeGraphLayout: Sendable {
         groups: [CompoundGraph.Group],
         indexByID: [CompoundGraph.Card.ID: Int]
     ) -> [LayeredGroupBox] {
-        expandedGroupBoxes(
+        let distanceGroups = distanceGroupIndexSet(groups: groups, indexByID: indexByID)
+        return expandedGroupBoxes(
             positions: positions,
             sizes: sizes,
             groups: groups,
             indexByID: indexByID,
             includeInactive: false
-        )
+        ).filter { distanceGroups.contains($0.groupIndex) }
     }
 
     private static func expandedGroupBoxes(
@@ -2041,13 +2060,32 @@ struct KnowledgeGraphLayout: Sendable {
                 let targetTop = parentBox.rect.minY
                     + LayoutSpacing.groupHeaderHeight
                     + LayoutSpacing.nestedGroupGroupPadding
-                for childBox in childBoxes {
-                    let deltaY = targetTop - childBox.rect.minY
-                    guard abs(deltaY) > 0.5 else { continue }
-                    for memberIndex in childBox.memberSet {
-                        positions[memberIndex].y += deltaY
+                let sortedChildren = childBoxes.sorted { lhs, rhs in
+                    if abs(lhs.rect.minX - rhs.rect.minX) > 0.001 {
+                        return lhs.rect.minX < rhs.rect.minX
                     }
-                    moved = true
+                    return lhs.groupIndex < rhs.groupIndex
+                }
+                let currentBounds = sortedChildren.reduce(CGRect.null) { partial, child in
+                    partial.isNull ? child.rect : partial.union(child.rect)
+                }
+                let siblingGap = LayoutSpacing.nestedGroupGroupPadding
+                let packedWidth = sortedChildren.reduce(CGFloat(0)) { partial, child in
+                    partial + child.rect.width
+                } + siblingGap * CGFloat(max(sortedChildren.count - 1, 0))
+                var cursorX = currentBounds.midX - packedWidth / 2
+
+                for childBox in sortedChildren {
+                    let deltaX = cursorX - childBox.rect.minX
+                    let deltaY = targetTop - childBox.rect.minY
+                    if abs(deltaX) > 0.5 || abs(deltaY) > 0.5 {
+                        for memberIndex in childBox.memberSet {
+                            positions[memberIndex].x += deltaX
+                            positions[memberIndex].y += deltaY
+                        }
+                        moved = true
+                    }
+                    cursorX += childBox.rect.width + siblingGap
                 }
             }
             if !moved { break }
@@ -2092,6 +2130,34 @@ struct KnowledgeGraphLayout: Sendable {
             }
         }
         return true
+    }
+
+    private static func distanceGroupIndexSet(
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Set<Int> {
+        let memberSets = groups.map { group in
+            Set(group.members.compactMap { indexByID[$0] })
+        }
+        return Set(memberSets.indices.filter { groupIndex in
+            !memberSets.indices.contains { otherIndex in
+                otherIndex != groupIndex
+                    && memberSets[otherIndex].isStrictSuperset(of: memberSets[groupIndex])
+            }
+        })
+    }
+
+    private static func outermostGroupIndices(
+        in groupIndices: Set<Int>,
+        memberSets: [Set<Int>]
+    ) -> Set<Int> {
+        Set(groupIndices.filter { groupIndex in
+            !groupIndices.contains { otherIndex in
+                otherIndex != groupIndex
+                    && memberSets.indices.contains(otherIndex)
+                    && memberSets[otherIndex].isStrictSuperset(of: memberSets[groupIndex])
+            }
+        })
     }
 
     private static func linkedDisjointGroupPairs(
@@ -4860,11 +4926,13 @@ struct KnowledgeGraphLayout: Sendable {
         }
 
         guard groups.count > 1, iterations > 0 else { return }
+        let distanceGroups = distanceGroupIndexSet(groups: groups, indexByID: indexByID)
 
         func makeBoxes() -> [GroupBox] {
             var boxes: [GroupBox] = []
             boxes.reserveCapacity(groups.count)
-            for group in groups where group.cohesionStrength > 0 {
+            for (groupIndex, group) in groups.enumerated()
+                where group.cohesionStrength > 0 && distanceGroups.contains(groupIndex) {
                 var indices: [Int] = []
                 indices.reserveCapacity(group.members.count)
                 for member in group.members {
@@ -5078,6 +5146,11 @@ struct KnowledgeGraphLayout: Sendable {
         let vertical: CGFloat
     }
 
+    private struct MaxRectsPacking {
+        let positions: [CGPoint]
+        let area: CGFloat
+    }
+
     private static func enforceLayoutDistanceConstraints(
         positions: inout [CGPoint],
         sizes: [CGSize],
@@ -5130,40 +5203,201 @@ struct KnowledgeGraphLayout: Sendable {
         let groupEdgeCounts = disjointGroupEdgeCounts(edges: edges, groups: groups, indexByID: indexByID)
 
         for _ in 0..<4 {
-            let units = layoutCompactionUnits(
+            let globalUnits = layoutCompactionUnits(
                 positions: positions,
                 sizes: sizes,
                 groups: groups,
                 indexByID: indexByID
             )
-            guard units.count > 1 else { return }
-            let oldArea = layoutArea(
-                layoutOutlineRect(positions: positions, sizes: sizes, groups: groups, indexByID: indexByID)
+            let useAxisAlignedGroupPacking = shouldUseAxisAlignedGroupPacking(
+                units: globalUnits,
+                groups: groups,
+                indexByID: indexByID
             )
+            let units = useAxisAlignedGroupPacking
+                ? globalUnits
+                : legacyLayoutCompactionUnits(
+                    positions: positions,
+                    sizes: sizes,
+                    groups: groups,
+                    indexByID: indexByID
+                )
+            guard units.count > 1 else { return }
+            let oldOutline = useAxisAlignedGroupPacking
+                ? layoutOutlineRect(positions: positions, sizes: sizes, groups: groups, indexByID: indexByID)
+                : legacyLayoutOutlineRect(positions: positions, sizes: sizes, groups: groups, indexByID: indexByID)
+            let oldArea = layoutArea(oldOutline)
             let constraints = unitSeparationConstraints(
                 units: units,
                 edgeMultiplicity: edgeMultiplicity,
                 groupEdgeCounts: groupEdgeCounts
             )
-            let compacted = compactedPositions(
-                positions: positions,
-                units: units,
-                constraints: constraints
-            )
-            var candidate = compacted
-            enforceLayoutDistanceConstraints(
-                positions: &candidate,
-                sizes: sizes,
-                edges: edges,
-                groups: groups,
-                indexByID: indexByID,
-                iterations: 6
-            )
-            let newArea = layoutArea(
+            let compactionCandidates: [[CGPoint]]
+            if useAxisAlignedGroupPacking {
+                compactionCandidates = outlineCompactionCandidates(
+                    positions: positions,
+                    units: units,
+                    edgeMultiplicity: edgeMultiplicity,
+                    groupEdgeCounts: groupEdgeCounts,
+                    constraints: constraints
+                )
+            } else {
+                compactionCandidates = [
+                    compactedPositions(
+                        positions: positions,
+                        units: units,
+                        constraints: constraints
+                    )
+                ]
+            }
+            var bestCandidate = positions
+            var bestArea = oldArea
+            for proposed in compactionCandidates {
+                var candidate = proposed
+                enforceLayoutDistanceConstraints(
+                    positions: &candidate,
+                    sizes: sizes,
+                    edges: edges,
+                    groups: groups,
+                    indexByID: indexByID,
+                    iterations: 6
+                )
+                let newOutline = useAxisAlignedGroupPacking
+                    ? layoutOutlineRect(positions: candidate, sizes: sizes, groups: groups, indexByID: indexByID)
+                    : legacyLayoutOutlineRect(positions: candidate, sizes: sizes, groups: groups, indexByID: indexByID)
+                let newArea = layoutArea(newOutline)
+                if newArea < bestArea - 0.5 {
+                    bestArea = newArea
+                    bestCandidate = candidate
+                }
+            }
+            guard bestArea < oldArea - 0.5 else { break }
+            positions = bestCandidate
+        }
+    }
+
+    private static func packAxisAlignedGlobalOutline(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Bool {
+        let edgeMultiplicity = edgeMultiplicityByCardPair(edges: edges, indexByID: indexByID)
+        let groupEdgeCounts = disjointGroupEdgeCounts(edges: edges, groups: groups, indexByID: indexByID)
+        let units = layoutCompactionUnits(
+            positions: positions,
+            sizes: sizes,
+            groups: groups,
+            indexByID: indexByID
+        )
+        guard shouldUseAxisAlignedGroupPacking(units: units, groups: groups, indexByID: indexByID) else {
+            return false
+        }
+        let oldArea = layoutArea(
+            layoutOutlineRect(positions: positions, sizes: sizes, groups: groups, indexByID: indexByID)
+        )
+        let candidates = maxRectsPackedPositionCandidates(
+            positions: positions,
+            units: units,
+            edgeMultiplicity: edgeMultiplicity,
+            groupEdgeCounts: groupEdgeCounts
+        )
+        var bestPositions = positions
+        var bestArea = oldArea
+        for candidate in candidates {
+            let area = layoutArea(
                 layoutOutlineRect(positions: candidate, sizes: sizes, groups: groups, indexByID: indexByID)
             )
-            guard newArea <= oldArea + 0.5 else { break }
-            positions = candidate
+            if area < bestArea - 0.5 {
+                bestArea = area
+                bestPositions = candidate
+            }
+        }
+        guard bestArea < oldArea - 0.5 else { return false }
+        positions = bestPositions
+        return true
+    }
+
+    private static func legacyLayoutCompactionUnits(
+        positions: [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [LayoutCompactionUnit] {
+        var units: [LayoutCompactionUnit] = []
+        units.reserveCapacity(groups.count + positions.count)
+        var assigned: Set<Int> = []
+        let membership = groupMembershipIndex(groups: groups, indexByID: indexByID)
+        for component in overlappingGroupComponents(
+            membership: membership,
+            groupIndices: Array(groups.indices)
+        ) {
+            let indices = component
+                .flatMap { membership.groupMembers[$0] }
+                .reduce(into: Set<Int>()) { result, index in
+                    result.insert(index)
+                }
+                .sorted()
+            guard !indices.isEmpty else { continue }
+            var rect = CGRect.null
+            for groupIndex in component {
+                let groupMembers = membership.groupMembers[groupIndex]
+                guard !groupMembers.isEmpty else { continue }
+                let groupRect = rectForIndices(groupMembers, positions: positions, sizes: sizes)
+                    .insetBy(
+                        dx: -groups[groupIndex].style.padding,
+                        dy: -groups[groupIndex].style.padding
+                    )
+                rect = rect.isNull ? groupRect : rect.union(groupRect)
+            }
+            units.append(LayoutCompactionUnit(
+                groupIndices: Set(component),
+                indices: indices,
+                memberSet: Set(indices),
+                rect: rect
+            ))
+            assigned.formUnion(indices)
+        }
+
+        for index in positions.indices where !assigned.contains(index) {
+            let rect = CGRect(
+                x: positions[index].x - sizes[index].width / 2,
+                y: positions[index].y - sizes[index].height / 2,
+                width: sizes[index].width,
+                height: sizes[index].height
+            )
+            units.append(LayoutCompactionUnit(
+                groupIndices: [],
+                indices: [index],
+                memberSet: [index],
+                rect: rect
+            ))
+        }
+        return units
+    }
+
+    private static func shouldUseAxisAlignedGroupPacking(
+        units: [LayoutCompactionUnit],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Bool {
+        guard units.count > 1 else { return false }
+        return hasNestedGroupStructure(groups: groups, indexByID: indexByID)
+    }
+
+    private static func hasNestedGroupStructure(
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Bool {
+        let memberSets = groups.map { group in
+            Set(group.members.compactMap { indexByID[$0] })
+        }
+        return memberSets.indices.contains { groupIndex in
+            memberSets.indices.contains { nestedIndex in
+                nestedIndex != groupIndex
+                    && memberSets[groupIndex].isStrictSuperset(of: memberSets[nestedIndex])
+            }
         }
     }
 
@@ -5371,8 +5605,19 @@ struct KnowledgeGraphLayout: Sendable {
         units.reserveCapacity(groups.count + positions.count)
         var assigned: Set<Int> = []
         let membership = groupMembershipIndex(groups: groups, indexByID: indexByID)
-        let groupComponents = overlappingGroupComponents(membership: membership, groupCount: groups.count)
-        for component in groupComponents {
+        let distanceGroups = distanceGroupIndexSet(groups: groups, indexByID: indexByID)
+        let boxesByGroupIndex = Dictionary(uniqueKeysWithValues: expandedGroupBoxes(
+            positions: positions,
+            sizes: sizes,
+            groups: groups,
+            indexByID: indexByID,
+            includeInactive: true
+        ).map { ($0.groupIndex, $0) })
+
+        for component in overlappingGroupComponents(
+            membership: membership,
+            groupIndices: distanceGroups.sorted()
+        ) {
             let indices = component
                 .flatMap { membership.groupMembers[$0] }
                 .reduce(into: Set<Int>()) { result, index in
@@ -5380,16 +5625,10 @@ struct KnowledgeGraphLayout: Sendable {
                 }
                 .sorted()
             guard !indices.isEmpty else { continue }
-            var rect = CGRect.null
-            for groupIndex in component {
-                let groupMembers = membership.groupMembers[groupIndex]
-                guard !groupMembers.isEmpty else { continue }
-                let groupRect = rectForIndices(groupMembers, positions: positions, sizes: sizes)
-                    .insetBy(
-                        dx: -groups[groupIndex].style.padding,
-                        dy: -groups[groupIndex].style.padding
-                    )
-                rect = rect.isNull ? groupRect : rect.union(groupRect)
+            let rect = component.reduce(CGRect.null) { partial, groupIndex in
+                let boxRect = boxesByGroupIndex[groupIndex]?.rect
+                    ?? rectForIndices(membership.groupMembers[groupIndex], positions: positions, sizes: sizes)
+                return partial.isNull ? boxRect : partial.union(boxRect)
             }
             units.append(LayoutCompactionUnit(
                 groupIndices: Set(component),
@@ -5419,24 +5658,30 @@ struct KnowledgeGraphLayout: Sendable {
 
     private static func overlappingGroupComponents(
         membership: GroupMembershipIndex,
-        groupCount: Int
+        groupIndices: [Int]
     ) -> [[Int]] {
-        guard groupCount > 0 else { return [] }
-        var disjointSet = DisjointSet(count: groupCount)
+        guard !groupIndices.isEmpty else { return [] }
+        var localIndexByGroup: [Int: Int] = [:]
+        localIndexByGroup.reserveCapacity(groupIndices.count)
+        for (localIndex, groupIndex) in groupIndices.enumerated() {
+            localIndexByGroup[groupIndex] = localIndex
+        }
+        var disjointSet = DisjointSet(count: groupIndices.count)
         var ownerByMember: [Int: Int] = [:]
-        for groupIndex in 0..<groupCount {
+        for groupIndex in groupIndices {
+            guard let localIndex = localIndexByGroup[groupIndex] else { continue }
             for member in membership.groupMembers[groupIndex] {
                 if let owner = ownerByMember[member] {
-                    disjointSet.union(owner, groupIndex)
+                    disjointSet.union(owner, localIndex)
                 } else {
-                    ownerByMember[member] = groupIndex
+                    ownerByMember[member] = localIndex
                 }
             }
         }
 
         var components: [Int: [Int]] = [:]
-        for groupIndex in 0..<groupCount {
-            components[disjointSet.find(groupIndex), default: []].append(groupIndex)
+        for (localIndex, groupIndex) in groupIndices.enumerated() {
+            components[disjointSet.find(localIndex), default: []].append(groupIndex)
         }
         return components.values
             .map { $0.sorted() }
@@ -5522,6 +5767,308 @@ struct KnowledgeGraphLayout: Sendable {
                 result[index].x += dx
                 result[index].y += dy
             }
+        }
+        return result
+    }
+
+    private static func outlineCompactionCandidates(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        edgeMultiplicity: [UInt64: Int],
+        groupEdgeCounts: [UInt64: Int],
+        constraints: [LayoutCompactionAxis: [UnitSeparationConstraint]]
+    ) -> [[CGPoint]] {
+        guard units.count > 1 else { return [positions] }
+        var candidates: [[CGPoint]] = [
+            compactedPositions(
+                positions: positions,
+                units: units,
+                constraints: constraints
+            )
+        ]
+        candidates.append(contentsOf: maxRectsPackedPositionCandidates(
+            positions: positions,
+            units: units,
+            edgeMultiplicity: edgeMultiplicity,
+            groupEdgeCounts: groupEdgeCounts
+        ))
+        return deduplicatedPositionCandidates(candidates)
+    }
+
+    private static func outlinePackingOrders(_ units: [LayoutCompactionUnit]) -> [[Int]] {
+        let indices = Array(units.indices)
+        let orders = [
+            indices.sorted { lhs, rhs in
+                if abs(units[lhs].rect.minX - units[rhs].rect.minX) > 0.001 {
+                    return units[lhs].rect.minX < units[rhs].rect.minX
+                }
+                if abs(units[lhs].rect.minY - units[rhs].rect.minY) > 0.001 {
+                    return units[lhs].rect.minY < units[rhs].rect.minY
+                }
+                return lhs < rhs
+            },
+            indices.sorted { lhs, rhs in
+                if abs(units[lhs].rect.minY - units[rhs].rect.minY) > 0.001 {
+                    return units[lhs].rect.minY < units[rhs].rect.minY
+                }
+                if abs(units[lhs].rect.minX - units[rhs].rect.minX) > 0.001 {
+                    return units[lhs].rect.minX < units[rhs].rect.minX
+                }
+                return lhs < rhs
+            },
+            indices.sorted { lhs, rhs in
+                let leftArea = layoutArea(units[lhs].rect)
+                let rightArea = layoutArea(units[rhs].rect)
+                if abs(leftArea - rightArea) > 0.001 {
+                    return leftArea > rightArea
+                }
+                return lhs < rhs
+            },
+            indices.sorted { lhs, rhs in
+                if abs(units[lhs].rect.width - units[rhs].rect.width) > 0.001 {
+                    return units[lhs].rect.width > units[rhs].rect.width
+                }
+                return lhs < rhs
+            },
+            indices.sorted { lhs, rhs in
+                if abs(units[lhs].rect.height - units[rhs].rect.height) > 0.001 {
+                    return units[lhs].rect.height > units[rhs].rect.height
+                }
+                return lhs < rhs
+            }
+        ]
+        return deduplicatedOrders(orders + orders.map { Array($0.reversed()) })
+    }
+
+    private static func maxRectsPackedPositionCandidates(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        edgeMultiplicity: [UInt64: Int],
+        groupEdgeCounts: [UInt64: Int]
+    ) -> [[CGPoint]] {
+        guard units.count > 1 else { return [] }
+        let gap = maxRectsPackingGap(
+            units: units,
+            edgeMultiplicity: edgeMultiplicity,
+            groupEdgeCounts: groupEdgeCounts
+        )
+        let itemSizes = units.map { unit in
+            CGSize(width: unit.rect.width + gap, height: unit.rect.height + gap)
+        }
+        let orders = outlinePackingOrders(units)
+        let widths = maxRectsCandidateWidths(itemSizes: itemSizes, orders: orders)
+        var candidates: [MaxRectsPacking] = []
+        for order in orders {
+            for width in widths {
+                if let packing = maxRectsPack(
+                    positions: positions,
+                    units: units,
+                    itemSizes: itemSizes,
+                    order: order,
+                    width: width,
+                    gap: gap
+                ) {
+                    candidates.append(packing)
+                }
+            }
+        }
+        return candidates
+            .sorted { lhs, rhs in
+                lhs.area < rhs.area
+            }
+            .prefix(24)
+            .map(\.positions)
+    }
+
+    private static func maxRectsPackingGap(
+        units: [LayoutCompactionUnit],
+        edgeMultiplicity: [UInt64: Int],
+        groupEdgeCounts: [UInt64: Int]
+    ) -> CGFloat {
+        var gap: CGFloat = 0
+        guard units.count > 1 else { return gap }
+        for lhs in 0..<(units.count - 1) {
+            for rhs in (lhs + 1)..<units.count where units[lhs].memberSet.isDisjoint(with: units[rhs].memberSet) {
+                let pairGap = minimumUnitGap(
+                    lhs: units[lhs],
+                    rhs: units[rhs],
+                    edgeMultiplicity: edgeMultiplicity,
+                    groupEdgeCounts: groupEdgeCounts
+                )
+                gap = max(gap, pairGap.horizontal, pairGap.vertical)
+            }
+        }
+        return gap
+    }
+
+    private static func maxRectsCandidateWidths(itemSizes: [CGSize], orders: [[Int]]) -> [CGFloat] {
+        guard !itemSizes.isEmpty else { return [] }
+        let minWidth = itemSizes.map(\.width).max() ?? 0
+        let maxWidth = itemSizes.reduce(CGFloat(0)) { $0 + $1.width }
+        let totalArea = itemSizes.reduce(CGFloat(0)) { $0 + $1.width * $1.height }
+        var keys: Set<Int> = []
+
+        func insert(_ value: CGFloat) {
+            let clamped = min(max(ceil(value), ceil(minWidth)), ceil(maxWidth))
+            keys.insert(Int(clamped))
+        }
+
+        insert(minWidth)
+        insert(maxWidth)
+        let root = sqrt(totalArea)
+        for ratio in stride(from: CGFloat(0.75), through: CGFloat(2.25), by: CGFloat(0.15)) {
+            insert(root * ratio)
+        }
+        for order in orders {
+            var cumulative: CGFloat = 0
+            for index in order {
+                cumulative += itemSizes[index].width
+                insert(cumulative)
+            }
+        }
+        return keys.sorted().map(CGFloat.init)
+    }
+
+    private static func maxRectsPack(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        itemSizes: [CGSize],
+        order: [Int],
+        width: CGFloat,
+        gap: CGFloat
+    ) -> MaxRectsPacking? {
+        let heightLimit = itemSizes.reduce(CGFloat(0)) { $0 + $1.height }
+        var freeRects = [CGRect(x: 0, y: 0, width: width, height: heightLimit)]
+        var placedInflated = Array(repeating: CGRect.null, count: units.count)
+
+        for unitIndex in order {
+            let size = itemSizes[unitIndex]
+            guard let placement = bestMaxRectsPlacement(size: size, freeRects: freeRects) else {
+                return nil
+            }
+            placedInflated[unitIndex] = placement
+            freeRects = splitMaxRectsFreeSpace(freeRects: freeRects, placed: placement)
+        }
+
+        let origins = placedInflated.enumerated().map { unitIndex, rect in
+            CGPoint(
+                x: rect.minX + gap / 2 - units[unitIndex].rect.minX,
+                y: rect.minY + gap / 2 - units[unitIndex].rect.minY
+            )
+        }
+        var result = positions
+        for (unitIndex, unit) in units.enumerated() {
+            let delta = origins[unitIndex]
+            for index in unit.indices {
+                result[index].x += delta.x
+                result[index].y += delta.y
+            }
+        }
+        let outline = units.indices.reduce(CGRect.null) { partial, unitIndex in
+            let inflated = placedInflated[unitIndex]
+            let rect = CGRect(
+                x: inflated.minX + gap / 2,
+                y: inflated.minY + gap / 2,
+                width: units[unitIndex].rect.width,
+                height: units[unitIndex].rect.height
+            )
+            return partial.isNull ? rect : partial.union(rect)
+        }
+        return MaxRectsPacking(positions: result, area: layoutArea(outline))
+    }
+
+    private static func bestMaxRectsPlacement(size: CGSize, freeRects: [CGRect]) -> CGRect? {
+        var best: CGRect?
+        var bestShortSide = CGFloat.infinity
+        var bestAreaWaste = CGFloat.infinity
+        for freeRect in freeRects where size.width <= freeRect.width + 0.001 && size.height <= freeRect.height + 0.001 {
+            let leftoverWidth = freeRect.width - size.width
+            let leftoverHeight = freeRect.height - size.height
+            let shortSide = min(leftoverWidth, leftoverHeight)
+            let areaWaste = freeRect.width * freeRect.height - size.width * size.height
+            if shortSide < bestShortSide - 0.001
+                || (abs(shortSide - bestShortSide) <= 0.001 && areaWaste < bestAreaWaste) {
+                bestShortSide = shortSide
+                bestAreaWaste = areaWaste
+                best = CGRect(origin: freeRect.origin, size: size)
+            }
+        }
+        return best
+    }
+
+    private static func splitMaxRectsFreeSpace(freeRects: [CGRect], placed: CGRect) -> [CGRect] {
+        var result: [CGRect] = []
+        result.reserveCapacity(freeRects.count * 2)
+        for freeRect in freeRects {
+            guard freeRect.intersects(placed) else {
+                result.append(freeRect)
+                continue
+            }
+            if placed.minX > freeRect.minX {
+                result.append(CGRect(
+                    x: freeRect.minX,
+                    y: freeRect.minY,
+                    width: placed.minX - freeRect.minX,
+                    height: freeRect.height
+                ))
+            }
+            if placed.maxX < freeRect.maxX {
+                result.append(CGRect(
+                    x: placed.maxX,
+                    y: freeRect.minY,
+                    width: freeRect.maxX - placed.maxX,
+                    height: freeRect.height
+                ))
+            }
+            if placed.minY > freeRect.minY {
+                result.append(CGRect(
+                    x: freeRect.minX,
+                    y: freeRect.minY,
+                    width: freeRect.width,
+                    height: placed.minY - freeRect.minY
+                ))
+            }
+            if placed.maxY < freeRect.maxY {
+                result.append(CGRect(
+                    x: freeRect.minX,
+                    y: placed.maxY,
+                    width: freeRect.width,
+                    height: freeRect.maxY - placed.maxY
+                ))
+            }
+        }
+        return pruneContainedMaxRects(result)
+    }
+
+    private static func pruneContainedMaxRects(_ rects: [CGRect]) -> [CGRect] {
+        var result: [CGRect] = []
+        for (index, rect) in rects.enumerated() where rect.width > 0.5 && rect.height > 0.5 {
+            let contained = rects.indices.contains { otherIndex in
+                otherIndex != index && rects[otherIndex].contains(rect)
+            }
+            if !contained {
+                result.append(rect)
+            }
+        }
+        return result
+    }
+
+    private static func deduplicatedOrders(_ orders: [[Int]]) -> [[Int]] {
+        var result: [[Int]] = []
+        var seen: Set<[Int]> = []
+        for order in orders where seen.insert(order).inserted {
+            result.append(order)
+        }
+        return result
+    }
+
+    private static func deduplicatedPositionCandidates(_ candidates: [[CGPoint]]) -> [[CGPoint]] {
+        var result: [[CGPoint]] = []
+        var seen: Set<[QuantizedRoutePoint]> = []
+        for candidate in candidates {
+            let key = candidate.map(QuantizedRoutePoint.init)
+            guard seen.insert(key).inserted else { continue }
+            result.append(candidate)
         }
         return result
     }
@@ -5670,8 +6217,10 @@ struct KnowledgeGraphLayout: Sendable {
                 let sourceGroups = membership.memberToGroups[source],
                 let targetGroups = membership.memberToGroups[target]
             else { continue }
-            for sourceGroup in sourceGroups {
-                for targetGroup in targetGroups where sourceGroup != targetGroup {
+            let sourceRepresentatives = outermostGroupIndices(in: sourceGroups, memberSets: groupMemberSets)
+            let targetRepresentatives = outermostGroupIndices(in: targetGroups, memberSets: groupMemberSets)
+            for sourceGroup in sourceRepresentatives {
+                for targetGroup in targetRepresentatives where sourceGroup != targetGroup {
                     guard
                         groups.indices.contains(sourceGroup),
                         groups.indices.contains(targetGroup)
@@ -5718,6 +6267,32 @@ struct KnowledgeGraphLayout: Sendable {
     }
 
     private static func layoutOutlineRect(
+        positions: [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> CGRect {
+        let membership = groupMembershipIndex(groups: groups, indexByID: indexByID)
+        let groupedIndices = Set(membership.groupMembers.flatMap { $0 })
+        let distanceGroups = distanceGroupIndexSet(groups: groups, indexByID: indexByID)
+        var rect = CGRect.null
+        for box in expandedGroupBoxes(
+            positions: positions,
+            sizes: sizes,
+            groups: groups,
+            indexByID: indexByID,
+            includeInactive: true
+        ) where distanceGroups.contains(box.groupIndex) {
+            rect = rect.isNull ? box.rect : rect.union(box.rect)
+        }
+        for (index, cardRect) in cardRects(positions: positions, sizes: sizes).enumerated()
+            where !groupedIndices.contains(index) {
+            rect = rect.isNull ? cardRect : rect.union(cardRect)
+        }
+        return rect
+    }
+
+    private static func legacyLayoutOutlineRect(
         positions: [CGPoint],
         sizes: [CGSize],
         groups: [CompoundGraph.Group],
@@ -8744,10 +9319,13 @@ struct KnowledgeGraphLayout: Sendable {
                 }
             }
         }
-        return best ?? [
-            preferredSourcePort.point,
-            preferredTargetPort.point
-        ]
+        return best ?? fallbackOrthogonalRoute(
+            sourcePort: preferredSourcePort,
+            targetPort: preferredTargetPort,
+            laneOffset: laneOffset,
+            nodeIndex: nodeIndex,
+            excludedIndices: excluded
+        )
     }
 
     private static func shortestFixedEndpointRoute(
@@ -8809,6 +9387,61 @@ struct KnowledgeGraphLayout: Sendable {
         return best
     }
 
+    private static func fallbackOrthogonalRoute(
+        sourcePort: EdgePort,
+        targetPort: EdgePort,
+        laneOffset: CGFloat,
+        nodeIndex: RouteNodeIndex,
+        excludedIndices: Set<Int>
+    ) -> [CGPoint] {
+        let candidates = orthogonalRouteCandidates(
+            sourcePort: sourcePort,
+            targetPort: targetPort,
+            laneOffset: laneOffset,
+            nodeIndex: nodeIndex,
+            excludedIndices: excludedIndices
+        )
+        var best: [CGPoint]?
+        var bestMetrics: RouteMetrics?
+        for candidate in candidates {
+            let points = simplifyRoutePoints(candidate)
+            guard points.count > 1 else { continue }
+            guard simplifiedRouteIsOrthogonal(points) else { continue }
+            guard routeUsesPerpendicularPorts(points, sourcePort: sourcePort, targetPort: targetPort) else {
+                continue
+            }
+            let metrics = simplifiedRouteMetrics(points)
+            if let currentBest = bestMetrics {
+                if metrics.length < currentBest.length - 0.001 ||
+                    (abs(metrics.length - currentBest.length) <= 0.001 && metrics.corners < currentBest.corners) {
+                    bestMetrics = metrics
+                    best = points
+                }
+            } else {
+                bestMetrics = metrics
+                best = points
+            }
+        }
+        if let best {
+            return best
+        }
+
+        let sourceOut = offsetPoint(sourcePort.point, side: sourcePort.side, distance: LayoutSpacing.jointNode)
+        let targetOut = offsetPoint(targetPort.point, side: targetPort.side, distance: LayoutSpacing.jointNode)
+        return routeWithEndpointStubs(
+            sourcePoint: sourcePort.point,
+            sourceOut: sourceOut,
+            core: orthogonalCandidate(
+                start: sourceOut,
+                end: targetOut,
+                horizontalFirst: abs(targetOut.x - sourceOut.x) >= abs(targetOut.y - sourceOut.y),
+                laneOffset: laneOffset
+            ),
+            targetOut: targetOut,
+            targetPoint: targetPort.point
+        )
+    }
+
     private static func directFixedEndpointRoute(
         sourcePort: EdgePort,
         targetPort: EdgePort,
@@ -8816,6 +9449,9 @@ struct KnowledgeGraphLayout: Sendable {
         excludedIndices: Set<Int>
     ) -> [CGPoint]? {
         let points = [sourcePort.point, targetPort.point]
+        guard simplifiedRouteIsOrthogonal(points) else {
+            return nil
+        }
         guard routeUsesPerpendicularPorts(points, sourcePort: sourcePort, targetPort: targetPort) else {
             return nil
         }
