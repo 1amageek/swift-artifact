@@ -1822,6 +1822,29 @@ struct KnowledgeGraphLayout: Sendable {
             indexByID: indexByID,
             iterations: 3
         )
+        packGroupContents(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            iterations: 3
+        )
+        enforceLayoutDistanceConstraints(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID,
+            iterations: 8
+        )
+        alignNestedGroupTops(
+            positions: &positions,
+            sizes: sizes,
+            groups: groups,
+            indexByID: indexByID,
+            iterations: 2
+        )
         let packed = packAxisAlignedGlobalOutline(
             positions: &positions,
             sizes: sizes,
@@ -2090,6 +2113,367 @@ struct KnowledgeGraphLayout: Sendable {
             }
             if !moved { break }
         }
+    }
+
+    private static func packGroupContents(
+        positions: inout [CGPoint],
+        sizes: [CGSize],
+        edges: [CompoundGraph.CardEdge],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        iterations: Int
+    ) {
+        guard groups.count > 0, iterations > 0 else { return }
+        let memberSets = groups.map { group in
+            Set(group.members.compactMap { indexByID[$0] })
+        }
+        let childrenByParent = directNestedChildrenByParent(memberSets: memberSets)
+        let parentOrder = groups.indices.sorted { lhs, rhs in
+            let leftCount = memberSets[lhs].count
+            let rightCount = memberSets[rhs].count
+            if leftCount != rightCount {
+                return leftCount < rightCount
+            }
+            return lhs < rhs
+        }
+
+        for _ in 0..<iterations {
+            var boxesByGroupIndex = groupBoxesByIndex(
+                positions: positions,
+                sizes: sizes,
+                groups: groups,
+                indexByID: indexByID
+            )
+            var moved = false
+
+            for parentIndex in parentOrder {
+                guard groupMembershipIsLaminar(parentIndex, memberSets: memberSets) else { continue }
+                let childIndices = childrenByParent[parentIndex] ?? []
+                guard nestedChildMemberSetsAreDisjoint(childIndices, memberSets: memberSets) else { continue }
+                let units = groupContentPackingUnits(
+                    parentIndex: parentIndex,
+                    childIndices: childIndices,
+                    memberSets: memberSets,
+                    boxesByGroupIndex: boxesByGroupIndex,
+                    positions: positions,
+                    sizes: sizes
+                )
+                guard units.count > 1 else { continue }
+                let hasDirectNodeUnit = units.contains { $0.groupIndices.isEmpty }
+                let before = outlineRect(for: units)
+                if childIndices.isEmpty {
+                    guard hasDirectNodeUnit,
+                          groupHasNoInternalEdges(memberSet: memberSets[parentIndex], edges: edges, indexByID: indexByID)
+                    else { continue }
+                    let candidate = verticallyCompactedDirectNodePositions(
+                        positions: positions,
+                        units: units,
+                        gap: LayoutSpacing.groupInternalNodeNodeVertical,
+                        anchor: before.origin
+                    )
+                    let area = layoutArea(movedOutlineRect(for: units, from: positions, to: candidate))
+                    guard area < layoutArea(before) - 0.5 else { continue }
+                    positions = candidate
+                    boxesByGroupIndex = groupBoxesByIndex(
+                        positions: positions,
+                        sizes: sizes,
+                        groups: groups,
+                        indexByID: indexByID
+                    )
+                    moved = true
+                    continue
+                }
+
+                guard hasDirectNodeUnit else { continue }
+                let gapSize = groupContentPackingGapSize(units: units, edges: edges, indexByID: indexByID)
+                let itemSizes = units.map { unit in
+                    CGSize(
+                        width: unit.rect.width + gapSize.width,
+                        height: unit.rect.height + gapSize.height
+                    )
+                }
+                let candidates = anchoredPackedPositionCandidates(
+                    positions: positions,
+                    units: units,
+                    itemSizes: itemSizes,
+                    gapSize: gapSize,
+                    anchor: before.origin
+                )
+                var bestPositions = positions
+                var bestArea = layoutArea(before)
+                for candidate in candidates {
+                    let area = layoutArea(movedOutlineRect(for: units, from: positions, to: candidate))
+                    if area < bestArea - 0.5 {
+                        bestArea = area
+                        bestPositions = candidate
+                    }
+                }
+                guard bestArea < layoutArea(before) - 0.5 else { continue }
+                positions = bestPositions
+                boxesByGroupIndex = groupBoxesByIndex(
+                    positions: positions,
+                    sizes: sizes,
+                    groups: groups,
+                    indexByID: indexByID
+                )
+                moved = true
+            }
+
+            if !moved { break }
+        }
+    }
+
+    private static func groupBoxesByIndex(
+        positions: [CGPoint],
+        sizes: [CGSize],
+        groups: [CompoundGraph.Group],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [Int: LayeredGroupBox] {
+        Dictionary(uniqueKeysWithValues: expandedGroupBoxes(
+            positions: positions,
+            sizes: sizes,
+            groups: groups,
+            indexByID: indexByID,
+            includeInactive: true
+        ).map { ($0.groupIndex, $0) })
+    }
+
+    private static func groupMembershipIsLaminar(
+        _ groupIndex: Int,
+        memberSets: [Set<Int>]
+    ) -> Bool {
+        guard memberSets.indices.contains(groupIndex) else { return false }
+        let members = memberSets[groupIndex]
+        guard !members.isEmpty else { return false }
+        for otherIndex in memberSets.indices where otherIndex != groupIndex {
+            let otherMembers = memberSets[otherIndex]
+            guard !otherMembers.isEmpty else { continue }
+            let intersection = members.intersection(otherMembers)
+            if !intersection.isEmpty
+                && intersection != members
+                && intersection != otherMembers {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func groupContentPackingUnits(
+        parentIndex: Int,
+        childIndices: [Int],
+        memberSets: [Set<Int>],
+        boxesByGroupIndex: [Int: LayeredGroupBox],
+        positions: [CGPoint],
+        sizes: [CGSize]
+    ) -> [LayoutCompactionUnit] {
+        guard memberSets.indices.contains(parentIndex) else { return [] }
+        var units: [LayoutCompactionUnit] = []
+        units.reserveCapacity(childIndices.count + memberSets[parentIndex].count)
+        var nestedMembers: Set<Int> = []
+
+        for childIndex in childIndices.sorted() {
+            guard let box = boxesByGroupIndex[childIndex] else { continue }
+            units.append(LayoutCompactionUnit(
+                groupIndices: [childIndex],
+                indices: box.memberSet.sorted(),
+                memberSet: box.memberSet,
+                rect: box.rect
+            ))
+            nestedMembers.formUnion(box.memberSet)
+        }
+
+        let directMembers = memberSets[parentIndex]
+            .subtracting(nestedMembers)
+            .sorted()
+        for index in directMembers {
+            let rect = CGRect(
+                x: positions[index].x - sizes[index].width / 2,
+                y: positions[index].y - sizes[index].height / 2,
+                width: sizes[index].width,
+                height: sizes[index].height
+            )
+            units.append(LayoutCompactionUnit(
+                groupIndices: [],
+                indices: [index],
+                memberSet: [index],
+                rect: rect
+            ))
+        }
+
+        return units
+    }
+
+    private static func groupHasNoInternalEdges(
+        memberSet: Set<Int>,
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Bool {
+        for edge in edges {
+            guard
+                let sourceIndex = indexByID[edge.source],
+                let targetIndex = indexByID[edge.target]
+            else { continue }
+            if memberSet.contains(sourceIndex) && memberSet.contains(targetIndex) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func verticallyCompactedDirectNodePositions(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        gap: CGFloat,
+        anchor: CGPoint
+    ) -> [CGPoint] {
+        let sortedUnits = units.sorted { lhs, rhs in
+            if abs(lhs.rect.minY - rhs.rect.minY) > 0.001 {
+                return lhs.rect.minY < rhs.rect.minY
+            }
+            if abs(lhs.rect.minX - rhs.rect.minX) > 0.001 {
+                return lhs.rect.minX < rhs.rect.minX
+            }
+            return (lhs.indices.first ?? 0) < (rhs.indices.first ?? 0)
+        }
+        let width = sortedUnits.map(\.rect.width).max() ?? 0
+        let centerX = anchor.x + width / 2
+        var cursorY = anchor.y
+        var result = positions
+        for unit in sortedUnits {
+            let dx = centerX - unit.rect.midX
+            let dy = cursorY - unit.rect.minY
+            for index in unit.indices {
+                result[index].x += dx
+                result[index].y += dy
+            }
+            cursorY += unit.rect.height + gap
+        }
+        return result
+    }
+
+    private static func groupContentPackingGapSize(
+        units: [LayoutCompactionUnit],
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> CGSize {
+        guard units.count > 1 else { return .zero }
+        var horizontal: CGFloat = 0
+        var vertical: CGFloat = 0
+        let edgeCounts = edgeCountByNodePair(edges: edges, indexByID: indexByID)
+        for lhs in 0..<(units.count - 1) {
+            for rhs in (lhs + 1)..<units.count {
+                let gap = groupContentGap(lhs: units[lhs], rhs: units[rhs], edgeCounts: edgeCounts)
+                horizontal = max(horizontal, gap.width)
+                vertical = max(vertical, gap.height)
+            }
+        }
+        return CGSize(width: horizontal, height: vertical)
+    }
+
+    private static func groupContentGap(
+        lhs: LayoutCompactionUnit,
+        rhs: LayoutCompactionUnit,
+        edgeCounts: [UInt64: Int]
+    ) -> CGSize {
+        let lhsIsGroup = !lhs.groupIndices.isEmpty
+        let rhsIsGroup = !rhs.groupIndices.isEmpty
+        if lhsIsGroup && rhsIsGroup {
+            let gap = LayoutSpacing.nestedGroupGroupPadding
+            return CGSize(width: gap, height: gap)
+        }
+        if lhsIsGroup || rhsIsGroup {
+            let gap = LayoutSpacing.groupNode
+            return CGSize(width: gap, height: gap)
+        }
+
+        let edgeCount = maxEdgeCountBetween(lhs.memberSet, rhs.memberSet, edgeCounts: edgeCounts)
+        let gap = minimumNodeNodeGap(edgeMultiplicity: edgeCount, sameGroup: true)
+        return CGSize(width: gap.horizontal, height: gap.vertical)
+    }
+
+    private static func edgeCountByNodePair(
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> [UInt64: Int] {
+        var result: [UInt64: Int] = [:]
+        for edge in edges where edge.source != edge.target {
+            guard
+                let sourceIndex = indexByID[edge.source],
+                let targetIndex = indexByID[edge.target]
+            else { continue }
+            let key = pairKey(sourceIndex, targetIndex)
+            result[key, default: 0] += 1
+        }
+        return result
+    }
+
+    private static func maxEdgeCountBetween(
+        _ lhs: Set<Int>,
+        _ rhs: Set<Int>,
+        edgeCounts: [UInt64: Int]
+    ) -> Int {
+        var result = 0
+        for left in lhs {
+            for right in rhs {
+                result = max(result, edgeCounts[pairKey(left, right)] ?? 0)
+            }
+        }
+        return result
+    }
+
+    private static func anchoredPackedPositionCandidates(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        itemSizes: [CGSize],
+        gapSize: CGSize,
+        anchor: CGPoint
+    ) -> [[CGPoint]] {
+        maxRectsPackedPositionCandidates(
+            positions: positions,
+            units: units,
+            itemSizes: itemSizes,
+            gapSize: gapSize
+        ).map { candidate in
+            let packed = movedOutlineRect(for: units, from: positions, to: candidate)
+            let dx = anchor.x - packed.minX
+            let dy = anchor.y - packed.minY
+            return translatedPositions(candidate, moving: units.flatMap(\.indices), dx: dx, dy: dy)
+        }
+    }
+
+    private static func outlineRect(for units: [LayoutCompactionUnit]) -> CGRect {
+        units.reduce(CGRect.null) { partial, unit in
+            partial.isNull ? unit.rect : partial.union(unit.rect)
+        }
+    }
+
+    private static func movedOutlineRect(
+        for units: [LayoutCompactionUnit],
+        from oldPositions: [CGPoint],
+        to newPositions: [CGPoint]
+    ) -> CGRect {
+        units.reduce(CGRect.null) { partial, unit in
+            guard let first = unit.indices.first else { return partial }
+            let dx = newPositions[first].x - oldPositions[first].x
+            let dy = newPositions[first].y - oldPositions[first].y
+            let rect = unit.rect.offsetBy(dx: dx, dy: dy)
+            return partial.isNull ? rect : partial.union(rect)
+        }
+    }
+
+    private static func translatedPositions(
+        _ positions: [CGPoint],
+        moving indices: [Int],
+        dx: CGFloat,
+        dy: CGFloat
+    ) -> [CGPoint] {
+        guard abs(dx) > 0.001 || abs(dy) > 0.001 else { return positions }
+        var result = positions
+        for index in Set(indices) {
+            result[index].x += dx
+            result[index].y += dy
+        }
+        return result
     }
 
     private static func directNestedChildrenByParent(memberSets: [Set<Int>]) -> [Int: [Int]] {
@@ -5855,6 +6239,22 @@ struct KnowledgeGraphLayout: Sendable {
         let itemSizes = units.map { unit in
             CGSize(width: unit.rect.width + gap, height: unit.rect.height + gap)
         }
+        let gapSize = CGSize(width: gap, height: gap)
+        return maxRectsPackedPositionCandidates(
+            positions: positions,
+            units: units,
+            itemSizes: itemSizes,
+            gapSize: gapSize
+        )
+    }
+
+    private static func maxRectsPackedPositionCandidates(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        itemSizes: [CGSize],
+        gapSize: CGSize
+    ) -> [[CGPoint]] {
+        guard units.count > 1 else { return [] }
         let orders = outlinePackingOrders(units)
         let widths = maxRectsCandidateWidths(itemSizes: itemSizes, orders: orders)
         var candidates: [MaxRectsPacking] = []
@@ -5866,7 +6266,7 @@ struct KnowledgeGraphLayout: Sendable {
                     itemSizes: itemSizes,
                     order: order,
                     width: width,
-                    gap: gap
+                    gapSize: gapSize
                 ) {
                     candidates.append(packing)
                 }
@@ -5935,7 +6335,7 @@ struct KnowledgeGraphLayout: Sendable {
         itemSizes: [CGSize],
         order: [Int],
         width: CGFloat,
-        gap: CGFloat
+        gapSize: CGSize
     ) -> MaxRectsPacking? {
         let heightLimit = itemSizes.reduce(CGFloat(0)) { $0 + $1.height }
         var freeRects = [CGRect(x: 0, y: 0, width: width, height: heightLimit)]
@@ -5952,8 +6352,8 @@ struct KnowledgeGraphLayout: Sendable {
 
         let origins = placedInflated.enumerated().map { unitIndex, rect in
             CGPoint(
-                x: rect.minX + gap / 2 - units[unitIndex].rect.minX,
-                y: rect.minY + gap / 2 - units[unitIndex].rect.minY
+                x: rect.minX + gapSize.width / 2 - units[unitIndex].rect.minX,
+                y: rect.minY + gapSize.height / 2 - units[unitIndex].rect.minY
             )
         }
         var result = positions
@@ -5967,8 +6367,8 @@ struct KnowledgeGraphLayout: Sendable {
         let outline = units.indices.reduce(CGRect.null) { partial, unitIndex in
             let inflated = placedInflated[unitIndex]
             let rect = CGRect(
-                x: inflated.minX + gap / 2,
-                y: inflated.minY + gap / 2,
+                x: inflated.minX + gapSize.width / 2,
+                y: inflated.minY + gapSize.height / 2,
                 width: units[unitIndex].rect.width,
                 height: units[unitIndex].rect.height
             )

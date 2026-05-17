@@ -419,6 +419,11 @@ global layout elements は次だけである。
 Nested Group 同士の距離は親 Group 内の内部制約として扱い、外側の Group-Group 距離計算には使わない。
 直下の Nested Group sibling は親 Group header 下端から `14 pt` の位置へ top alignment し、
 sibling 間も `14 pt` 以上離す。
+親 Group の直下要素に Nested Group と direct member Node が混在する場合は、
+それらの直下要素を同じ internal packing unit として扱う。
+直下Nodeだけで、Group内の内部Edgeがない場合は、Nodeを縦方向へ詰め直す候補も評価する。
+内部 packing は Group-Group / Group-Node / Group 内 Node-Node の最小距離を満たす範囲で
+親 Group の content outline 面積を最小化し、遠くに残った Node によって親 Group が不必要に膨らむ状態を許可しない。
 
 ```text
 優先順位
@@ -434,6 +439,10 @@ sibling 間も `14 pt` 以上離す。
 
 ```text
 距離制約投影
+  ↓
+各 Group の直下要素（Nested Group / direct Node）を internal packing unit に変換
+  ↓
+Group 内 content outline を MaxRects + 候補幅探索で最小化
   ↓
 Outermost Group / Ungrouped Node を compaction unit に変換
   ↓

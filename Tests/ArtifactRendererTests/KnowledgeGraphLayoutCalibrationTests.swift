@@ -127,6 +127,45 @@ struct KnowledgeGraphLayoutCalibrationTests {
     }
 
     @Test
+    func parentGroupPacksDirectNodesAndNestedGroupsWithoutWhitespace() throws {
+        let nestedNodes = [Self.iri("mixed-nested-a"), Self.iri("mixed-nested-b")]
+        let directNode = Self.iri("mixed-direct")
+        let nodes = nestedNodes + [directNode]
+        let graph = KnowledgeGraph(
+            nodes: nodes.map { Node(id: $0) },
+            edges: [
+                Self.edge(from: nestedNodes[0], to: nestedNodes[1]),
+                Self.edge(from: directNode, to: nestedNodes[0])
+            ]
+        )
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: [
+                nestedNodes[0]: CGPoint(x: 240, y: 0),
+                nestedNodes[1]: CGPoint(x: 240, y: 80),
+                directNode: CGPoint(x: 0, y: 760)
+            ],
+            groupingStrategy: .explicit(groups: [
+                .init(id: "outer", label: "Outer", memberNodeIDs: nodes),
+                .init(id: "inner", label: "Inner", memberNodeIDs: nestedNodes)
+            ])
+        )
+
+        let inner = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:inner")])
+        let direct = try cardRect(of: CompoundGraph.Card.ID(nodeID: directNode), in: result)
+        let outer = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:outer")])
+        let content = inner.union(direct)
+        let unusedHeight = outer.height
+            - CardSizing.headerHeight
+            - 14
+            - content.height
+            - 24
+
+        #expect(rectDistance(inner, direct) <= 40 + 0.5)
+        #expect(unusedHeight < 64)
+    }
+
+    @Test
     func groupBoundingBoxReservesHeaderAboveMembers() throws {
         let node = Self.iri("group-header-member")
         let graph = KnowledgeGraph(nodes: [Node(id: node)], edges: [])
