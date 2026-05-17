@@ -123,6 +123,8 @@ Edge 最短を優先する。
 複数 Edge が同じ source / target Node の同じ辺へ接続する場合、その endpoint 側の port 群は
 Node 中心を基準に対称配置する。side が決まった後の複数 port bundle では、この等間隔 slot を
 先に固定し、その slot を endpoint として最短 route を選ぶ。
+入力 Edge と出力 Edge は別 bucket に分けない。同じ Node の同じ辺に接続されるなら、
+source / target の向きに関係なく同じ port bundle として分散する。
 偶数本の bundle では中央そのものに port を置かず、中央を挟む 2 つの slot を使う。
 この場合、直線 Edge も中央ぴったりではなく中央に最も近い slot を使い、bundle 全体の中心を
 Node 辺の中心へ合わせる。
@@ -131,6 +133,8 @@ Node 同士を水平または垂直の直線で結べる Edge は、その辺の
 共有していない endpoint は、その Node 辺の中央 port を基準にする。ただし反対側 endpoint が
 共有 port bundle 上にあり、その bundle slot に合わせることで交差を増やさず直線 route にできる場合は、
 singleton endpoint を同じ axis へ寄せてよい。
+両 endpoint が共有 port bundle 上にある場合も、直線 route の候補 axis を全て評価し、
+関節付き route より短くできるなら中央 bias より直線を優先する。
 分散 port のままだと中間 Node を避けるために大きな迂回が必要になる場合は、他辺の中央 port も
 候補に含め、最短 route を優先する。
 
@@ -254,9 +258,12 @@ swap は対象 Edge 群をまとめて評価し、局所的な直線化だけで
 | 4 | 合計関節数 | 距離と交差が同等の場合にだけ、関節数が少ない候補を優先する |
 | 5 | Edge-Edge 視認性 | 最後に途中 segment の近接 penalty を比較する |
 
-反対側 endpoint が singleton の Edge では、port swap 後に singleton endpoint を共有 bundle slot と
-同じ axis へ寄せる直線化 pass を行う。この pass は交差を増やさず、route 長を伸ばさず、
-関節数または route 長を改善できる場合にだけ採用する。
+port swap 後の直線化 pass は、片側だけが共有 bundle の Edge に限定しない。
+両 endpoint が共有 bundle 上にある場合でも、中央 bias 候補、source port 候補、target port 候補、
+overlap center 候補をすべて評価し、交差を増やさず route 長を伸ばさずに関節数または route 長を
+改善できる直線 route を採用する。最初に見つかった中央 bias 候補だけで探索を打ち切ってはならない。
+direct align 後に port bundle の spacing が崩れる場合は、endpoint bundle を再分散し、
+port assignment と direct align を再評価する。直線化は Edge-Edge port 距離を破ってはならない。
 この swap / 直線化評価は、変更される Edge と近傍 segment だけを比較する差分評価で行う。
 全 Edge ペアを毎回再評価してはならない。
 
@@ -275,13 +282,13 @@ hot path の近傍判定は必要な時だけ callback 走査し、route / node 
 | route 候補列挙 | 直線、1角、2角、障害物迂回を比較する | Node 非干渉を満たす全候補で route 長を最優先に採点すること |
 | 空間 index 判定 | Node rect と既存 Edge segment の近傍だけを検査する | 全探索と同じ違反を検出すること |
 | port swap 差分評価 | 交差を増やさず route 長と最大個別長を最小化する | 変更 Edge と近傍 segment だけを評価し、最良改善を採用すること |
-| singleton 直線化 | 片側 singleton endpoint を共有 bundle slot に合わせる | 交差を増やさず route 長を伸ばさずに直線化できる場合だけ採用すること |
+| direct 直線化 | 共有 / singleton endpoint の直線候補 axis を全て比較する | 交差を増やさず route 長を伸ばさずに直線化できる場合だけ採用すること |
 | 同長関節 lane 正規化 | H-V-H / V-H-V の関節を同じ route 長の範囲でスライドする | 法線接続、Node 非干渉、Edge-Edge 距離を保ったまま、区間占有と 14pt lane rhythm に揃えること |
 
 ```text
-port candidates -> shortest valid route -> nearby collision check -> local port swap -> singleton direct align -> equal-length lane normalize
-       │                    │                         │                    │                         │
-       └──── keeps center   └──── length first        └──── exact result   └──── no crossings        └──── no length growth
+port candidates -> shortest valid route -> nearby collision check -> local port swap -> direct align -> redistribute -> direct align -> equal-length lane normalize
+       │                    │                         │                    │               │              │
+       └──── keeps center   └──── length first        └──── exact result   └──── no cross  └──── ports    └──── no length growth
 ```
 
 同長関節 lane 正規化では、縦 / 横の中間 segment を単独で評価しない。

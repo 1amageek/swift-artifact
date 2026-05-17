@@ -6019,15 +6019,57 @@ struct KnowledgeGraphLayout: Sendable {
             cardRects: cardRects,
             nodeIndex: nodeIndex
         )
-        let straightenedRoutes = straightenMovableSingletonDirectRoutes(
+        let straightenedRoutes = straightenMovableDirectRoutes(
             routes: portAssignedRoutes,
             edges: edges,
             indexByID: indexByID,
             cardRects: cardRects,
             nodeIndex: nodeIndex
         )
-        return normalizeEqualLengthJointLanes(
+        let straightenedPortSpacingViolation = endpointPortSpacingViolationScore(
             routes: straightenedRoutes,
+            edges: edges,
+            indexByID: indexByID,
+            cardRects: cardRects
+        )
+        let routesBeforeNormalization: [EdgeIdentifier: EdgeRoute]
+        if straightenedPortSpacingViolation > 0.001 {
+            let redistributedRoutes = recenterSingletonPorts(
+                routes: straightenedRoutes,
+                edges: edges,
+                cards: cards,
+                indexByID: indexByID,
+                cardRects: cardRects,
+                nodeIndex: nodeIndex
+            )
+            let redistributedAssignedRoutes = optimizeSharedPortAssignments(
+                routes: redistributedRoutes,
+                edges: edges,
+                indexByID: indexByID,
+                cardRects: cardRects,
+                nodeIndex: nodeIndex
+            )
+            let finalStraightenedRoutes = straightenMovableDirectRoutes(
+                routes: redistributedAssignedRoutes,
+                edges: edges,
+                indexByID: indexByID,
+                cardRects: cardRects,
+                nodeIndex: nodeIndex
+            )
+            let finalPortSpacingViolation = endpointPortSpacingViolationScore(
+                routes: finalStraightenedRoutes,
+                edges: edges,
+                indexByID: indexByID,
+                cardRects: cardRects
+            )
+            routesBeforeNormalization = finalPortSpacingViolation + 0.001 < straightenedPortSpacingViolation
+                ? finalStraightenedRoutes
+                : straightenedRoutes
+        } else {
+            routesBeforeNormalization = straightenedRoutes
+        }
+        return normalizeEqualLengthJointLanes(
+            routes: routesBeforeNormalization,
             edges: edges,
             indexByID: indexByID,
             cardRects: cardRects,
@@ -6120,14 +6162,33 @@ struct KnowledgeGraphLayout: Sendable {
         sourcePort: EdgePort,
         targetPort: EdgePort
     ) -> [CGPoint]? {
+        directRouteWithPortBiasCandidates(
+            sourceRect: sourceRect,
+            targetRect: targetRect,
+            sourceSide: sourceSide,
+            targetSide: targetSide,
+            sourcePort: sourcePort,
+            targetPort: targetPort
+        ).first
+    }
+
+    private static func directRouteWithPortBiasCandidates(
+        sourceRect: CGRect,
+        targetRect: CGRect,
+        sourceSide: EdgePortSide,
+        targetSide: EdgePortSide,
+        sourcePort: EdgePort,
+        targetPort: EdgePort
+    ) -> [[CGPoint]] {
         guard directSidesFaceEachOther(
             sourceRect: sourceRect,
             targetRect: targetRect,
             sourceSide: sourceSide,
             targetSide: targetSide
         ) else {
-            return nil
+            return []
         }
+        var candidates: [[CGPoint]] = []
         for coordinate in directRoutePortBiasAxisCandidates(
             sourceRect: sourceRect,
             targetRect: targetRect,
@@ -6139,12 +6200,12 @@ struct KnowledgeGraphLayout: Sendable {
                 portCoordinateIsAvailable(coordinate, side: sourceSide, rect: sourceRect),
                 portCoordinateIsAvailable(coordinate, side: targetSide, rect: targetRect)
             else { continue }
-            return [
+            candidates.append([
                 directRoutePoint(rect: sourceRect, side: sourceSide, coordinate: coordinate),
                 directRoutePoint(rect: targetRect, side: targetSide, coordinate: coordinate)
-            ]
+            ])
         }
-        return nil
+        return candidates
     }
 
     private static func directSidesFaceEachOther(
@@ -6470,6 +6531,22 @@ struct KnowledgeGraphLayout: Sendable {
             }
         }
 
+        var recenteredEndpoints: [EdgeEndpointKey: RouteEndpoint] = [:]
+        recenteredEndpoints.reserveCapacity(endpointPoints.count)
+        for (bucket, entries) in endpointEntries {
+            for entry in entries {
+                guard let point = endpointPoints[entry.key] else { continue }
+                recenteredEndpoints[entry.key] = RouteEndpoint(
+                    key: entry.key,
+                    edgeID: entry.edgeID,
+                    cardIndex: bucket.cardIndex,
+                    side: bucket.side,
+                    point: point
+                )
+            }
+        }
+        let recenteredBuckets = routeEndpointBuckets(recenteredEndpoints)
+
         var updated = routes
         for edge in edges where edge.source != edge.target {
             guard
@@ -6510,22 +6587,39 @@ struct KnowledgeGraphLayout: Sendable {
             let currentPoints = routePoints(from: route)
             if
                 routeIsDirect(currentPoints),
-                let directPoints = directRouteWithPortBias(
+                let recenteredSourceEndpoint = recenteredEndpoints[sourceKey],
+                let recenteredTargetEndpoint = recenteredEndpoints[targetKey]
+            {
+                var recenteredDirectPoints: [CGPoint]?
+                for directPoints in directRouteWithPortBiasCandidates(
                     sourceRect: cardRects[sourceIndex],
                     targetRect: cardRects[targetIndex],
                     sourceSide: sourceSide,
                     targetSide: targetSide,
                     sourcePort: centeredSourcePort,
                     targetPort: centeredTargetPort
-                ),
-                routeClearsNodes(
-                    directPoints,
-                    nodeIndex: nodeIndex,
-                    excluding: Set([sourceIndex, targetIndex])
-                )
-            {
-                updated[edge.id] = edgeRoute(points: directPoints)
-                continue
+                ) {
+                    guard
+                        directRoutePreservesEndpointPortSpacing(
+                            directPoints,
+                            sourceEndpoint: recenteredSourceEndpoint,
+                            targetEndpoint: recenteredTargetEndpoint,
+                            buckets: recenteredBuckets,
+                            cardRects: cardRects
+                        ),
+                        routeClearsNodes(
+                            directPoints,
+                            nodeIndex: nodeIndex,
+                            excluding: Set([sourceIndex, targetIndex])
+                        )
+                    else { continue }
+                    recenteredDirectPoints = directPoints
+                    break
+                }
+                if let recenteredDirectPoints {
+                    updated[edge.id] = edgeRoute(points: recenteredDirectPoints)
+                    continue
+                }
             }
             guard let centeredPoints = shortestFixedEndpointRoute(
                 edge: edge,
@@ -7249,6 +7343,97 @@ struct KnowledgeGraphLayout: Sendable {
         return buckets
     }
 
+    private static func endpointPortSpacingViolationScore(
+        routes: [EdgeIdentifier: EdgeRoute],
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardRects: [CGRect]
+    ) -> CGFloat {
+        let endpoints = routeEndpoints(
+            routes: routes,
+            edges: edges,
+            indexByID: indexByID,
+            cardRects: cardRects
+        )
+        let buckets = routeEndpointBuckets(endpoints)
+        var score: CGFloat = 0
+        for (bucket, endpoints) in buckets where endpoints.count > 1 && cardRects.indices.contains(bucket.cardIndex) {
+            let requiredSpacing = portSpacing(
+                for: endpoints.count,
+                side: bucket.side,
+                rect: cardRects[bucket.cardIndex]
+            )
+            guard requiredSpacing > 0 else { continue }
+            let coordinates = endpoints
+                .map { portAxisCoordinate($0.point, side: bucket.side) }
+                .sorted()
+            for offset in 1..<coordinates.count {
+                score += max(0, requiredSpacing - (coordinates[offset] - coordinates[offset - 1]))
+            }
+        }
+        return score
+    }
+
+    private static func directRoutePreservesEndpointPortSpacing(
+        _ points: [CGPoint],
+        sourceEndpoint: RouteEndpoint,
+        targetEndpoint: RouteEndpoint,
+        buckets: [EdgePortBucket: [RouteEndpoint]],
+        cardRects: [CGRect]
+    ) -> Bool {
+        guard let sourcePoint = points.first, let targetPoint = points.last else { return false }
+        return endpointPortSpacingIsPreserved(
+            candidatePoint: sourcePoint,
+            endpoint: sourceEndpoint,
+            buckets: buckets,
+            cardRects: cardRects
+        ) && endpointPortSpacingIsPreserved(
+            candidatePoint: targetPoint,
+            endpoint: targetEndpoint,
+            buckets: buckets,
+            cardRects: cardRects
+        )
+    }
+
+    private static func endpointPortSpacingIsPreserved(
+        candidatePoint: CGPoint,
+        endpoint: RouteEndpoint,
+        buckets: [EdgePortBucket: [RouteEndpoint]],
+        cardRects: [CGRect]
+    ) -> Bool {
+        let bucket = EdgePortBucket(cardIndex: endpoint.cardIndex, side: endpoint.side)
+        guard let endpoints = buckets[bucket], endpoints.count > 1 else { return true }
+        guard cardRects.indices.contains(endpoint.cardIndex) else { return true }
+        let requiredSpacing = portSpacing(for: endpoints.count, side: endpoint.side, rect: cardRects[endpoint.cardIndex])
+        guard requiredSpacing > 0 else { return true }
+
+        let candidateCoordinate = portAxisCoordinate(candidatePoint, side: endpoint.side)
+        let coordinates = endpoints.map { entry in
+            entry.key == endpoint.key
+                ? candidateCoordinate
+                : portAxisCoordinate(entry.point, side: endpoint.side)
+        }.sorted()
+        for offset in 1..<coordinates.count {
+            guard coordinates[offset] - coordinates[offset - 1] >= requiredSpacing - 0.5 else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func portSpacing(
+        for count: Int,
+        side: EdgePortSide,
+        rect: CGRect
+    ) -> CGFloat {
+        guard count > 1 else { return 0 }
+        let availableLength = portAvailableLength(side: side, rect: rect)
+        let desiredSpan = LayoutSpacing.edgeEdgePort * CGFloat(count - 1)
+        return desiredSpan <= availableLength
+            ? LayoutSpacing.edgeEdgePort
+            : availableLength / CGFloat(count - 1)
+    }
+
     private static func sortedEndpointBuckets(
         _ buckets: Dictionary<EdgePortBucket, [RouteEndpoint]>.Keys
     ) -> [EdgePortBucket] {
@@ -7346,7 +7531,7 @@ struct KnowledgeGraphLayout: Sendable {
         return optimized
     }
 
-    private static func straightenMovableSingletonDirectRoutes(
+    private static func straightenMovableDirectRoutes(
         routes: [EdgeIdentifier: EdgeRoute],
         edges: [CompoundGraph.CardEdge],
         indexByID: [CompoundGraph.Card.ID: Int],
@@ -7379,8 +7564,6 @@ struct KnowledgeGraphLayout: Sendable {
                 let targetBucketCount = buckets[
                     EdgePortBucket(cardIndex: targetEndpoint.cardIndex, side: targetEndpoint.side)
                 ]?.count ?? 1
-                guard sourceBucketCount == 1 || targetBucketCount == 1 else { continue }
-
                 let sourcePort = EdgePort(
                     point: sourceEndpoint.point,
                     side: sourceEndpoint.side,
@@ -7391,56 +7574,64 @@ struct KnowledgeGraphLayout: Sendable {
                     side: targetEndpoint.side,
                     bucketCount: targetBucketCount
                 )
-                guard
-                    let directPoints = directRouteWithPortBias(
-                        sourceRect: cardRects[sourceIndex],
-                        targetRect: cardRects[targetIndex],
-                        sourceSide: sourceEndpoint.side,
-                        targetSide: targetEndpoint.side,
-                        sourcePort: sourcePort,
-                        targetPort: targetPort
-                    ),
-                    routeClearsNodes(
-                        directPoints,
-                        nodeIndex: nodeIndex,
-                        excluding: Set([sourceIndex, targetIndex])
-                    ),
-                    routeJointsClearEndpointNodes(
-                        directPoints,
-                        cardRects: cardRects,
-                        endpointIndices: Set([sourceIndex, targetIndex])
-                    )
-                else { continue }
-
                 let currentPoints = routePoints(from: route)
-                guard routePointDelta(directPoints, currentPoints) > 0.5 else { continue }
                 let currentMetrics = simplifiedRouteMetrics(currentPoints)
-                let directMetrics = simplifiedRouteMetrics(directPoints)
-                var candidateRoutes = optimized
-                candidateRoutes[edge.id] = edgeRoute(points: directPoints)
-                let affectedEdgeIDs = Set([edge.id])
-                let conflictBefore = routeConflictScore(
-                    routes: optimized,
-                    edges: edges,
-                    focusing: affectedEdgeIDs
-                )
-                let conflictAfter = routeConflictScore(
-                    routes: candidateRoutes,
-                    edges: edges,
-                    focusing: affectedEdgeIDs
-                )
-                let improvement = DirectRouteAlignmentImprovement(
-                    routes: candidateRoutes,
-                    lengthBefore: currentMetrics.length,
-                    lengthAfter: directMetrics.length,
-                    cornersBefore: currentMetrics.corners,
-                    cornersAfter: directMetrics.corners,
-                    conflictBefore: conflictBefore,
-                    conflictAfter: conflictAfter
-                )
-                guard improvement.isValid else { continue }
-                if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
-                    bestImprovement = improvement
+                for directPoints in directRouteWithPortBiasCandidates(
+                    sourceRect: cardRects[sourceIndex],
+                    targetRect: cardRects[targetIndex],
+                    sourceSide: sourceEndpoint.side,
+                    targetSide: targetEndpoint.side,
+                    sourcePort: sourcePort,
+                    targetPort: targetPort
+                ) {
+                    guard routePointDelta(directPoints, currentPoints) > 0.5 else { continue }
+                    guard
+                        directRoutePreservesEndpointPortSpacing(
+                            directPoints,
+                            sourceEndpoint: sourceEndpoint,
+                            targetEndpoint: targetEndpoint,
+                            buckets: buckets,
+                            cardRects: cardRects
+                        ),
+                        routeClearsNodes(
+                            directPoints,
+                            nodeIndex: nodeIndex,
+                            excluding: Set([sourceIndex, targetIndex])
+                        ),
+                        routeJointsClearEndpointNodes(
+                            directPoints,
+                            cardRects: cardRects,
+                            endpointIndices: Set([sourceIndex, targetIndex])
+                        )
+                    else { continue }
+
+                    let directMetrics = simplifiedRouteMetrics(directPoints)
+                    var candidateRoutes = optimized
+                    candidateRoutes[edge.id] = edgeRoute(points: directPoints)
+                    let affectedEdgeIDs = Set([edge.id])
+                    let conflictBefore = routeConflictScore(
+                        routes: optimized,
+                        edges: edges,
+                        focusing: affectedEdgeIDs
+                    )
+                    let conflictAfter = routeConflictScore(
+                        routes: candidateRoutes,
+                        edges: edges,
+                        focusing: affectedEdgeIDs
+                    )
+                    let improvement = DirectRouteAlignmentImprovement(
+                        routes: candidateRoutes,
+                        lengthBefore: currentMetrics.length,
+                        lengthAfter: directMetrics.length,
+                        cornersBefore: currentMetrics.corners,
+                        cornersAfter: directMetrics.corners,
+                        conflictBefore: conflictBefore,
+                        conflictAfter: conflictAfter
+                    )
+                    guard improvement.isValid else { continue }
+                    if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
+                        bestImprovement = improvement
+                    }
                 }
             }
 

@@ -653,6 +653,79 @@ struct KnowledgeGraphLayoutCalibrationTests {
     }
 
     @Test
+    func byNamespacePreviewKeepsFacingBobCarolRouteDirect() throws {
+        let alice = Self.exampleOrgIRI("alice")
+        let bob = Self.exampleOrgIRI("bob")
+        let carol = Self.exampleOrgIRI("carol")
+        let engineering = NodeIdentifier.iri("http://example.org/org/engineering")
+        let sales = NodeIdentifier.iri("http://example.org/org/sales")
+        let recruiting = NodeIdentifier.iri("http://example.org/org/hr/recruiting")
+        let payroll = NodeIdentifier.iri("http://example.org/org/hr/payroll")
+        let widget = NodeIdentifier.iri("http://example.org/product/widget")
+        let gadget = NodeIdentifier.iri("http://example.org/product/gadget")
+        let memberOf = "http://example.org/memberOf"
+        let builds = "http://example.org/builds"
+        let reviews = "http://example.org/reviews"
+        let graph = KnowledgeGraph(
+            nodes: [alice, bob, carol, engineering, sales, recruiting, payroll, widget, gadget].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: alice, to: bob),
+                Self.edge(from: bob, to: carol),
+                Self.edge(from: alice, to: engineering, predicate: memberOf),
+                Self.edge(from: bob, to: recruiting, predicate: memberOf),
+                Self.edge(from: carol, to: sales, predicate: memberOf),
+                Self.edge(from: alice, to: widget, predicate: builds),
+                Self.edge(from: bob, to: gadget, predicate: reviews),
+                Self.edge(from: carol, to: payroll, predicate: memberOf)
+            ],
+            namespaces: [
+                Namespace(prefix: "foaf", uri: "http://xmlns.com/foaf/0.1/"),
+                Namespace(prefix: "org", uri: "http://example.org/org/"),
+                Namespace(prefix: "orgHR", uri: "http://example.org/org/hr/"),
+                Namespace(prefix: "prod", uri: "http://example.org/product/")
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .byNamespace())
+        let bobID = CompoundGraph.Card.ID(nodeID: bob)
+        let carolID = CompoundGraph.Card.ID(nodeID: carol)
+        let edge = try #require(result.compoundGraph.edges.first {
+            $0.source == bobID && $0.target == carolID
+        })
+        let route = try #require(result.edgeRoutes[edge.id])
+        let points = route.points.isEmpty ? [route.start, route.end] : route.points
+        let bobRect = try cardRect(of: bobID, in: result)
+        let carolRect = try cardRect(of: carolID, in: result)
+        let sourceSide = try #require(boundarySide(of: route.start, in: bobRect))
+        let targetSide = try #require(boundarySide(of: route.end, in: carolRect))
+
+        try #require(bobRect.maxX <= carolRect.minX)
+        #expect(sourceSide == .right)
+        #expect(targetSide == .left)
+        #expect(routeCornerCount(points) == 0)
+        #expect(renderedRouteLength(route) <= manhattanDistance(points[0], points[points.count - 1]) + 1)
+
+        var carolLeftCoordinates: [CGFloat] = []
+        for routedEdge in result.compoundGraph.edges {
+            guard let routedRoute = result.edgeRoutes[routedEdge.id] else { continue }
+            if routedEdge.source == carolID, let side = boundarySide(of: routedRoute.start, in: carolRect), side == .left {
+                carolLeftCoordinates.append(portAxisCoordinate(routedRoute.start, side: side))
+            }
+            if routedEdge.target == carolID, let side = boundarySide(of: routedRoute.end, in: carolRect), side == .left {
+                carolLeftCoordinates.append(portAxisCoordinate(routedRoute.end, side: side))
+            }
+        }
+        try #require(carolLeftCoordinates.count >= 3)
+        let sortedCarolLeftCoordinates = carolLeftCoordinates.sorted()
+        let gaps = zip(sortedCarolLeftCoordinates.dropFirst(), sortedCarolLeftCoordinates).map { next, previous in
+            next - previous
+        }
+        for gap in gaps {
+            #expect(gap >= Self.edgeEdgePortSpacing - 0.5)
+        }
+    }
+
+    @Test
     func equalLengthPortAlternativesPreferFewerCrossingsAtSharedNode() throws {
         let graph = try KnowledgeGraphFormat.jsonLD.parse(
             #"""
