@@ -37,7 +37,7 @@ Canvas 上へ描画
 
 | 制約 | 意味 | 初期値 |
 |---|---|---:|
-| Edge-Edge port | 同じ Node 辺の port に接続される Edge 同士の最小距離 | 8 pt |
+| Edge-Edge port | 同じ Node 辺の port に接続される Edge 同士の最小距離 | 6 pt |
 | Edge-Edge route | 関節後 / 途中 segment の Edge 同士の最小表示距離。共有 endpoint を持たない Edge の重なりを防ぐ | 14 pt |
 | Node-Node horizontal | Group 外 Node 矩形同士の横方向最小距離 | 80 pt |
 | Node-Node vertical | Group 外 Node 矩形同士の縦方向最小距離 | 40 pt |
@@ -276,13 +276,28 @@ hot path の近傍判定は必要な時だけ callback 走査し、route / node 
 | 空間 index 判定 | Node rect と既存 Edge segment の近傍だけを検査する | 全探索と同じ違反を検出すること |
 | port swap 差分評価 | 交差を増やさず route 長と最大個別長を最小化する | 変更 Edge と近傍 segment だけを評価し、最良改善を採用すること |
 | singleton 直線化 | 片側 singleton endpoint を共有 bundle slot に合わせる | 交差を増やさず route 長を伸ばさずに直線化できる場合だけ採用すること |
-| 同長関節 lane 正規化 | H-V-H / V-H-V の関節を同じ route 長の範囲でスライドする | 法線接続、Node 非干渉、Edge-Edge 距離を保ったまま 14pt lane rhythm に揃えること |
+| 同長関節 lane 正規化 | H-V-H / V-H-V の関節を同じ route 長の範囲でスライドする | 法線接続、Node 非干渉、Edge-Edge 距離を保ったまま、区間占有と 14pt lane rhythm に揃えること |
 
 ```text
 port candidates -> shortest valid route -> nearby collision check -> local port swap -> singleton direct align -> equal-length lane normalize
        │                    │                         │                    │                         │
        └──── keeps center   └──── length first        └──── exact result   └──── no crossings        └──── no length growth
 ```
+
+同長関節 lane 正規化では、縦 / 横の中間 segment を単独で評価しない。
+各候補 axis について、その segment が占有する区間と近傍 segment の区間 overlap 長を集計し、
+同じ区間を長く並走する候補ほど強く penalty を与える。これは差分配列 / imos 法の考え方と同じで、
+「どの y 区間または x 区間に Edge が集中しているか」を先に見てから lane を選ぶ。
+
+```text
+axis A:  y  60 ───────── 180     load: 2
+axis B:  y       100 ─── 150     load: 3  <- avoid
+axis C:  y  60 ───────── 180     load: 1  <- prefer
+```
+
+同じ pass 内で選んだ lane は直ちに segment index へ反映する。
+古い index を見たまま全 Edge が同じ空き lane を選ぶ batch 更新は禁止する。
+現行 route が Joint-Node / Node 非干渉を満たしていない場合は、現行 route を無条件の基準として残してはならない。
 
 ### 3.5 Node と Edge の干渉
 

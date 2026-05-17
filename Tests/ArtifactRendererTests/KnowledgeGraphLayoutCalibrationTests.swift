@@ -13,6 +13,7 @@ import KnowledgeGraph
 struct KnowledgeGraphLayoutCalibrationTests {
 
     private static let knows = "http://xmlns.com/foaf/0.1/knows"
+    private static let edgeEdgePortSpacing: CGFloat = 6
 
     private static func iri(_ tail: String) -> NodeIdentifier {
         NodeIdentifier.iri("http://example/\(tail)")
@@ -352,7 +353,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         for (actual, expectedValue) in zip(coordinates, expected) {
             #expect(abs(actual - expectedValue) < 0.5)
         }
-        #expect(abs((coordinates[1] - coordinates[0]) - 8) < 0.5)
+        #expect(abs((coordinates[1] - coordinates[0]) - Self.edgeEdgePortSpacing) < 0.5)
         #expect(abs((coordinates[0] + coordinates[1]) * 0.5 - sideCenterCoordinate(of: hubRect, side: side)) < 0.5)
     }
 
@@ -448,6 +449,12 @@ struct KnowledgeGraphLayoutCalibrationTests {
         for gap in gaps {
             #expect(abs(gap - firstGap) < 0.5)
         }
+
+        let acmeID = CompoundGraph.Card.ID(nodeID: Self.exampleOrgIRI("acme"))
+        let bobID = CompoundGraph.Card.ID(nodeID: Self.exampleOrgIRI("bob"))
+        let aliceAcme = try routedEdge(source: aliceID, target: acmeID, result: result)
+        let aliceBob = try routedEdge(source: aliceID, target: bobID, result: result)
+        #expect(routeDistanceAwayFromSharedEndpointFanout(aliceAcme, aliceBob) >= 13.5)
     }
 
     @Test
@@ -471,7 +478,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
             let expected = expectedCenteredPortCoordinates(rect: hubRect, side: side, count: sidePorts.count)
 
             for (actual, expectedValue) in zip(coordinates, expected) {
-                #expect(abs(actual - expectedValue) < 8)
+                #expect(abs(actual - expectedValue) < Self.edgeEdgePortSpacing)
             }
             guard coordinates.count > 1 else { continue }
             let gaps = zip(coordinates.dropFirst(), coordinates).map { next, previous in
@@ -484,7 +491,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
             for gap in gaps {
                 #expect(abs(gap - firstGap) < 0.75)
             }
-            #expect(abs((coordinates[0] + coordinates[coordinates.count - 1]) * 0.5 - sideCenterCoordinate(of: hubRect, side: side)) < 8)
+            #expect(abs((coordinates[0] + coordinates[coordinates.count - 1]) * 0.5 - sideCenterCoordinate(of: hubRect, side: side)) < Self.edgeEdgePortSpacing)
         }
     }
 
@@ -731,7 +738,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let coordinates = ports.map { portAxisCoordinate($0.point, side: side) }.sorted()
         let center = sideCenterCoordinate(of: sourceRect, side: side)
 
-        #expect(coordinates.contains { abs($0 - center) <= 8.5 })
+        #expect(coordinates.contains { abs($0 - center) <= Self.edgeEdgePortSpacing + 0.5 })
 
         var directRouteCount = 0
         for edge in result.compoundGraph.edges where edge.source == sourceID {
@@ -1627,9 +1634,9 @@ struct KnowledgeGraphLayoutCalibrationTests {
         if safeCount <= 1 {
             step = 0
         } else {
-            let desiredSpan = CGFloat(8) * CGFloat(safeCount - 1)
+            let desiredSpan = Self.edgeEdgePortSpacing * CGFloat(safeCount - 1)
             step = desiredSpan <= availableLength
-                ? 8
+                ? Self.edgeEdgePortSpacing
                 : availableLength / CGFloat(safeCount - 1)
         }
         let center = sideCenterCoordinate(of: rect, side: side)

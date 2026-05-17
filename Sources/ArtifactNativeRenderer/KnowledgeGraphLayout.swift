@@ -104,7 +104,7 @@ struct KnowledgeGraphLayout: Sendable {
     static let defaultIterations = 200
 
     private enum LayoutSpacing {
-        static let edgeEdgePort: CGFloat = 8
+        static let edgeEdgePort: CGFloat = 6
         static let edgeEdgeRoute: CGFloat = 14
         static let nodeNodeHorizontal: CGFloat = 80
         static let nodeNodeVertical: CGFloat = 40
@@ -6731,10 +6731,14 @@ struct KnowledgeGraphLayout: Sendable {
 
     private struct EqualLengthJointLaneScore {
         let clearance: CGFloat
+        let intervalLoad: CGFloat
         let rhythm: CGFloat
         let centerDeviation: CGFloat
 
         func isBetter(than other: EqualLengthJointLaneScore) -> Bool {
+            if abs(intervalLoad - other.intervalLoad) > 0.001 {
+                return intervalLoad < other.intervalLoad
+            }
             if abs(clearance - other.clearance) > 0.001 {
                 return clearance < other.clearance
             }
@@ -6856,8 +6860,6 @@ struct KnowledgeGraphLayout: Sendable {
     ) -> [EdgeIdentifier: EdgeRoute] {
         var normalized = routes
         for _ in 0..<4 {
-            let routeSegmentIndex = Self.routeSegmentIndex(edges: edges, routes: normalized)
-            var pendingUpdates: [EdgeIdentifier: EdgeRoute] = [:]
             var changed = false
             for edge in edges where edge.source != edge.target {
                 guard
@@ -6869,13 +6871,29 @@ struct KnowledgeGraphLayout: Sendable {
                 guard let jointRoute = equalLengthJointRoute(points) else { continue }
 
                 let excluded = Set([sourceIndex, targetIndex])
-                var bestPoints = points
-                var bestScore = equalLengthJointLaneScore(
-                    points,
-                    edge: edge,
-                    jointRoute: jointRoute,
-                    routeSegmentIndex: routeSegmentIndex
+                let routeSegmentIndex = Self.routeSegmentIndex(
+                    edges: edges,
+                    routes: normalized,
+                    excluding: [edge.id]
                 )
+                var bestPoints = points
+                let currentIsValid = routeClearsNodes(
+                    points,
+                    nodeIndex: nodeIndex,
+                    excluding: excluded
+                ) && routeJointsClearEndpointNodes(
+                    points,
+                    cardRects: cardRects,
+                    endpointIndices: excluded
+                )
+                var bestScore = currentIsValid
+                    ? equalLengthJointLaneScore(
+                        points,
+                        edge: edge,
+                        jointRoute: jointRoute,
+                        routeSegmentIndex: routeSegmentIndex
+                    )
+                    : nil
 
                 for axis in equalLengthJointAxisCandidates(
                     jointRoute: jointRoute,
@@ -6908,19 +6926,16 @@ struct KnowledgeGraphLayout: Sendable {
                         jointRoute: jointRoute,
                         routeSegmentIndex: routeSegmentIndex
                     )
-                    if score.isBetter(than: bestScore) {
+                    if bestScore.map({ score.isBetter(than: $0) }) ?? true {
                         bestScore = score
                         bestPoints = candidate
                     }
                 }
 
-                if routePointDelta(bestPoints, points) > 0.5 {
-                    pendingUpdates[edge.id] = edgeRoute(points: bestPoints)
+                if !currentIsValid || routePointDelta(bestPoints, points) > 0.5 {
+                    normalized[edge.id] = edgeRoute(points: bestPoints)
                     changed = true
                 }
-            }
-            for (edgeID, route) in pendingUpdates {
-                normalized[edgeID] = route
             }
             if !changed {
                 break
@@ -7093,6 +7108,11 @@ struct KnowledgeGraphLayout: Sendable {
                 currentEdge: edge,
                 routeSegmentIndex: routeSegmentIndex
             ),
+            intervalLoad: equalLengthJointIntervalLoad(
+                points,
+                edge: edge,
+                routeSegmentIndex: routeSegmentIndex
+            ),
             rhythm: edgeRouteRhythmScore(
                 points,
                 currentEdge: edge,
@@ -7100,6 +7120,58 @@ struct KnowledgeGraphLayout: Sendable {
             ),
             centerDeviation: abs(axis - jointRoute.centerAxis)
         )
+    }
+
+    private static func equalLengthJointIntervalLoad(
+        _ points: [CGPoint],
+        edge: CompoundGraph.CardEdge,
+        routeSegmentIndex: RouteSegmentIndex
+    ) -> CGFloat {
+        let simplified = simplifyRoutePoints(points)
+        guard
+            simplified.count == 4,
+            let orientation = routeSegmentOrientation(start: simplified[1], end: simplified[2])
+        else { return 0 }
+
+        let jointStart = simplified[1]
+        let jointEnd = simplified[2]
+        let jointAxis = routeSegmentAxis(start: jointStart, end: jointEnd, orientation: orientation)
+        var load: CGFloat = 0
+        var visited: Set<RouteSegmentKey> = []
+        routeSegmentIndex.forEachSegmentNear(
+            start: jointStart,
+            end: jointEnd,
+            padding: LayoutSpacing.edgeEdgeRoute * 4
+        ) { other in
+            guard other.edge.id != edge.id else { return true }
+            guard visited.insert(other.key).inserted else { return true }
+            guard routeSegmentOrientation(start: other.start, end: other.end) == orientation else {
+                return true
+            }
+            let overlap = routeSegmentOverlapLength(
+                jointStart,
+                jointEnd,
+                other.start,
+                other.end,
+                orientation: orientation
+            )
+            guard overlap > 0.5 else { return true }
+
+            let otherAxis = routeSegmentAxis(start: other.start, end: other.end, orientation: orientation)
+            let distance = abs(jointAxis - otherAxis)
+            let lane = max(1, Int((max(distance, 0.5) / LayoutSpacing.edgeEdgeRoute).rounded()))
+            let idealDistance = CGFloat(lane) * LayoutSpacing.edgeEdgeRoute
+            let rhythmPenalty = abs(distance - idealDistance)
+            let compressionPenalty = max(0, LayoutSpacing.edgeEdgeRoute - distance)
+            let crossingPenalty: CGFloat = distance < 0.5 ? LayoutSpacing.edgeEdgeRoute * 4 : 0
+            load += overlap * (
+                compressionPenalty * 8
+                    + rhythmPenalty
+                    + crossingPenalty
+            )
+            return true
+        }
+        return load
     }
 
     private static func routePointDelta(_ lhs: [CGPoint], _ rhs: [CGPoint]) -> CGFloat {
@@ -9101,6 +9173,32 @@ struct KnowledgeGraphLayout: Sendable {
             rhsMax = max(rhsStart.x, rhsEnd.x)
         }
         return min(lhsMax, rhsMax) - max(lhsMin, rhsMin) > 0.5
+    }
+
+    private static func routeSegmentOverlapLength(
+        _ lhsStart: CGPoint,
+        _ lhsEnd: CGPoint,
+        _ rhsStart: CGPoint,
+        _ rhsEnd: CGPoint,
+        orientation: EqualLengthJointOrientation
+    ) -> CGFloat {
+        let lhsMin: CGFloat
+        let lhsMax: CGFloat
+        let rhsMin: CGFloat
+        let rhsMax: CGFloat
+        switch orientation {
+        case .vertical:
+            lhsMin = min(lhsStart.y, lhsEnd.y)
+            lhsMax = max(lhsStart.y, lhsEnd.y)
+            rhsMin = min(rhsStart.y, rhsEnd.y)
+            rhsMax = max(rhsStart.y, rhsEnd.y)
+        case .horizontal:
+            lhsMin = min(lhsStart.x, lhsEnd.x)
+            lhsMax = max(lhsStart.x, lhsEnd.x)
+            rhsMin = min(rhsStart.x, rhsEnd.x)
+            rhsMax = max(rhsStart.x, rhsEnd.x)
+        }
+        return max(0, min(lhsMax, rhsMax) - max(lhsMin, rhsMin))
     }
 
     private static func sharedEndpoints(
