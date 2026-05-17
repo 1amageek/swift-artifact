@@ -226,6 +226,7 @@ route 長が同等の場合だけ、Edge 同士の交差数が少ない割り当
 route 候補は近傍 Node / 近傍 segment だけを検査対象にするが、判定結果は全探索と同じでなければならない。
 index は探索高速化のための実装詳細であり、上記の最短 route / 非干渉 / Edge-Edge 距離制約を弱めてはならない。
 index は pass / iteration ごとに再利用し、Edge 単位の全 segment index 再構築や全ペア再評価を避ける。
+hot path の近傍判定は必要な時だけ callback 走査し、route / node / segment の中間配列を作ってから再走査してはならない。
 障害物迂回探索は route 長、角数の順で優先される Dijkstra 探索として扱い、未訪問候補の全走査ではなく優先度 queue で最短候補から展開する。
 
 探索は以下の順序で構成する。

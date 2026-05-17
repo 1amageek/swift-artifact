@@ -5706,20 +5706,45 @@ struct KnowledgeGraphLayout: Sendable {
 
         func query(_ rect: CGRect) -> [SpatialEntry<Item>] {
             guard !rect.isNull, !rect.isInfinite else { return [] }
+            var result: [SpatialEntry<Item>] = []
+            forEach(in: rect) { entry in
+                result.append(entry)
+                return true
+            }
+            return result
+        }
+
+        func contains(in rect: CGRect, where matches: (Item) -> Bool) -> Bool {
+            var found = false
+            forEach(in: rect) { entry in
+                if matches(entry.item) {
+                    found = true
+                    return false
+                }
+                return true
+            }
+            return found
+        }
+
+        func forEach(in rect: CGRect, _ visit: (SpatialEntry<Item>) -> Bool) {
+            guard !rect.isNull, !rect.isInfinite else { return }
             let normalized = rect.standardized
             var seen: Set<Int> = []
-            var result: [SpatialEntry<Item>] = []
+            var shouldContinue = true
             forEachCellCovered(by: normalized) { cell in
+                guard shouldContinue else { return }
                 if let indices = cells[cell] {
                     for index in indices where seen.insert(index).inserted {
                         let entry = entries[index]
                         if rectsOverlapOrTouch(entry.rect, normalized) {
-                            result.append(entry)
+                            shouldContinue = visit(entry)
+                            if !shouldContinue {
+                                return
+                            }
                         }
                     }
                 }
             }
-            return result
         }
 
         private func forEachCellCovered(
@@ -5767,8 +5792,15 @@ struct KnowledgeGraphLayout: Sendable {
             self.index = index
         }
 
-        func nodesNearSegment(start: CGPoint, end: CGPoint) -> [IndexedNodeRect] {
-            index.query(segmentBounds(start, end)).map(\.item)
+        func segmentIntersectsNode(
+            start: CGPoint,
+            end: CGPoint,
+            excluding excludedIndices: Set<Int>
+        ) -> Bool {
+            index.contains(in: segmentBounds(start, end)) { node in
+                !excludedIndices.contains(node.index)
+                    && KnowledgeGraphLayout.segmentIntersectsRect(start, end, node.rect)
+            }
         }
 
         func nodes(in rect: CGRect) -> [IndexedNodeRect] {
@@ -5840,9 +5872,16 @@ struct KnowledgeGraphLayout: Sendable {
             }
         }
 
-        func segmentsNear(start: CGPoint, end: CGPoint, padding: CGFloat) -> [IndexedRouteSegment] {
+        func forEachSegmentNear(
+            start: CGPoint,
+            end: CGPoint,
+            padding: CGFloat,
+            _ visit: (IndexedRouteSegment) -> Bool
+        ) {
             let queryRect = segmentBounds(start, end).insetBy(dx: -padding, dy: -padding)
-            return index.query(queryRect).map(\.item)
+            index.forEach(in: queryRect) { entry in
+                visit(entry.item)
+            }
         }
 
         func segments(in rect: CGRect) -> [IndexedRouteSegment] {
@@ -6971,18 +7010,19 @@ struct KnowledgeGraphLayout: Sendable {
                     edgeKey: edgeSortKey(routedEdge.edge.id),
                     segmentIndex: offset
                 )
-                for other in routeSegmentIndex.segmentsNear(
+                routeSegmentIndex.forEachSegmentNear(
                     start: start,
                     end: end,
                     padding: LayoutSpacing.edgeEdgeRoute
-                ) where other.edge.id != routedEdge.edge.id {
+                ) { other in
+                    guard other.edge.id != routedEdge.edge.id else { return true }
                     if let focusEdgeIDs,
                        !focusEdgeIDs.contains(routedEdge.edge.id),
                        !focusEdgeIDs.contains(other.edge.id) {
-                        continue
+                        return true
                     }
                     let pairKey = RouteSegmentPairKey(currentKey, other.key)
-                    guard visited.insert(pairKey).inserted else { continue }
+                    guard visited.insert(pairKey).inserted else { return true }
                     let pair = routeSegmentConflictScore(
                         lhsEdge: routedEdge.edge,
                         lhsPoints: routedEdge.points,
@@ -6996,6 +7036,7 @@ struct KnowledgeGraphLayout: Sendable {
                         edgeIDs.insert(routedEdge.edge.id)
                         edgeIDs.insert(other.edge.id)
                     }
+                    return true
                 }
             }
         }
@@ -7842,11 +7883,6 @@ struct KnowledgeGraphLayout: Sendable {
         case vertical
     }
 
-    private struct RouteSearchState: Hashable {
-        let pointIndex: Int
-        let axis: RouteAxis?
-    }
-
     private struct RouteSearchCost {
         let length: CGFloat
         let corners: Int
@@ -7864,7 +7900,7 @@ struct KnowledgeGraphLayout: Sendable {
     }
 
     private struct RouteSearchQueueEntry {
-        let state: RouteSearchState
+        let stateID: Int
         let cost: RouteSearchCost
 
         func isBetter(than other: RouteSearchQueueEntry) -> Bool {
@@ -7874,21 +7910,7 @@ struct KnowledgeGraphLayout: Sendable {
             if other.cost.isBetter(than: cost) {
                 return false
             }
-            if state.pointIndex != other.state.pointIndex {
-                return state.pointIndex < other.state.pointIndex
-            }
-            return axisOrder(state.axis) < axisOrder(other.state.axis)
-        }
-
-        private func axisOrder(_ axis: RouteAxis?) -> Int {
-            switch axis {
-            case nil:
-                return 0
-            case .horizontal:
-                return 1
-            case .vertical:
-                return 2
-            }
+            return stateID < other.stateID
         }
     }
 
@@ -7936,6 +7958,32 @@ struct KnowledgeGraphLayout: Sendable {
                 parent = best
             }
         }
+    }
+
+    private static func routeSearchAxisIndex(_ axis: RouteAxis?) -> Int {
+        switch axis {
+        case nil:
+            return 0
+        case .horizontal:
+            return 1
+        case .vertical:
+            return 2
+        }
+    }
+
+    private static func routeSearchAxis(fromStateID stateID: Int) -> RouteAxis? {
+        switch stateID % 3 {
+        case 1:
+            return .horizontal
+        case 2:
+            return .vertical
+        default:
+            return nil
+        }
+    }
+
+    private static func routeSearchStateID(pointIndex: Int, axis: RouteAxis?) -> Int {
+        pointIndex * 3 + routeSearchAxisIndex(axis)
     }
 
     private static func obstacleAvoidingOrthogonalRoute(
@@ -7996,46 +8044,48 @@ struct KnowledgeGraphLayout: Sendable {
 
         let startIndex = pointIndex(x: startX, y: startY)
         let endIndex = pointIndex(x: endX, y: endY)
-        let startState = RouteSearchState(pointIndex: startIndex, axis: nil)
+        let stateCount = gridPoints.count * 3
+        let startStateID = routeSearchStateID(pointIndex: startIndex, axis: nil)
         let startCost = RouteSearchCost(length: 0, corners: 0)
-        var distances: [RouteSearchState: RouteSearchCost] = [
-            startState: startCost
-        ]
-        var previous: [RouteSearchState: RouteSearchState] = [:]
-        var visited: Set<RouteSearchState> = []
+        var distances = Array<RouteSearchCost?>(repeating: nil, count: stateCount)
+        var previous = Array<Int?>(repeating: nil, count: stateCount)
+        var visited = Array(repeating: false, count: stateCount)
+        distances[startStateID] = startCost
         var queue = RouteSearchPriorityQueue()
-        queue.push(RouteSearchQueueEntry(state: startState, cost: startCost))
+        queue.push(RouteSearchQueueEntry(stateID: startStateID, cost: startCost))
 
         while let entry = queue.popMin() {
-            let current = entry.state
-            guard !visited.contains(current) else { continue }
-            guard let currentDistance = distances[current] else { continue }
+            let currentID = entry.stateID
+            guard !visited[currentID] else { continue }
+            guard let currentDistance = distances[currentID] else { continue }
             guard !currentDistance.isBetter(than: entry.cost) else { continue }
-            if current.pointIndex == endIndex {
+            let currentPointIndex = currentID / 3
+            if currentPointIndex == endIndex {
                 return reconstructRoute(
-                    endingAt: current,
+                    endingAt: currentID,
                     previous: previous,
                     pointForIndex: { gridPoints[$0] }
                 )
             }
-            visited.insert(current)
+            visited[currentID] = true
 
-            let currentPoint = gridPoints[current.pointIndex]
-            let x = current.pointIndex % width
-            let y = current.pointIndex / width
+            let currentPoint = gridPoints[currentPointIndex]
+            let currentAxis = routeSearchAxis(fromStateID: currentID)
+            let x = currentPointIndex % width
+            let y = currentPointIndex / width
             func visit(neighborIndex: Int, axis: RouteAxis) {
                 let neighborPoint = gridPoints[neighborIndex]
                 guard segmentClearsObstacles(currentPoint, neighborPoint, obstacles: obstacles) else {
                     return
                 }
-                let turns = current.axis == nil || current.axis == axis ? 0 : 1
+                let turns = currentAxis == nil || currentAxis == axis ? 0 : 1
                 let stepLength = hypot(neighborPoint.x - currentPoint.x, neighborPoint.y - currentPoint.y)
-                let neighborState = RouteSearchState(pointIndex: neighborIndex, axis: axis)
+                let neighborStateID = routeSearchStateID(pointIndex: neighborIndex, axis: axis)
                 let nextCost = currentDistance.adding(length: stepLength, turns: turns)
-                if distances[neighborState].map({ nextCost.isBetter(than: $0) }) ?? true {
-                    distances[neighborState] = nextCost
-                    previous[neighborState] = current
-                    queue.push(RouteSearchQueueEntry(state: neighborState, cost: nextCost))
+                if distances[neighborStateID].map({ nextCost.isBetter(than: $0) }) ?? true {
+                    distances[neighborStateID] = nextCost
+                    previous[neighborStateID] = currentID
+                    queue.push(RouteSearchQueueEntry(stateID: neighborStateID, cost: nextCost))
                 }
             }
 
@@ -8060,17 +8110,17 @@ struct KnowledgeGraphLayout: Sendable {
     }
 
     private static func reconstructRoute(
-        endingAt end: RouteSearchState,
-        previous: [RouteSearchState: RouteSearchState],
+        endingAt end: Int,
+        previous: [Int?],
         pointForIndex: (Int) -> CGPoint
     ) -> [CGPoint] {
-        var states: [RouteSearchState] = [end]
+        var states: [Int] = [end]
         var current = end
         while let prior = previous[current] {
             states.append(prior)
             current = prior
         }
-        return simplifyRoutePoints(states.reversed().map { pointForIndex($0.pointIndex) })
+        return simplifyRoutePoints(states.reversed().map { pointForIndex($0 / 3) })
     }
 
     private static func segmentClearsObstacles(
@@ -8293,15 +8343,12 @@ struct KnowledgeGraphLayout: Sendable {
         for offset in 1..<points.count {
             let start = points[offset - 1]
             let end = points[offset]
-            for node in nodeIndex.nodesNearSegment(start: start, end: end)
-                where !excludedIndices.contains(node.index) {
-                if segmentIntersectsRect(
-                    start,
-                    end,
-                    node.rect
-                ) {
-                    return false
-                }
+            if nodeIndex.segmentIntersectsNode(
+                start: start,
+                end: end,
+                excluding: excludedIndices
+            ) {
+                return false
             }
         }
         return true
@@ -8348,16 +8395,17 @@ struct KnowledgeGraphLayout: Sendable {
         for currentOffset in 1..<points.count {
             let currentStart = points[currentOffset - 1]
             let currentEnd = points[currentOffset]
-            for other in routeSegmentIndex.segmentsNear(
+            routeSegmentIndex.forEachSegmentNear(
                 start: currentStart,
                 end: currentEnd,
                 padding: LayoutSpacing.edgeEdgeRoute
-            ) where other.edge.id != currentEdge.id {
+            ) { other in
+                guard other.edge.id != currentEdge.id else { return true }
                 let pairKey = RouteSegmentPairKey(
                     RouteSegmentKey(edgeKey: edgeSortKey(currentEdge.id), segmentIndex: currentOffset),
                     other.key
                 )
-                guard visited.insert(pairKey).inserted else { continue }
+                guard visited.insert(pairKey).inserted else { return true }
                 score += routeSegmentConflictScore(
                     lhsEdge: currentEdge,
                     lhsPoints: points,
@@ -8365,6 +8413,7 @@ struct KnowledgeGraphLayout: Sendable {
                     lhsEnd: currentEnd,
                     rhs: other
                 ).clearance
+                return true
             }
         }
         return score
@@ -8381,16 +8430,17 @@ struct KnowledgeGraphLayout: Sendable {
         for currentOffset in 1..<points.count {
             let currentStart = points[currentOffset - 1]
             let currentEnd = points[currentOffset]
-            for other in routeSegmentIndex.segmentsNear(
+            routeSegmentIndex.forEachSegmentNear(
                 start: currentStart,
                 end: currentEnd,
                 padding: LayoutSpacing.edgeEdgeRoute * 4
-            ) where other.edge.id != currentEdge.id {
+            ) { other in
+                guard other.edge.id != currentEdge.id else { return true }
                 let pairKey = RouteSegmentPairKey(
                     RouteSegmentKey(edgeKey: edgeSortKey(currentEdge.id), segmentIndex: currentOffset),
                     other.key
                 )
-                guard visited.insert(pairKey).inserted else { continue }
+                guard visited.insert(pairKey).inserted else { return true }
                 score += routeSegmentRhythmScore(
                     lhsEdge: currentEdge,
                     lhsPoints: points,
@@ -8398,6 +8448,7 @@ struct KnowledgeGraphLayout: Sendable {
                     lhsEnd: currentEnd,
                     rhs: other
                 )
+                return true
             }
         }
         return score
