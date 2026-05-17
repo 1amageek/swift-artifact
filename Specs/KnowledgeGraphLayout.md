@@ -225,6 +225,7 @@ route 長が同等の場合だけ、Edge 同士の交差数が少ない割り当
 衝突判定は Node rect / Edge segment の空間 index を通して行う。
 route 候補は近傍 Node / 近傍 segment だけを検査対象にするが、判定結果は全探索と同じでなければならない。
 index は探索高速化のための実装詳細であり、上記の最短 route / 非干渉 / Edge-Edge 距離制約を弱めてはならない。
+index は pass / iteration ごとに再利用し、Edge 単位の全 segment index 再構築や全ペア再評価を避ける。
 
 探索は以下の順序で構成する。
 
