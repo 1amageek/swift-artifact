@@ -56,6 +56,97 @@ struct KnowledgeGraphLayoutCalibrationTests {
         #expect(ratio < 0.85)
     }
 
+    @Test
+    func nestedGroupBoundingBoxesKeepGroupGroupPadding() throws {
+        let nodes = (0..<3).map { Self.iri("nested-\($0)") }
+        let graph = KnowledgeGraph(
+            nodes: nodes.map { Node(id: $0) },
+            edges: [
+                Self.edge(from: nodes[0], to: nodes[1]),
+                Self.edge(from: nodes[1], to: nodes[2])
+            ]
+        )
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            groupingStrategy: .explicit(groups: [
+                .init(id: "outer", label: "Outer", memberNodeIDs: nodes),
+                .init(id: "inner", label: "Inner", memberNodeIDs: Array(nodes.prefix(2)))
+            ])
+        )
+        let outer = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:outer")])
+        let inner = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:inner")])
+
+        let minimumSideAndBottomPadding = min(
+            inner.minX - outer.minX,
+            outer.maxX - inner.maxX,
+            outer.maxY - inner.maxY
+        )
+        let groupHeaderHeight = CardSizing.headerHeight
+        let headerBottomToNestedGroupPadding = inner.minY - (outer.minY + groupHeaderHeight)
+        #expect(minimumSideAndBottomPadding >= 14 - 0.5)
+        #expect(headerBottomToNestedGroupPadding >= 14 - 0.5)
+    }
+
+    @Test
+    func directNestedSiblingGroupsAlignToParentHeaderTop() throws {
+        let leftNodes = [Self.iri("nested-left-a"), Self.iri("nested-left-b")]
+        let rightNodes = [Self.iri("nested-right-a"), Self.iri("nested-right-b")]
+        let nodes = leftNodes + rightNodes
+        let graph = KnowledgeGraph(
+            nodes: nodes.map { Node(id: $0) },
+            edges: [
+                Self.edge(from: leftNodes[0], to: leftNodes[1]),
+                Self.edge(from: rightNodes[0], to: rightNodes[1])
+            ]
+        )
+        let initial: [NodeIdentifier: CGPoint] = [
+            leftNodes[0]: CGPoint(x: 0, y: 0),
+            leftNodes[1]: CGPoint(x: 180, y: 0),
+            rightNodes[0]: CGPoint(x: 0, y: 260),
+            rightNodes[1]: CGPoint(x: 180, y: 260)
+        ]
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: initial,
+            groupingStrategy: .explicit(groups: [
+                .init(id: "outer", label: "Outer", memberNodeIDs: nodes),
+                .init(id: "left", label: "Left", memberNodeIDs: leftNodes),
+                .init(id: "right", label: "Right", memberNodeIDs: rightNodes)
+            ])
+        )
+
+        let outer = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:outer")])
+        let left = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:left")])
+        let right = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:right")])
+        let nestedTargetTop = outer.minY + CardSizing.headerHeight + 14
+
+        #expect(abs(left.minY - nestedTargetTop) < 1.5)
+        #expect(abs(right.minY - nestedTargetTop) < 1.5)
+        #expect(abs(left.minY - right.minY) < 1.5)
+    }
+
+    @Test
+    func groupBoundingBoxReservesHeaderAboveMembers() throws {
+        let node = Self.iri("group-header-member")
+        let graph = KnowledgeGraph(nodes: [Node(id: node)], edges: [])
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            groupingStrategy: .explicit(groups: [
+                .init(id: "header", label: "Header", memberNodeIDs: [node])
+            ])
+        )
+
+        let groupBox = try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:header")])
+        let cardBox = try cardRect(of: CompoundGraph.Card.ID(nodeID: node), in: result)
+        let topGap = cardBox.minY - groupBox.minY
+        let sideGap = min(cardBox.minX - groupBox.minX, groupBox.maxX - cardBox.maxX)
+        let bottomGap = groupBox.maxY - cardBox.maxY
+
+        #expect(topGap >= 52 - 0.5)
+        #expect(sideGap >= 24 - 0.5)
+        #expect(bottomGap >= 24 - 0.5)
+    }
+
     // MARK: - D3: disjoint-group tightness
 
     @Test

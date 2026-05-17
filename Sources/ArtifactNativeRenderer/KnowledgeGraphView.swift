@@ -46,6 +46,7 @@ struct KnowledgeGraphView: View {
     /// `graphIdentity`. Reset whenever the underlying graph changes so a
     /// fresh graph re-fits but ongoing manual zoom is preserved.
     @State private var didApplyInitialFit: Bool = false
+    @State private var hoveredCardID: CompoundGraph.Card.ID?
 
     private let minZoom: CGFloat = 0.2
     private let maxZoom: CGFloat = 3.0
@@ -59,7 +60,11 @@ struct KnowledgeGraphView: View {
     private let edgeLabelGuideInset: CGFloat = 2
     private let cullingMargin: CGFloat = 120
     private let zoomStep: CGFloat = 1.25
-    private let groupLabelMeasurementWidth: CGFloat = 2048
+    private let groupLabelMaximumCharacters = 48
+    private let nodeDetailPopupWidth: CGFloat = 320
+    private let nodeDetailPopupEstimatedHeight: CGFloat = 220
+    private let nodeDetailPopupGap: CGFloat = 10
+    private let nodeDetailPopupViewportInset: CGFloat = 12
 
     /// Transient state mirrored from `MagnifyGesture` via `@GestureState` so
     /// the in-flight pinch can be replayed against `viewportAtMagnifyStart`
@@ -173,15 +178,28 @@ struct KnowledgeGraphView: View {
             onScroll: { delta, _ in
                 committedViewport.offset.x += delta.width
                 committedViewport.offset.y += delta.height
+                hoveredCardID = nil
             },
             onMagnify: { magnification, location in
                 let target = clamp(committedViewport.zoom * (1 + magnification))
                 committedViewport = committedViewport.zoomed(to: target, anchor: location)
+                hoveredCardID = nil
             }
         ) {
             canvas
         }
         .contentShape(Rectangle())
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let location):
+                hoveredCardID = cardID(at: location, layout: layout, viewport: effectiveViewport)
+            case .ended:
+                hoveredCardID = nil
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            hoveredNodeDetailPopup(layout: layout, theme: theme)
+        }
         .gesture(panGesture)
         #if !os(macOS)
         .simultaneousGesture(magnifyGesture)
@@ -409,10 +427,10 @@ struct KnowledgeGraphView: View {
 
     // MARK: - Drawing — groups
 
-    /// Draw the rounded-rect background for each group plus its label. The
-    /// fill uses `GroupStyle.opacity` so two overlapping groups produce a
-    /// darker intersection automatically (F7). Cards are drawn afterwards by
-    /// `drawCards`, so groups always sit behind their members (F1).
+    /// Draw each group as a rounded outline with an internal header. The fill
+    /// uses `GroupStyle.opacity` so two overlapping groups produce a darker
+    /// intersection automatically (F7). Cards are drawn afterwards by
+    /// `drawCards`, so groups always sit behind their members.
     private func drawGroups(
         layout: KnowledgeGraphLayout.Result,
         renderInfos: [GroupRenderInfo],
@@ -420,14 +438,6 @@ struct KnowledgeGraphView: View {
         visibleRect: CGRect,
         context: inout GraphicsContext
     ) {
-        struct VisibleGroup {
-            let info: GroupRenderInfo
-            let rect: CGRect
-        }
-
-        var visibleGroups: [VisibleGroup] = []
-        visibleGroups.reserveCapacity(renderInfos.count)
-
         for info in renderInfos {
             // computeGroupBoundingBoxes emits a rect for every group in
             // compoundGraph.groups; a missing entry is a pipeline desync.
@@ -446,6 +456,8 @@ struct KnowledgeGraphView: View {
             let style = info.group.style
             let scaledRadius = style.cornerRadius * viewport.zoom
             let rounded = Path(roundedRect: screenRect, cornerRadius: scaledRadius)
+            let headerHeight = CardSizing.headerHeight * viewport.zoom
+            let headerBottomY = min(screenRect.maxY, screenRect.minY + headerHeight)
 
             context.fill(rounded, with: .color(info.fillColor))
 
@@ -470,115 +482,27 @@ struct KnowledgeGraphView: View {
                 )
             }
 
-            visibleGroups.append(VisibleGroup(info: info, rect: screenRect))
+            var separatorPath = Path()
+            separatorPath.move(to: CGPoint(x: screenRect.minX, y: headerBottomY))
+            separatorPath.addLine(to: CGPoint(x: screenRect.maxX, y: headerBottomY))
+            context.stroke(separatorPath, with: .color(info.strokeColor), lineWidth: 0.8)
+
+            var labelContext = context
+            labelContext.translateBy(x: screenRect.minX, y: screenRect.minY)
+            labelContext.scaleBy(x: viewport.zoom, y: viewport.zoom)
+            let labelClipRect = CGRect(
+                x: CardSizing.horizontalPad,
+                y: 0,
+                width: max(1, bbox.width - CardSizing.horizontalPad * 2),
+                height: CardSizing.headerHeight
+            )
+            labelContext.clip(to: Path(labelClipRect))
+            labelContext.draw(
+                context.resolve(info.labelText),
+                at: CGPoint(x: CardSizing.horizontalPad, y: CardSizing.headerHeight / 2),
+                anchor: .leading
+            )
         }
-
-        var occupiedLabelRects: [CGRect] = []
-        occupiedLabelRects.reserveCapacity(visibleGroups.count)
-        for item in visibleGroups {
-            if let labelRect = drawGroupLabel(
-                info: item.info,
-                bbox: item.rect,
-                occupiedLabelRects: occupiedLabelRects,
-                context: &context
-            ) {
-                occupiedLabelRects.append(labelRect.insetBy(dx: -4, dy: -3))
-            }
-        }
-    }
-
-    /// Place the group label outside the bbox while avoiding other group
-    /// labels and group rectangles. The pill background keeps labels readable
-    /// when several translucent group boxes overlap.
-    @discardableResult
-    private func drawGroupLabel(
-        info: GroupRenderInfo,
-        bbox: CGRect,
-        occupiedLabelRects: [CGRect],
-        context: inout GraphicsContext
-    ) -> CGRect? {
-        let resolved = context.resolve(info.labelText)
-        let textSize = resolved.measure(
-            in: CGSize(width: groupLabelMeasurementWidth, height: 40)
-        )
-        let hPad: CGFloat = 8
-        let vPad: CGFloat = 3
-        let labelSize = CGSize(
-            width: ceil(textSize.width + hPad * 2),
-            height: ceil(textSize.height + vPad * 2)
-        )
-        let labelRect = groupLabelRect(
-            bbox: bbox,
-            labelSize: labelSize,
-            occupiedLabelRects: occupiedLabelRects
-        )
-        let labelPath = Path(roundedRect: labelRect, cornerRadius: 5)
-        context.fill(labelPath, with: .color(info.labelFillColor))
-        context.stroke(
-            labelPath,
-            with: .color(info.labelStrokeColor),
-            lineWidth: 1
-        )
-        context.draw(
-            resolved,
-            at: CGPoint(x: labelRect.midX, y: labelRect.midY),
-            anchor: .center
-        )
-        return labelRect
-    }
-
-    private func groupLabelRect(
-        bbox: CGRect,
-        labelSize: CGSize,
-        occupiedLabelRects: [CGRect]
-    ) -> CGRect {
-        let gap: CGFloat = 5
-        let verticalStep = labelSize.height + 4
-        var candidates: [CGRect] = []
-        candidates.reserveCapacity(22)
-
-        func appendStack(origin: CGPoint, direction: CGFloat, count: Int) {
-            for offset in 0..<count {
-                let stackedOrigin = CGPoint(
-                    x: origin.x,
-                    y: origin.y + direction * verticalStep * CGFloat(offset)
-                )
-                candidates.append(CGRect(origin: stackedOrigin, size: labelSize))
-            }
-        }
-
-        let topLeft = CGPoint(x: bbox.minX, y: bbox.minY - labelSize.height - gap)
-        let topRight = CGPoint(x: bbox.maxX - labelSize.width, y: bbox.minY - labelSize.height - gap)
-        appendStack(origin: topLeft, direction: -1, count: 6)
-        appendStack(origin: topRight, direction: -1, count: 4)
-        candidates.append(contentsOf: [
-            CGPoint(x: bbox.minX, y: bbox.maxY + gap),
-            CGPoint(x: bbox.maxX - labelSize.width, y: bbox.maxY + gap),
-            CGPoint(x: bbox.minX - labelSize.width - gap, y: bbox.minY),
-            CGPoint(x: bbox.maxX + gap, y: bbox.minY)
-        ].map { origin in
-            CGRect(origin: origin, size: labelSize)
-        })
-        appendStack(origin: topLeft, direction: 1, count: 6)
-
-        for candidate in candidates where !labelCollidesOtherLabels(
-            candidate,
-            occupiedLabelRects: occupiedLabelRects
-        ) {
-            return candidate
-        }
-
-        return candidates.first ?? CGRect(origin: topLeft, size: labelSize)
-    }
-
-    private func labelCollidesOtherLabels(
-        _ rect: CGRect,
-        occupiedLabelRects: [CGRect]
-    ) -> Bool {
-        for occupied in occupiedLabelRects where rect.intersects(occupied) {
-            return true
-        }
-        return false
     }
 
     /// Per-group SwiftUI values that depend only on the layout snapshot
@@ -590,8 +514,6 @@ struct KnowledgeGraphView: View {
         let labelText: Text
         let fillColor: Color
         let strokeColor: Color
-        let labelFillColor: Color
-        let labelStrokeColor: Color
     }
 
     private func makeGroupRenderInfos(
@@ -606,15 +528,23 @@ struct KnowledgeGraphView: View {
             )
             return GroupRenderInfo(
                 group: group,
-                labelText: Text(group.label)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(baseColor.opacity(min(style.opacity * 5.0, 0.95))),
+                labelText: Text(compactGroupLabel(group.label))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(baseColor.opacity(min(max(style.opacity * 6.0, 0.72), 0.98))),
                 fillColor: baseColor.opacity(style.opacity),
-                strokeColor: baseColor.opacity(min(style.opacity * 3.0, 0.9)),
-                labelFillColor: theme.groupLabelFill,
-                labelStrokeColor: baseColor.opacity(min(style.opacity * 4.0, 0.9))
+                strokeColor: baseColor.opacity(min(style.opacity * 3.0, 0.9))
             )
         }
+    }
+
+    private func compactGroupLabel(_ label: String) -> String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > groupLabelMaximumCharacters else {
+            return trimmed
+        }
+        let prefix = trimmed.prefix(32)
+        let suffix = trimmed.suffix(12)
+        return "\(prefix)...\(suffix)"
     }
 
     // MARK: - Drawing — cards
@@ -641,16 +571,84 @@ struct KnowledgeGraphView: View {
         }
     }
 
+    // MARK: - Hover detail popup
+
+    @ViewBuilder
+    private func hoveredNodeDetailPopup(
+        layout: KnowledgeGraphLayout.Result,
+        theme: KnowledgeGraphVisualTheme
+    ) -> some View {
+        if
+            let hoveredCardID,
+            let card = layout.compoundGraph.cardByID[hoveredCardID],
+            let origin = popupOrigin(for: hoveredCardID, layout: layout, viewport: effectiveViewport)
+        {
+            KnowledgeGraphNodeDetailPopup(card: card, theme: theme)
+                .frame(width: nodeDetailPopupWidth, alignment: .topLeading)
+                .offset(x: origin.x, y: origin.y)
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func cardID(
+        at screenPoint: CGPoint,
+        layout: KnowledgeGraphLayout.Result,
+        viewport: KnowledgeGraphViewport
+    ) -> CompoundGraph.Card.ID? {
+        let canvasPoint = viewport.screenToCanvas(screenPoint)
+        for card in layout.compoundGraph.cards.reversed() {
+            guard let origin = layout.cardPositions[card.id] else { continue }
+            let rect = CGRect(origin: origin, size: card.size)
+            if rect.contains(canvasPoint) {
+                return card.id
+            }
+        }
+        return nil
+    }
+
+    private func popupOrigin(
+        for cardID: CompoundGraph.Card.ID,
+        layout: KnowledgeGraphLayout.Result,
+        viewport: KnowledgeGraphViewport
+    ) -> CGPoint? {
+        guard
+            let origin = layout.cardPositions[cardID],
+            let card = layout.compoundGraph.cardByID[cardID]
+        else { return nil }
+        let screenOrigin = viewport.canvasToScreen(origin)
+        let cardRect = CGRect(
+            x: screenOrigin.x,
+            y: screenOrigin.y,
+            width: card.size.width * viewport.zoom,
+            height: card.size.height * viewport.zoom
+        )
+        let rightOriginX = cardRect.maxX + nodeDetailPopupGap
+        let leftOriginX = cardRect.minX - nodeDetailPopupWidth - nodeDetailPopupGap
+        let x = rightOriginX + nodeDetailPopupWidth <= viewportSize.width - nodeDetailPopupViewportInset
+            ? rightOriginX
+            : max(nodeDetailPopupViewportInset, leftOriginX)
+        let preferredY = cardRect.minY
+        let maxY = max(
+            nodeDetailPopupViewportInset,
+            viewportSize.height - nodeDetailPopupEstimatedHeight - nodeDetailPopupViewportInset
+        )
+        let y = min(max(preferredY, nodeDetailPopupViewportInset), maxY)
+        return CGPoint(x: x, y: y)
+    }
+
     // MARK: - Gestures
 
     private var panGesture: some Gesture {
         DragGesture(minimumDistance: 1)
             .updating($liveDragTranslation) { value, state, _ in
                 state = value.translation
+                hoveredCardID = nil
             }
             .onEnded { value in
                 committedViewport.offset.x += value.translation.width
                 committedViewport.offset.y += value.translation.height
+                hoveredCardID = nil
             }
     }
 
@@ -1046,7 +1044,7 @@ private func previewGraph(
 #Preview("explicit — caller-supplied groups with custom labels") {
     // `.explicit` is the only strategy whose membership the caller supplies
     // directly. Two hand-picked groups demonstrate F5 (auto tint by index)
-    // and F8 (label sits above the bbox top-left).
+    // and F8 (label is rendered in the internal group header).
     let graph = explicitFixtureGraph()
     let alice = NodeIdentifier.iri("http://example.org/alice")
     let bob = NodeIdentifier.iri("http://example.org/bob")

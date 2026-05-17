@@ -17,6 +17,7 @@ struct CompoundGraphGroupTests {
     private static let employee = "http://example/Employee"
 
     private static let knows = "http://xmlns.com/foaf/0.1/knows"
+    private static let rdfType = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
     private static func edge(
         from: NodeIdentifier,
@@ -123,6 +124,40 @@ struct CompoundGraphGroupTests {
         #expect(compound.groups.count == 1)
         #expect(compound.groups.first?.label == "Context")
         #expect(compound.groups.first?.members.count == 2)
+    }
+
+    @Test
+    func literalPropertiesAndClassAssertionsDoNotBecomeCardsOrEdges() {
+        let evidence = NodeIdentifier.iri("http://example/Evidence")
+        let verified = NodeIdentifier.literal(value: "Verified")
+        let status = "http://example/epistemicStatus"
+        let supports = "http://example/supports"
+        let graph = KnowledgeGraph(
+            nodes: [
+                Node(id: Self.alice, types: ["http://example/Evidence"]),
+                Node(id: Self.bob, types: ["http://example/Evidence"]),
+                Node(id: evidence),
+                Node(id: verified)
+            ],
+            edges: [
+                Self.edge(from: Self.alice, to: evidence, predicate: Self.rdfType),
+                Self.edge(from: Self.bob, to: evidence, predicate: Self.rdfType),
+                Self.edge(from: Self.alice, to: verified, predicate: status),
+                Self.edge(from: Self.bob, to: verified, predicate: status),
+                Self.edge(from: Self.alice, to: Self.bob, predicate: supports)
+            ]
+        )
+
+        let compound = CompoundGraph.decompose(graph, groupingStrategy: .none)
+        let cardIDs = Set(compound.cards.map(\.id.nodeID))
+
+        #expect(cardIDs == [Self.alice, Self.bob])
+        #expect(compound.edges.count == 1)
+        #expect(compound.edges.first?.predicate == "supports")
+        #expect(compound.cardByID[Self.cardID(Self.alice)]?.attributes.count == 1)
+        #expect(compound.cardByID[Self.cardID(Self.bob)]?.attributes.count == 1)
+        #expect(compound.cardByID[Self.cardID(Self.alice)]?.attributes.first?.value == "Verified")
+        #expect(compound.cardByID[Self.cardID(Self.bob)]?.attributes.first?.value == "Verified")
     }
 
     @Test

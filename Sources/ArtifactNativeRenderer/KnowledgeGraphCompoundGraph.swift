@@ -4,19 +4,11 @@ import KnowledgeGraph
 
 /// Decomposed view of a `KnowledgeGraph` optimised for visual layout.
 ///
-/// A `CompoundGraph` groups every IRI/blank-node subject with its **leaf
-/// literals** into a single "card". A literal is a leaf when exactly one
-/// distinct subject targets it — the foaf:name "Alice" pattern. Folding
-/// leaves into the subject means they are no longer separate layout entities,
-/// which eliminates the "where should the literal go around its parent"
-/// problem entirely: the literal is *inside* the parent.
-///
-/// Literals with multiple distinct subjects (shared literals) remain as
-/// stand-alone cards because they represent a meaningful joining vertex in
-/// the topology.
-///
-/// Edges between cards carry the predicate label and parallel-edge metadata
-/// for the renderer to apply consistent perpendicular offsets.
+/// A `CompoundGraph` renders resource subjects as cards. Literal property
+/// assertions are card attributes, even when multiple subjects share the same
+/// literal value. Class assertions (`rdf:type`) are consumed as node type
+/// metadata and are not rendered as edges to class resources. Only
+/// resource-to-resource relationships remain as visible edges.
 struct CompoundGraph: Sendable {
 
     let cards: [Card]
@@ -114,15 +106,10 @@ extension CompoundGraph {
     ///
     /// Algorithm:
     ///
-    /// 1. Index every literal node by its set of distinct subjects.
-    /// 2. A literal is *leaf* iff its subject set has exactly one element.
-    ///    Such literals are folded into the owning subject's card as
-    ///    `Attribute` rows.
-    /// 3. Every other node becomes a stand-alone card (resource or shared
-    ///    literal).
-    /// 4. Walk `graph.edges` once more, emitting a `CardEdge` for every edge
-    ///    whose target is **not** a leaf literal of its source. Edges that
-    ///    were absorbed as attributes are dropped.
+    /// 1. Fold every literal-valued property assertion into the subject card.
+    /// 2. Fold every class assertion (`rdf:type`) into node type metadata.
+    /// 3. Hide class resources whose only role is to be an `rdf:type` target.
+    /// 4. Emit edges only for remaining resource-to-resource relationships.
     /// 5. Parallel edges (same `(source, target)` pair, multiple predicates)
     ///    are numbered so the renderer can offset them.
     static func decompose(
@@ -135,31 +122,34 @@ extension CompoundGraph {
             uniqueKeysWithValues: graph.nodes.map { ($0.id, $0) }
         )
 
-        // Step 1–2: classify literals as leaf / shared.
-        var subjectsByLiteral: [NodeIdentifier: Set<NodeIdentifier>] = [:]
+        // Step 1: literal property assertions are attributes, never graph
+        // vertices. A shared literal value such as "Verified" should appear
+        // inside each card that asserts it, not as a separate hub node.
+        var literalTargets: Set<NodeIdentifier> = []
         for edge in graph.edges where edge.target.kind == .literal {
-            subjectsByLiteral[edge.target, default: []].insert(edge.source)
-        }
-        var leafLiteralParent: [NodeIdentifier: NodeIdentifier] = [:]
-        leafLiteralParent.reserveCapacity(subjectsByLiteral.count)
-        for (literal, subjects) in subjectsByLiteral where subjects.count == 1 {
-            if let only = subjects.first {
-                leafLiteralParent[literal] = only
-            }
+            literalTargets.insert(edge.target)
         }
 
-        // Group leaf-literal edges by parent so we can fold them as attributes
+        // Group literal edges by parent so we can fold them as attributes
         // in deterministic predicate-order within each card.
-        var leafEdgesByParent: [NodeIdentifier: [Edge]] = [:]
+        var attributeEdgesByParent: [NodeIdentifier: [Edge]] = [:]
         var foldedEdgeIDs: Set<EdgeIdentifier> = []
         for edge in graph.edges {
-            guard edge.target.kind == .literal,
-                  let parent = leafLiteralParent[edge.target],
-                  parent == edge.source else { continue }
-            leafEdgesByParent[parent, default: []].append(edge)
+            guard edge.target.kind == .literal else { continue }
+            attributeEdgesByParent[edge.source, default: []].append(edge)
             foldedEdgeIDs.insert(edge.id)
         }
-        let hiddenMetadataNodes = labelOnlyNamedGraphNodes(in: graph)
+
+        // Step 2: class assertions are node type metadata, not relationship
+        // edges. The parser also stores JSON-LD @type values on Node.types,
+        // so grouping-by-type remains available without drawing a class node.
+        for edge in graph.edges where isClassAssertionPredicate(edge.predicate) {
+            foldedEdgeIDs.insert(edge.id)
+        }
+
+        let hiddenMetadataNodes =
+            labelOnlyNamedGraphNodes(in: graph)
+            .union(classAssertionTargetNodes(in: graph, foldedEdgeIDs: foldedEdgeIDs))
 
         // Step 3: build cards in stable insertion order.
         var cards: [Card] = []
@@ -168,7 +158,7 @@ extension CompoundGraph {
             if hiddenMetadataNodes.contains(node.id) { continue }
             switch node.id.kind {
             case .iri, .blank:
-                let attributes = (leafEdgesByParent[node.id] ?? []).map { edge -> Card.Attribute in
+                let attributes = (attributeEdgesByParent[node.id] ?? []).map { edge -> Card.Attribute in
                     let literalNode = nodeByID[edge.target]
                     let display = shortener.literalDisplay(
                         key: edge.target.key,
@@ -193,7 +183,7 @@ extension CompoundGraph {
                     size: size
                 ))
             case .literal:
-                guard leafLiteralParent[node.id] == nil else { continue }
+                guard !literalTargets.contains(node.id) else { continue }
                 let display = shortener.literalDisplay(key: node.id.key, node: node)
                 let title = display.value
                 let size = CardSizing.size(title: title, attributes: [])
@@ -320,6 +310,54 @@ extension CompoundGraph {
              "https://schema.org/title",
              "http://purl.org/dc/terms/title",
              "http://purl.org/dc/elements/1.1/title":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func classAssertionTargetNodes(
+        in graph: KnowledgeGraph,
+        foldedEdgeIDs: Set<EdgeIdentifier>
+    ) -> Set<NodeIdentifier> {
+        let candidates = Set(graph.edges.compactMap { edge -> NodeIdentifier? in
+            guard isClassAssertionPredicate(edge.predicate) else { return nil }
+            switch edge.target.kind {
+            case .iri, .blank:
+                return edge.target
+            case .literal:
+                return nil
+            }
+        })
+        guard !candidates.isEmpty else { return [] }
+
+        var canHideByNode = Dictionary(uniqueKeysWithValues: candidates.map { ($0, true) })
+        for edge in graph.edges {
+            if candidates.contains(edge.source) {
+                let canHideIncident = foldedEdgeIDs.contains(edge.id)
+                    || (
+                        edge.target.kind == .literal
+                        && isNamedGraphLabelPredicate(edge.predicate)
+                    )
+                if !canHideIncident {
+                    canHideByNode[edge.source] = false
+                }
+            }
+            if candidates.contains(edge.target), !foldedEdgeIDs.contains(edge.id) {
+                canHideByNode[edge.target] = false
+            }
+        }
+        return Set(canHideByNode.compactMap { node, canHide in
+            canHide ? node : nil
+        })
+    }
+
+    private static func isClassAssertionPredicate(_ predicate: String) -> Bool {
+        switch predicate {
+        case "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+             "https://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+             "rdf:type",
+             "a":
             return true
         default:
             return false
