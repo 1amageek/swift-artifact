@@ -5650,6 +5650,175 @@ struct KnowledgeGraphLayout: Sendable {
         let points: [CGPoint]
     }
 
+    private struct SpatialCell: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    private struct SpatialEntry<Item> {
+        let item: Item
+        let rect: CGRect
+    }
+
+    private struct SpatialHashIndex<Item> {
+        private let cellSize: CGFloat
+        private var entries: [SpatialEntry<Item>] = []
+        private var cells: [SpatialCell: [Int]] = [:]
+
+        init(cellSize: CGFloat = 96) {
+            self.cellSize = max(cellSize, 1)
+        }
+
+        mutating func insert(_ item: Item, rect: CGRect) {
+            guard !rect.isNull, !rect.isInfinite else { return }
+            let entryIndex = entries.count
+            let normalized = rect.standardized
+            entries.append(SpatialEntry(item: item, rect: normalized))
+            for cell in cellsCovered(by: normalized) {
+                cells[cell, default: []].append(entryIndex)
+            }
+        }
+
+        func query(_ rect: CGRect) -> [SpatialEntry<Item>] {
+            guard !rect.isNull, !rect.isInfinite else { return [] }
+            let normalized = rect.standardized
+            var seen: Set<Int> = []
+            var result: [SpatialEntry<Item>] = []
+            for cell in cellsCovered(by: normalized) {
+                guard let indices = cells[cell] else { continue }
+                for index in indices where seen.insert(index).inserted {
+                    let entry = entries[index]
+                    if rectsOverlapOrTouch(entry.rect, normalized) {
+                        result.append(entry)
+                    }
+                }
+            }
+            return result
+        }
+
+        private func cellsCovered(by rect: CGRect) -> [SpatialCell] {
+            let minX = Int(floor(rect.minX / cellSize))
+            let maxX = Int(floor(rect.maxX / cellSize))
+            let minY = Int(floor(rect.minY / cellSize))
+            let maxY = Int(floor(rect.maxY / cellSize))
+            var result: [SpatialCell] = []
+            result.reserveCapacity(max(1, (maxX - minX + 1) * (maxY - minY + 1)))
+            for x in minX...maxX {
+                for y in minY...maxY {
+                    result.append(SpatialCell(x: x, y: y))
+                }
+            }
+            return result
+        }
+
+        private func rectsOverlapOrTouch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            lhs.maxX >= rhs.minX
+                && rhs.maxX >= lhs.minX
+                && lhs.maxY >= rhs.minY
+                && rhs.maxY >= lhs.minY
+        }
+    }
+
+    private struct IndexedNodeRect {
+        let index: Int
+        let rect: CGRect
+    }
+
+    private struct RouteNodeIndex {
+        let cardRects: [CGRect]
+        private let index: SpatialHashIndex<IndexedNodeRect>
+
+        init(cardRects: [CGRect]) {
+            self.cardRects = cardRects
+            var index = SpatialHashIndex<IndexedNodeRect>()
+            for (cardIndex, rect) in cardRects.enumerated() {
+                let expanded = rect.insetBy(
+                    dx: -LayoutSpacing.edgeNode,
+                    dy: -LayoutSpacing.edgeNode
+                )
+                index.insert(IndexedNodeRect(index: cardIndex, rect: expanded), rect: expanded)
+            }
+            self.index = index
+        }
+
+        func nodesNearSegment(start: CGPoint, end: CGPoint) -> [IndexedNodeRect] {
+            index.query(segmentBounds(start, end)).map(\.item)
+        }
+
+        func nodes(in rect: CGRect) -> [IndexedNodeRect] {
+            index.query(rect).map(\.item)
+        }
+    }
+
+    private struct RouteSegmentKey: Hashable {
+        let edgeKey: String
+        let segmentIndex: Int
+    }
+
+    private struct RouteSegmentPairKey: Hashable {
+        let first: RouteSegmentKey
+        let second: RouteSegmentKey
+
+        init(_ lhs: RouteSegmentKey, _ rhs: RouteSegmentKey) {
+            let lhsKey = "\(lhs.edgeKey)#\(lhs.segmentIndex)"
+            let rhsKey = "\(rhs.edgeKey)#\(rhs.segmentIndex)"
+            if lhsKey <= rhsKey {
+                first = lhs
+                second = rhs
+            } else {
+                first = rhs
+                second = lhs
+            }
+        }
+    }
+
+    private struct IndexedRouteSegment {
+        let edge: CompoundGraph.CardEdge
+        let points: [CGPoint]
+        let segmentIndex: Int
+        let start: CGPoint
+        let end: CGPoint
+
+        var key: RouteSegmentKey {
+            RouteSegmentKey(edgeKey: edgeSortKey(edge.id), segmentIndex: segmentIndex)
+        }
+    }
+
+    private struct RouteSegmentIndex {
+        private var index = SpatialHashIndex<IndexedRouteSegment>()
+
+        init() {}
+
+        init(routedEdges: [RoutedEdge]) {
+            for routedEdge in routedEdges {
+                insert(routedEdge)
+            }
+        }
+
+        mutating func insert(_ routedEdge: RoutedEdge) {
+            guard routedEdge.points.count > 1 else { return }
+            for offset in 1..<routedEdge.points.count {
+                let segment = IndexedRouteSegment(
+                    edge: routedEdge.edge,
+                    points: routedEdge.points,
+                    segmentIndex: offset,
+                    start: routedEdge.points[offset - 1],
+                    end: routedEdge.points[offset]
+                )
+                index.insert(segment, rect: segmentBounds(segment.start, segment.end))
+            }
+        }
+
+        func segmentsNear(start: CGPoint, end: CGPoint, padding: CGFloat) -> [IndexedRouteSegment] {
+            let queryRect = segmentBounds(start, end).insetBy(dx: -padding, dy: -padding)
+            return index.query(queryRect).map(\.item)
+        }
+
+        func segments(in rect: CGRect) -> [IndexedRouteSegment] {
+            index.query(rect).map(\.item)
+        }
+    }
+
     private static func computeEdgeRoutes(
         edges: [CompoundGraph.CardEdge],
         cards: [CompoundGraph.Card],
@@ -5667,6 +5836,8 @@ struct KnowledgeGraphLayout: Sendable {
             }
             return CGRect(origin: origin, size: card.size)
         }
+        let nodeIndex = RouteNodeIndex(cardRects: cardRects)
+        var routeSegmentIndex = RouteSegmentIndex()
         let ports = edgePortAnchors(
             edges: edges,
             cards: cards,
@@ -5706,11 +5877,13 @@ struct KnowledgeGraphLayout: Sendable {
                     preferredSourcePort: preferredSourcePort,
                     preferredTargetPort: preferredTargetPort
                 ),
-                routeClearsNodes(directPoints, cardRects: cardRects, excluding: excluded)
+                routeClearsNodes(directPoints, nodeIndex: nodeIndex, excluding: excluded)
             {
                 let route = edgeRoute(points: directPoints)
                 routes[edge.id] = route
-                routedEdges.append(RoutedEdge(edge: edge, points: route.points.isEmpty ? [route.start, route.end] : route.points))
+                let routedEdge = RoutedEdge(edge: edge, points: route.points.isEmpty ? [route.start, route.end] : route.points)
+                routedEdges.append(routedEdge)
+                routeSegmentIndex.insert(routedEdge)
                 continue
             }
 
@@ -5722,8 +5895,8 @@ struct KnowledgeGraphLayout: Sendable {
                 preferredTargetPort: preferredTargetPort,
                 sourceIndex: srcIndex,
                 targetIndex: tgtIndex,
-                cardRects: cardRects,
-                routedEdges: routedEdges,
+                nodeIndex: nodeIndex,
+                routeSegmentIndex: routeSegmentIndex,
                 currentEdge: edge
             )
             let midpoint = routePathMidpoint(points).point
@@ -5736,20 +5909,31 @@ struct KnowledgeGraphLayout: Sendable {
                 points: points
             )
             routes[edge.id] = route
-            routedEdges.append(RoutedEdge(edge: edge, points: route.points.isEmpty ? [route.start, route.end] : route.points))
+            let routedEdge = RoutedEdge(edge: edge, points: route.points.isEmpty ? [route.start, route.end] : route.points)
+            routedEdges.append(routedEdge)
+            routeSegmentIndex.insert(routedEdge)
         }
         let recenteredRoutes = recenterSingletonPorts(
             routes: routes,
             edges: edges,
             cards: cards,
             indexByID: indexByID,
-            cardRects: cardRects
+            cardRects: cardRects,
+            nodeIndex: nodeIndex
         )
-        return optimizeSharedPortCrossings(
+        let optimizedRoutes = optimizeSharedPortCrossings(
             routes: recenteredRoutes,
             edges: edges,
             indexByID: indexByID,
-            cardRects: cardRects
+            cardRects: cardRects,
+            nodeIndex: nodeIndex
+        )
+        return normalizeEqualLengthJointLanes(
+            routes: optimizedRoutes,
+            edges: edges,
+            indexByID: indexByID,
+            cardRects: cardRects,
+            nodeIndex: nodeIndex
         )
     }
 
@@ -5979,7 +6163,8 @@ struct KnowledgeGraphLayout: Sendable {
         edges: [CompoundGraph.CardEdge],
         cards: [CompoundGraph.Card],
         indexByID: [CompoundGraph.Card.ID: Int],
-        cardRects: [CGRect]
+        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex
     ) -> [EdgeIdentifier: EdgeRoute] {
         var endpointSides: [EdgeEndpointKey: EdgePortSide] = [:]
         var endpointEntries: [EdgePortBucket: [(key: EdgeEndpointKey, edgeID: EdgeIdentifier, coordinate: CGFloat, prefersCenter: Bool)]] = [:]
@@ -6073,6 +6258,7 @@ struct KnowledgeGraphLayout: Sendable {
                     points: otherRoute.points.isEmpty ? [otherRoute.start, otherRoute.end] : otherRoute.points
                 )
             }
+            let routeSegmentIndex = RouteSegmentIndex(routedEdges: routedEdges)
             let centeredSourcePort = EdgePort(
                 point: sourcePoint,
                 side: sourceSide,
@@ -6093,8 +6279,8 @@ struct KnowledgeGraphLayout: Sendable {
                 laneOffset: centeredParallel * LayoutSpacing.edgeEdgeRoute,
                 sourceIndex: sourceIndex,
                 targetIndex: targetIndex,
-                cardRects: cardRects,
-                routedEdges: routedEdges
+                nodeIndex: nodeIndex,
+                routeSegmentIndex: routeSegmentIndex
             ) else { continue }
             updated[edge.id] = edgeRoute(points: centeredPoints)
         }
@@ -6125,11 +6311,72 @@ struct KnowledgeGraphLayout: Sendable {
         }
     }
 
+    private struct PortSwapImprovement {
+        let routes: [EdgeIdentifier: EdgeRoute]
+        let lengthDelta: CGFloat
+        let conflictBefore: RouteConflictScore
+        let conflictAfter: RouteConflictScore
+
+        var isValid: Bool {
+            if lengthDelta < -0.5 {
+                return true
+            }
+            guard abs(lengthDelta) <= 0.5 else { return false }
+            return conflictAfter.isBetter(than: conflictBefore)
+        }
+
+        func isBetter(than other: PortSwapImprovement) -> Bool {
+            if abs(lengthDelta - other.lengthDelta) > 0.5 {
+                return lengthDelta < other.lengthDelta
+            }
+            if conflictAfter.crossings != other.conflictAfter.crossings {
+                return conflictAfter.crossings < other.conflictAfter.crossings
+            }
+            if abs(conflictAfter.clearance - other.conflictAfter.clearance) > 0.001 {
+                return conflictAfter.clearance < other.conflictAfter.clearance
+            }
+            return false
+        }
+    }
+
+    private enum EqualLengthJointOrientation {
+        case vertical
+        case horizontal
+    }
+
+    private struct EqualLengthJointRoute {
+        let orientation: EqualLengthJointOrientation
+        let lowerBound: CGFloat
+        let upperBound: CGFloat
+        let currentAxis: CGFloat
+        let centerAxis: CGFloat
+    }
+
+    private struct EqualLengthJointLaneScore {
+        let clearance: CGFloat
+        let rhythm: CGFloat
+        let centerDeviation: CGFloat
+
+        func isBetter(than other: EqualLengthJointLaneScore) -> Bool {
+            if abs(clearance - other.clearance) > 0.001 {
+                return clearance < other.clearance
+            }
+            if abs(rhythm - other.rhythm) > 0.001 {
+                return rhythm < other.rhythm
+            }
+            if abs(centerDeviation - other.centerDeviation) > 0.001 {
+                return centerDeviation < other.centerDeviation
+            }
+            return false
+        }
+    }
+
     private static func optimizeSharedPortCrossings(
         routes: [EdgeIdentifier: EdgeRoute],
         edges: [CompoundGraph.CardEdge],
         indexByID: [CompoundGraph.Card.ID: Int],
-        cardRects: [CGRect]
+        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex
     ) -> [EdgeIdentifier: EdgeRoute] {
         var optimized = routes
         for _ in 0..<6 {
@@ -6147,7 +6394,7 @@ struct KnowledgeGraphLayout: Sendable {
             guard currentConflict.crossings > 0 else {
                 break
             }
-            var accepted = false
+            var bestImprovement: PortSwapImprovement?
 
             for bucket in sortedEndpointBuckets(buckets.keys) {
                 guard let entries = buckets[bucket], entries.count > 1 else { continue }
@@ -6170,6 +6417,11 @@ struct KnowledgeGraphLayout: Sendable {
                             edges: edges,
                             edgeIDs: affectedEdgeIDs
                         )
+                        let currentLocalConflict = routeConflictScore(
+                            routes: optimized,
+                            edges: edges,
+                            focusing: affectedEdgeIDs
+                        )
                         guard let candidate = routesBySwappingEndpointPorts(
                             lhs: lhs,
                             rhs: rhs,
@@ -6177,7 +6429,8 @@ struct KnowledgeGraphLayout: Sendable {
                             routes: optimized,
                             edges: edges,
                             indexByID: indexByID,
-                            cardRects: cardRects
+                            cardRects: cardRects,
+                            nodeIndex: nodeIndex
                         ) else { continue }
                         let candidateLength = routeLengthSum(
                             routes: candidate,
@@ -6186,26 +6439,301 @@ struct KnowledgeGraphLayout: Sendable {
                         )
                         guard candidateLength <= currentLength + 0.5 else { continue }
 
-                        let candidateConflict = routeConflictScore(routes: candidate, edges: edges)
-                        let lengthImproved = candidateLength < currentLength - 0.5
-                        let equalLengthAndCleaner = abs(candidateLength - currentLength) <= 0.5
-                            && candidateConflict.isBetter(than: currentConflict)
-                        if lengthImproved || equalLengthAndCleaner {
-                            optimized = candidate
-                            accepted = true
-                            break
+                        let candidateLocalConflict = routeConflictScore(
+                            routes: candidate,
+                            edges: edges,
+                            focusing: affectedEdgeIDs
+                        )
+                        let improvement = PortSwapImprovement(
+                            routes: candidate,
+                            lengthDelta: candidateLength - currentLength,
+                            conflictBefore: currentLocalConflict,
+                            conflictAfter: candidateLocalConflict
+                        )
+                        guard improvement.isValid else { continue }
+                        if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
+                            bestImprovement = improvement
                         }
                     }
-                    if accepted { break }
                 }
-                if accepted { break }
             }
 
-            if !accepted {
+            if let bestImprovement {
+                optimized = bestImprovement.routes
+            } else {
                 break
             }
         }
         return optimized
+    }
+
+    private static func normalizeEqualLengthJointLanes(
+        routes: [EdgeIdentifier: EdgeRoute],
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex
+    ) -> [EdgeIdentifier: EdgeRoute] {
+        var normalized = routes
+        for _ in 0..<4 {
+            var changed = false
+            for edge in edges where edge.source != edge.target {
+                guard
+                    let route = normalized[edge.id],
+                    let sourceIndex = indexByID[edge.source],
+                    let targetIndex = indexByID[edge.target]
+                else { continue }
+                let points = route.points.isEmpty ? [route.start, route.end] : route.points
+                guard let jointRoute = equalLengthJointRoute(points) else { continue }
+
+                let routedEdges = edges.compactMap { otherEdge -> RoutedEdge? in
+                    guard otherEdge.id != edge.id, let otherRoute = normalized[otherEdge.id] else { return nil }
+                    return RoutedEdge(
+                        edge: otherEdge,
+                        points: otherRoute.points.isEmpty ? [otherRoute.start, otherRoute.end] : otherRoute.points
+                    )
+                }
+                let routeSegmentIndex = RouteSegmentIndex(routedEdges: routedEdges)
+                let excluded = Set([sourceIndex, targetIndex])
+                var bestPoints = points
+                var bestScore = equalLengthJointLaneScore(
+                    points,
+                    edge: edge,
+                    jointRoute: jointRoute,
+                    routeSegmentIndex: routeSegmentIndex
+                )
+
+                for axis in equalLengthJointAxisCandidates(
+                    jointRoute: jointRoute,
+                    points: points,
+                    routeSegmentIndex: routeSegmentIndex
+                ) {
+                    let candidate = routePointsBySlidingEqualLengthJoint(points, jointRoute: jointRoute, axis: axis)
+                    guard routeIsOrthogonal(candidate) else { continue }
+                    guard
+                        let candidateStart = candidate.first,
+                        let candidateEnd = candidate.last,
+                        let sourceSide = boundarySide(of: candidateStart, in: cardRects[sourceIndex]),
+                        let targetSide = boundarySide(of: candidateEnd, in: cardRects[targetIndex]),
+                        routeUsesPerpendicularPorts(
+                            candidate,
+                            sourcePort: EdgePort(point: candidateStart, side: sourceSide, bucketCount: 1),
+                            targetPort: EdgePort(point: candidateEnd, side: targetSide, bucketCount: 1)
+                        )
+                    else { continue }
+                    guard abs(routeLength(candidate) - routeLength(points)) < 0.5 else { continue }
+                    guard routeClearsNodes(candidate, nodeIndex: nodeIndex, excluding: excluded) else { continue }
+                    guard routeJointsClearEndpointNodes(
+                        candidate,
+                        cardRects: cardRects,
+                        endpointIndices: excluded
+                    ) else { continue }
+                    let score = equalLengthJointLaneScore(
+                        candidate,
+                        edge: edge,
+                        jointRoute: jointRoute,
+                        routeSegmentIndex: routeSegmentIndex
+                    )
+                    if score.isBetter(than: bestScore) {
+                        bestScore = score
+                        bestPoints = candidate
+                    }
+                }
+
+                if routePointDelta(bestPoints, points) > 0.5 {
+                    normalized[edge.id] = edgeRoute(points: bestPoints)
+                    changed = true
+                }
+            }
+            if !changed {
+                break
+            }
+        }
+        return normalized
+    }
+
+    private static func equalLengthJointRoute(_ points: [CGPoint]) -> EqualLengthJointRoute? {
+        let simplified = simplifyRoutePoints(points)
+        guard simplified.count == 4 else { return nil }
+        let p0 = simplified[0]
+        let p1 = simplified[1]
+        let p2 = simplified[2]
+        let p3 = simplified[3]
+        let firstHorizontal = abs(p0.y - p1.y) < 0.5
+        let middleVertical = abs(p1.x - p2.x) < 0.5
+        let lastHorizontal = abs(p2.y - p3.y) < 0.5
+        if firstHorizontal && middleVertical && lastHorizontal {
+            let lower = min(p0.x, p3.x)
+            let upper = max(p0.x, p3.x)
+            let axis = p1.x
+            guard axis >= lower - 0.5, axis <= upper + 0.5 else { return nil }
+            return EqualLengthJointRoute(
+                orientation: .vertical,
+                lowerBound: lower,
+                upperBound: upper,
+                currentAxis: axis,
+                centerAxis: (lower + upper) * 0.5
+            )
+        }
+
+        let firstVertical = abs(p0.x - p1.x) < 0.5
+        let middleHorizontal = abs(p1.y - p2.y) < 0.5
+        let lastVertical = abs(p2.x - p3.x) < 0.5
+        if firstVertical && middleHorizontal && lastVertical {
+            let lower = min(p0.y, p3.y)
+            let upper = max(p0.y, p3.y)
+            let axis = p1.y
+            guard axis >= lower - 0.5, axis <= upper + 0.5 else { return nil }
+            return EqualLengthJointRoute(
+                orientation: .horizontal,
+                lowerBound: lower,
+                upperBound: upper,
+                currentAxis: axis,
+                centerAxis: (lower + upper) * 0.5
+            )
+        }
+        return nil
+    }
+
+    private static func routePointsBySlidingEqualLengthJoint(
+        _ points: [CGPoint],
+        jointRoute: EqualLengthJointRoute,
+        axis: CGFloat
+    ) -> [CGPoint] {
+        let simplified = simplifyRoutePoints(points)
+        guard simplified.count == 4 else { return simplified }
+        let p0 = simplified[0]
+        let p3 = simplified[3]
+        switch jointRoute.orientation {
+        case .vertical:
+            return simplifyRoutePoints([
+                p0,
+                CGPoint(x: axis, y: p0.y),
+                CGPoint(x: axis, y: p3.y),
+                p3
+            ])
+        case .horizontal:
+            return simplifyRoutePoints([
+                p0,
+                CGPoint(x: p0.x, y: axis),
+                CGPoint(x: p3.x, y: axis),
+                p3
+            ])
+        }
+    }
+
+    private static func equalLengthJointAxisCandidates(
+        jointRoute: EqualLengthJointRoute,
+        points: [CGPoint],
+        routeSegmentIndex: RouteSegmentIndex
+    ) -> [CGFloat] {
+        let lower = jointRoute.lowerBound
+        let upper = jointRoute.upperBound
+        guard upper - lower > 1 else { return [jointRoute.currentAxis] }
+
+        var values: [CGFloat] = [
+            jointRoute.currentAxis,
+            jointRoute.centerAxis
+        ]
+        let laneCount = max(1, Int(ceil((upper - lower) / LayoutSpacing.edgeEdgeRoute)))
+        for lane in 1...laneCount {
+            let offset = CGFloat(lane) * LayoutSpacing.edgeEdgeRoute
+            values.append(lower + offset)
+            values.append(upper - offset)
+            values.append(jointRoute.centerAxis + offset)
+            values.append(jointRoute.centerAxis - offset)
+        }
+
+        for segment in routeSegmentsInEqualLengthJointSearchArea(
+            jointRoute: jointRoute,
+            points: points,
+            routeSegmentIndex: routeSegmentIndex
+        ) {
+            guard routeSegmentOrientation(start: segment.start, end: segment.end) == jointRoute.orientation else {
+                continue
+            }
+            let segmentAxis = routeSegmentAxis(start: segment.start, end: segment.end, orientation: jointRoute.orientation)
+            for lane in 1...4 {
+                let offset = CGFloat(lane) * LayoutSpacing.edgeEdgeRoute
+                values.append(segmentAxis + offset)
+                values.append(segmentAxis - offset)
+            }
+        }
+
+        return uniqueCGFloatValues(values)
+            .map { min(upper, max(lower, $0)) }
+            .filter { $0 >= lower - 0.5 && $0 <= upper + 0.5 }
+            .sorted { lhs, rhs in
+                let leftDeviation = abs(lhs - jointRoute.centerAxis)
+                let rightDeviation = abs(rhs - jointRoute.centerAxis)
+                if abs(leftDeviation - rightDeviation) > 0.001 {
+                    return leftDeviation < rightDeviation
+                }
+                return lhs < rhs
+            }
+    }
+
+    private static func routeSegmentsInEqualLengthJointSearchArea(
+        jointRoute: EqualLengthJointRoute,
+        points: [CGPoint],
+        routeSegmentIndex: RouteSegmentIndex
+    ) -> [IndexedRouteSegment] {
+        let simplified = simplifyRoutePoints(points)
+        guard simplified.count == 4 else { return [] }
+        let p0 = simplified[0]
+        let p3 = simplified[3]
+        let padding = LayoutSpacing.edgeEdgeRoute * 4
+        let rect: CGRect
+        switch jointRoute.orientation {
+        case .vertical:
+            rect = CGRect(
+                x: jointRoute.lowerBound,
+                y: min(p0.y, p3.y),
+                width: jointRoute.upperBound - jointRoute.lowerBound,
+                height: abs(p3.y - p0.y)
+            ).insetBy(dx: -padding, dy: -padding)
+        case .horizontal:
+            rect = CGRect(
+                x: min(p0.x, p3.x),
+                y: jointRoute.lowerBound,
+                width: abs(p3.x - p0.x),
+                height: jointRoute.upperBound - jointRoute.lowerBound
+            ).insetBy(dx: -padding, dy: -padding)
+        }
+        return routeSegmentIndex.segments(in: rect)
+    }
+
+    private static func equalLengthJointLaneScore(
+        _ points: [CGPoint],
+        edge: CompoundGraph.CardEdge,
+        jointRoute: EqualLengthJointRoute,
+        routeSegmentIndex: RouteSegmentIndex
+    ) -> EqualLengthJointLaneScore {
+        let axis = equalLengthJointRoute(points)?.currentAxis ?? jointRoute.currentAxis
+        return EqualLengthJointLaneScore(
+            clearance: edgeRouteClearanceScore(
+                points,
+                currentEdge: edge,
+                routeSegmentIndex: routeSegmentIndex
+            ),
+            rhythm: edgeRouteRhythmScore(
+                points,
+                currentEdge: edge,
+                routeSegmentIndex: routeSegmentIndex
+            ),
+            centerDeviation: abs(axis - jointRoute.centerAxis)
+        )
+    }
+
+    private static func routePointDelta(_ lhs: [CGPoint], _ rhs: [CGPoint]) -> CGFloat {
+        let left = simplifyRoutePoints(lhs)
+        let right = simplifyRoutePoints(rhs)
+        guard left.count == right.count else { return CGFloat.greatestFiniteMagnitude }
+        var delta: CGFloat = 0
+        for index in left.indices {
+            delta = max(delta, hypot(left[index].x - right[index].x, left[index].y - right[index].y))
+        }
+        return delta
     }
 
     private static func routeEndpoints(
@@ -6285,7 +6813,8 @@ struct KnowledgeGraphLayout: Sendable {
         routes: [EdgeIdentifier: EdgeRoute],
         edges: [CompoundGraph.CardEdge],
         indexByID: [CompoundGraph.Card.ID: Int],
-        cardRects: [CGRect]
+        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex
     ) -> [EdgeIdentifier: EdgeRoute]? {
         var swappedEndpoints = endpoints
         var swappedLHS = lhs
@@ -6312,6 +6841,7 @@ struct KnowledgeGraphLayout: Sendable {
                     points: otherRoute.points.isEmpty ? [otherRoute.start, otherRoute.end] : otherRoute.points
                 )
             }
+            let routeSegmentIndex = RouteSegmentIndex(routedEdges: routedEdges)
             let centeredParallel = edge.parallelCount > 1
                 ? CGFloat(edge.parallelIndex) - CGFloat(edge.parallelCount - 1) / 2
                 : 0
@@ -6322,8 +6852,8 @@ struct KnowledgeGraphLayout: Sendable {
                 laneOffset: centeredParallel * LayoutSpacing.edgeEdgeRoute,
                 sourceIndex: sourceIndex,
                 targetIndex: targetIndex,
-                cardRects: cardRects,
-                routedEdges: routedEdges
+                nodeIndex: nodeIndex,
+                routeSegmentIndex: routeSegmentIndex
             ) else { return nil }
             updated[edge.id] = edgeRoute(points: points)
         }
@@ -6346,29 +6876,57 @@ struct KnowledgeGraphLayout: Sendable {
 
     private static func routeConflictScore(
         routes: [EdgeIdentifier: EdgeRoute],
-        edges: [CompoundGraph.CardEdge]
+        edges: [CompoundGraph.CardEdge],
+        focusing focusEdgeIDs: Set<EdgeIdentifier>? = nil
     ) -> RouteConflictScore {
         guard edges.count > 1 else {
             return RouteConflictScore(crossings: 0, clearance: 0)
         }
+        let routedEdges = edges.compactMap { edge -> RoutedEdge? in
+            guard let route = routes[edge.id] else { return nil }
+            return RoutedEdge(
+                edge: edge,
+                points: route.points.isEmpty ? [route.start, route.end] : route.points
+            )
+        }
+        let routeSegmentIndex = RouteSegmentIndex(routedEdges: routedEdges)
         var crossings = 0
         var clearance: CGFloat = 0
-        for lhsIndex in 0..<(edges.count - 1) {
-            let lhs = edges[lhsIndex]
-            guard let lhsRoute = routes[lhs.id] else { continue }
-            let lhsPoints = lhsRoute.points.isEmpty ? [lhsRoute.start, lhsRoute.end] : lhsRoute.points
-            for rhsIndex in (lhsIndex + 1)..<edges.count {
-                let rhs = edges[rhsIndex]
-                guard let rhsRoute = routes[rhs.id] else { continue }
-                let rhsPoints = rhsRoute.points.isEmpty ? [rhsRoute.start, rhsRoute.end] : rhsRoute.points
-                let pair = routePairConflictScore(
-                    lhsEdge: lhs,
-                    lhsPoints: lhsPoints,
-                    rhsEdge: rhs,
-                    rhsPoints: rhsPoints
+        var visited: Set<RouteSegmentPairKey> = []
+        for routedEdge in routedEdges {
+            if let focusEdgeIDs, !focusEdgeIDs.contains(routedEdge.edge.id) {
+                continue
+            }
+            guard routedEdge.points.count > 1 else { continue }
+            for offset in 1..<routedEdge.points.count {
+                let start = routedEdge.points[offset - 1]
+                let end = routedEdge.points[offset]
+                let currentKey = RouteSegmentKey(
+                    edgeKey: edgeSortKey(routedEdge.edge.id),
+                    segmentIndex: offset
                 )
-                crossings += pair.crossings
-                clearance += pair.clearance
+                for other in routeSegmentIndex.segmentsNear(
+                    start: start,
+                    end: end,
+                    padding: LayoutSpacing.edgeEdgeRoute
+                ) where other.edge.id != routedEdge.edge.id {
+                    if let focusEdgeIDs,
+                       !focusEdgeIDs.contains(routedEdge.edge.id),
+                       !focusEdgeIDs.contains(other.edge.id) {
+                        continue
+                    }
+                    let pairKey = RouteSegmentPairKey(currentKey, other.key)
+                    guard visited.insert(pairKey).inserted else { continue }
+                    let pair = routeSegmentConflictScore(
+                        lhsEdge: routedEdge.edge,
+                        lhsPoints: routedEdge.points,
+                        lhsStart: start,
+                        lhsEnd: end,
+                        rhs: other
+                    )
+                    crossings += pair.crossings
+                    clearance += pair.clearance
+                }
             }
         }
         return RouteConflictScore(crossings: crossings, clearance: clearance)
@@ -6380,47 +6938,76 @@ struct KnowledgeGraphLayout: Sendable {
         rhsEdge: CompoundGraph.CardEdge,
         rhsPoints: [CGPoint]
     ) -> RouteConflictScore {
-        let sharedEndpoints = sharedEndpoints(lhsEdge, rhsEdge)
+        var crossings = 0
+        var clearance: CGFloat = 0
+        for lhsOffset in 1..<lhsPoints.count {
+            for rhsOffset in 1..<rhsPoints.count {
+                let pair = routeSegmentConflictScore(
+                    lhsEdge: lhsEdge,
+                    lhsPoints: lhsPoints,
+                    lhsStart: lhsPoints[lhsOffset - 1],
+                    lhsEnd: lhsPoints[lhsOffset],
+                    rhs: IndexedRouteSegment(
+                        edge: rhsEdge,
+                        points: rhsPoints,
+                        segmentIndex: rhsOffset,
+                        start: rhsPoints[rhsOffset - 1],
+                        end: rhsPoints[rhsOffset]
+                    )
+                )
+                crossings += pair.crossings
+                clearance += pair.clearance
+            }
+        }
+        return RouteConflictScore(crossings: crossings, clearance: clearance)
+    }
+
+    private static func routeSegmentConflictScore(
+        lhsEdge: CompoundGraph.CardEdge,
+        lhsPoints: [CGPoint],
+        lhsStart: CGPoint,
+        lhsEnd: CGPoint,
+        rhs: IndexedRouteSegment
+    ) -> RouteConflictScore {
+        let sharedEndpoints = sharedEndpoints(lhsEdge, rhs.edge)
         let lhsSharedPoints = sharedEndpointPoints(
             edge: lhsEdge,
             points: lhsPoints,
             sharedEndpoints: sharedEndpoints
         )
         let rhsSharedPoints = sharedEndpointPoints(
-            edge: rhsEdge,
-            points: rhsPoints,
+            edge: rhs.edge,
+            points: rhs.points,
             sharedEndpoints: sharedEndpoints
         )
-        var crossings = 0
-        var clearance: CGFloat = 0
-        for lhsOffset in 1..<lhsPoints.count {
-            guard let lhsSegment = edgeClearanceSegment(
-                start: lhsPoints[lhsOffset - 1],
-                end: lhsPoints[lhsOffset],
+        guard
+            let lhsSegment = edgeClearanceSegment(
+                start: lhsStart,
+                end: lhsEnd,
                 sharedEndpointPoints: lhsSharedPoints
-            ) else { continue }
-            for rhsOffset in 1..<rhsPoints.count {
-                guard let rhsSegment = edgeClearanceSegment(
-                    start: rhsPoints[rhsOffset - 1],
-                    end: rhsPoints[rhsOffset],
-                    sharedEndpointPoints: rhsSharedPoints
-                ) else { continue }
-                let distance = segmentDistance(
-                    lhsSegment.start,
-                    lhsSegment.end,
-                    rhsSegment.start,
-                    rhsSegment.end
-                )
-                if distance < 0.5 {
-                    crossings += 1
-                }
-                guard distance < LayoutSpacing.edgeEdgeRoute else { continue }
-                let multiplier: CGFloat = sharedEndpoints.isEmpty ? 120 : 2
-                clearance += (LayoutSpacing.edgeEdgeRoute - distance) * multiplier
-                if distance < 0.5 {
-                    clearance += sharedEndpoints.isEmpty ? 10_000 : 50
-                }
-            }
+            ),
+            let rhsSegment = edgeClearanceSegment(
+                start: rhs.start,
+                end: rhs.end,
+                sharedEndpointPoints: rhsSharedPoints
+            )
+        else {
+            return RouteConflictScore(crossings: 0, clearance: 0)
+        }
+        let distance = segmentDistance(
+            lhsSegment.start,
+            lhsSegment.end,
+            rhsSegment.start,
+            rhsSegment.end
+        )
+        let crossings = distance < 0.5 ? 1 : 0
+        guard distance < LayoutSpacing.edgeEdgeRoute else {
+            return RouteConflictScore(crossings: crossings, clearance: 0)
+        }
+        let multiplier: CGFloat = sharedEndpoints.isEmpty ? 120 : 2
+        var clearance = (LayoutSpacing.edgeEdgeRoute - distance) * multiplier
+        if distance < 0.5 {
+            clearance += sharedEndpoints.isEmpty ? 10_000 : 50
         }
         return RouteConflictScore(crossings: crossings, clearance: clearance)
     }
@@ -6895,8 +7482,8 @@ struct KnowledgeGraphLayout: Sendable {
         preferredTargetPort: EdgePort,
         sourceIndex: Int,
         targetIndex: Int,
-        cardRects: [CGRect],
-        routedEdges: [RoutedEdge],
+        nodeIndex: RouteNodeIndex,
+        routeSegmentIndex: RouteSegmentIndex,
         currentEdge: CompoundGraph.CardEdge
     ) -> [CGPoint] {
         let centeredParallel = edge.parallelCount > 1
@@ -6926,7 +7513,7 @@ struct KnowledgeGraphLayout: Sendable {
                     sourcePort: sourcePort,
                     targetPort: targetPort,
                     laneOffset: laneOffset,
-                    cardRects: cardRects,
+                    nodeIndex: nodeIndex,
                     excludedIndices: excluded
                 )
                 for candidate in candidates {
@@ -6940,19 +7527,19 @@ struct KnowledgeGraphLayout: Sendable {
                     ) else { continue }
                     guard routeClearsNodes(
                         points,
-                        cardRects: cardRects,
+                        nodeIndex: nodeIndex,
                         excluding: excluded
                     ) else { continue }
                     guard routeJointsClearEndpointNodes(
                         points,
-                        cardRects: cardRects,
+                        cardRects: nodeIndex.cardRects,
                         endpointIndices: excluded
                     ) else { continue }
 
                     let edgeClearance = edgeRouteClearanceScore(
                         points,
                         currentEdge: currentEdge,
-                        routedEdges: routedEdges
+                        routeSegmentIndex: routeSegmentIndex
                     )
                     let score = OrthogonalRouteScore(
                         edgeClearance: edgeClearance,
@@ -6986,15 +7573,15 @@ struct KnowledgeGraphLayout: Sendable {
         laneOffset: CGFloat,
         sourceIndex: Int,
         targetIndex: Int,
-        cardRects: [CGRect],
-        routedEdges: [RoutedEdge]
+        nodeIndex: RouteNodeIndex,
+        routeSegmentIndex: RouteSegmentIndex
     ) -> [CGPoint]? {
         let excluded = Set([sourceIndex, targetIndex])
         let candidates = orthogonalRouteCandidates(
             sourcePort: sourcePort,
             targetPort: targetPort,
             laneOffset: laneOffset,
-            cardRects: cardRects,
+            nodeIndex: nodeIndex,
             excludedIndices: excluded
         )
         var best: [CGPoint]?
@@ -7004,16 +7591,16 @@ struct KnowledgeGraphLayout: Sendable {
             guard points.count > 1 else { continue }
             guard routeIsOrthogonal(points) else { continue }
             guard routeUsesPerpendicularPorts(points, sourcePort: sourcePort, targetPort: targetPort) else { continue }
-            guard routeClearsNodes(points, cardRects: cardRects, excluding: excluded) else { continue }
+            guard routeClearsNodes(points, nodeIndex: nodeIndex, excluding: excluded) else { continue }
             guard routeJointsClearEndpointNodes(
                 points,
-                cardRects: cardRects,
+                cardRects: nodeIndex.cardRects,
                 endpointIndices: excluded
             ) else { continue }
             let edgeClearance = edgeRouteClearanceScore(
                 points,
                 currentEdge: edge,
-                routedEdges: routedEdges
+                routeSegmentIndex: routeSegmentIndex
             )
             let score = OrthogonalRouteScore(
                 edgeClearance: edgeClearance,
@@ -7033,7 +7620,7 @@ struct KnowledgeGraphLayout: Sendable {
         sourcePort: EdgePort,
         targetPort: EdgePort,
         laneOffset: CGFloat,
-        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex,
         excludedIndices: Set<Int>
     ) -> [[CGPoint]] {
         let laneMagnitude = abs(laneOffset)
@@ -7142,7 +7729,7 @@ struct KnowledgeGraphLayout: Sendable {
                     start: sourceOut,
                     end: targetOut,
                     laneOffset: laneOffset,
-                    cardRects: cardRects,
+                    nodeIndex: nodeIndex,
                     excludedIndices: excludedIndices
                 ) {
                     appendRouteCandidate(
@@ -7192,16 +7779,19 @@ struct KnowledgeGraphLayout: Sendable {
         start: CGPoint,
         end: CGPoint,
         laneOffset: CGFloat,
-        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex,
         excludedIndices: Set<Int>
     ) -> [CGPoint]? {
-        let obstacles = cardRects.enumerated().compactMap { index, rect -> CGRect? in
-            guard !excludedIndices.contains(index) else { return nil }
-            return rect.insetBy(dx: -LayoutSpacing.edgeNode, dy: -LayoutSpacing.edgeNode)
+        let lanePadding = LayoutSpacing.edgeEdgeRoute + abs(laneOffset)
+        let searchRect = segmentBounds(start, end).insetBy(
+            dx: -(lanePadding + LayoutSpacing.edgeNode * 4),
+            dy: -(lanePadding + LayoutSpacing.edgeNode * 4)
+        )
+        let obstacles = nodeIndex.nodes(in: searchRect).compactMap { node -> CGRect? in
+            excludedIndices.contains(node.index) ? nil : node.rect
         }
         guard !obstacles.isEmpty else { return nil }
 
-        let lanePadding = LayoutSpacing.edgeEdgeRoute + abs(laneOffset)
         var xValues: [CGFloat] = [
             start.x,
             end.x,
@@ -7507,20 +8097,30 @@ struct KnowledgeGraphLayout: Sendable {
         return result
     }
 
+    private static func segmentBounds(_ start: CGPoint, _ end: CGPoint) -> CGRect {
+        CGRect(
+            x: min(start.x, end.x),
+            y: min(start.y, end.y),
+            width: abs(end.x - start.x),
+            height: abs(end.y - start.y)
+        )
+    }
+
     private static func routeClearsNodes(
         _ points: [CGPoint],
-        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex,
         excluding excludedIndices: Set<Int>
     ) -> Bool {
         guard points.count > 1 else { return true }
         for offset in 1..<points.count {
             let start = points[offset - 1]
             let end = points[offset]
-            for (index, rect) in cardRects.enumerated() where !excludedIndices.contains(index) {
+            for node in nodeIndex.nodesNearSegment(start: start, end: end)
+                where !excludedIndices.contains(node.index) {
                 if segmentIntersectsRect(
                     start,
                     end,
-                    rect.insetBy(dx: -LayoutSpacing.edgeNode, dy: -LayoutSpacing.edgeNode)
+                    node.rect
                 ) {
                     return false
                 }
@@ -7550,68 +8150,179 @@ struct KnowledgeGraphLayout: Sendable {
     private static func routeClearsExistingEdges(
         _ points: [CGPoint],
         currentEdge: CompoundGraph.CardEdge,
-        routedEdges: [RoutedEdge]
+        routeSegmentIndex: RouteSegmentIndex
     ) -> Bool {
         edgeRouteClearanceScore(
             points,
             currentEdge: currentEdge,
-            routedEdges: routedEdges
+            routeSegmentIndex: routeSegmentIndex
         ) == 0
     }
 
     private static func edgeRouteClearanceScore(
         _ points: [CGPoint],
         currentEdge: CompoundGraph.CardEdge,
-        routedEdges: [RoutedEdge]
+        routeSegmentIndex: RouteSegmentIndex
     ) -> CGFloat {
         guard points.count > 1 else { return 0 }
         var score: CGFloat = 0
-        for routedEdge in routedEdges {
-            let otherPoints = routedEdge.points
-            guard otherPoints.count > 1 else { continue }
-            let sharedEndpoints = sharedEndpoints(currentEdge, routedEdge.edge)
-            let currentSharedPoints = sharedEndpointPoints(
-                edge: currentEdge,
-                points: points,
-                sharedEndpoints: sharedEndpoints
-            )
-            let otherSharedPoints = sharedEndpointPoints(
-                edge: routedEdge.edge,
-                points: otherPoints,
-                sharedEndpoints: sharedEndpoints
-            )
-            for currentOffset in 1..<points.count {
-                let currentStart = points[currentOffset - 1]
-                let currentEnd = points[currentOffset]
-                guard let currentSegment = edgeClearanceSegment(
-                    start: currentStart,
-                    end: currentEnd,
-                    sharedEndpointPoints: currentSharedPoints
-                ) else { continue }
-                for otherOffset in 1..<otherPoints.count {
-                    let otherStart = otherPoints[otherOffset - 1]
-                    let otherEnd = otherPoints[otherOffset]
-                    guard let otherSegment = edgeClearanceSegment(
-                        start: otherStart,
-                        end: otherEnd,
-                        sharedEndpointPoints: otherSharedPoints
-                    ) else { continue }
-                    let distance = segmentDistance(
-                        currentSegment.start,
-                        currentSegment.end,
-                        otherSegment.start,
-                        otherSegment.end
-                    )
-                    guard distance < LayoutSpacing.edgeEdgeRoute else { continue }
-                    let multiplier: CGFloat = sharedEndpoints.isEmpty ? 120 : 2
-                    score += (LayoutSpacing.edgeEdgeRoute - distance) * multiplier
-                    if distance < 0.5 {
-                        score += sharedEndpoints.isEmpty ? 10_000 : 50
-                    }
-                }
+        var visited: Set<RouteSegmentPairKey> = []
+        for currentOffset in 1..<points.count {
+            let currentStart = points[currentOffset - 1]
+            let currentEnd = points[currentOffset]
+            for other in routeSegmentIndex.segmentsNear(
+                start: currentStart,
+                end: currentEnd,
+                padding: LayoutSpacing.edgeEdgeRoute
+            ) where other.edge.id != currentEdge.id {
+                let pairKey = RouteSegmentPairKey(
+                    RouteSegmentKey(edgeKey: edgeSortKey(currentEdge.id), segmentIndex: currentOffset),
+                    other.key
+                )
+                guard visited.insert(pairKey).inserted else { continue }
+                score += routeSegmentConflictScore(
+                    lhsEdge: currentEdge,
+                    lhsPoints: points,
+                    lhsStart: currentStart,
+                    lhsEnd: currentEnd,
+                    rhs: other
+                ).clearance
             }
         }
         return score
+    }
+
+    private static func edgeRouteRhythmScore(
+        _ points: [CGPoint],
+        currentEdge: CompoundGraph.CardEdge,
+        routeSegmentIndex: RouteSegmentIndex
+    ) -> CGFloat {
+        guard points.count > 1 else { return 0 }
+        var score: CGFloat = 0
+        var visited: Set<RouteSegmentPairKey> = []
+        for currentOffset in 1..<points.count {
+            let currentStart = points[currentOffset - 1]
+            let currentEnd = points[currentOffset]
+            for other in routeSegmentIndex.segmentsNear(
+                start: currentStart,
+                end: currentEnd,
+                padding: LayoutSpacing.edgeEdgeRoute * 4
+            ) where other.edge.id != currentEdge.id {
+                let pairKey = RouteSegmentPairKey(
+                    RouteSegmentKey(edgeKey: edgeSortKey(currentEdge.id), segmentIndex: currentOffset),
+                    other.key
+                )
+                guard visited.insert(pairKey).inserted else { continue }
+                score += routeSegmentRhythmScore(
+                    lhsEdge: currentEdge,
+                    lhsPoints: points,
+                    lhsStart: currentStart,
+                    lhsEnd: currentEnd,
+                    rhs: other
+                )
+            }
+        }
+        return score
+    }
+
+    private static func routeSegmentRhythmScore(
+        lhsEdge: CompoundGraph.CardEdge,
+        lhsPoints: [CGPoint],
+        lhsStart: CGPoint,
+        lhsEnd: CGPoint,
+        rhs: IndexedRouteSegment
+    ) -> CGFloat {
+        guard
+            let orientation = routeSegmentOrientation(start: lhsStart, end: lhsEnd),
+            routeSegmentOrientation(start: rhs.start, end: rhs.end) == orientation
+        else { return 0 }
+        let sharedEndpoints = sharedEndpoints(lhsEdge, rhs.edge)
+        let lhsSharedPoints = sharedEndpointPoints(
+            edge: lhsEdge,
+            points: lhsPoints,
+            sharedEndpoints: sharedEndpoints
+        )
+        let rhsSharedPoints = sharedEndpointPoints(
+            edge: rhs.edge,
+            points: rhs.points,
+            sharedEndpoints: sharedEndpoints
+        )
+        guard
+            let lhsSegment = edgeClearanceSegment(
+                start: lhsStart,
+                end: lhsEnd,
+                sharedEndpointPoints: lhsSharedPoints
+            ),
+            let rhsSegment = edgeClearanceSegment(
+                start: rhs.start,
+                end: rhs.end,
+                sharedEndpointPoints: rhsSharedPoints
+            ),
+            routeSegmentsOverlapAlongAxis(lhsSegment.start, lhsSegment.end, rhsSegment.start, rhsSegment.end, orientation: orientation)
+        else { return 0 }
+
+        let distance = abs(
+            routeSegmentAxis(start: lhsSegment.start, end: lhsSegment.end, orientation: orientation)
+                - routeSegmentAxis(start: rhsSegment.start, end: rhsSegment.end, orientation: orientation)
+        )
+        guard distance > 0.5, distance <= LayoutSpacing.edgeEdgeRoute * 4 + 0.5 else { return 0 }
+        let lane = max(1, Int((distance / LayoutSpacing.edgeEdgeRoute).rounded()))
+        let idealDistance = CGFloat(lane) * LayoutSpacing.edgeEdgeRoute
+        let rhythmPenalty = abs(distance - idealDistance)
+        let spreadPenalty = max(0, idealDistance - LayoutSpacing.edgeEdgeRoute) * 0.05
+        return rhythmPenalty + spreadPenalty
+    }
+
+    private static func routeSegmentOrientation(
+        start: CGPoint,
+        end: CGPoint
+    ) -> EqualLengthJointOrientation? {
+        if abs(start.x - end.x) < 0.5 {
+            return .vertical
+        }
+        if abs(start.y - end.y) < 0.5 {
+            return .horizontal
+        }
+        return nil
+    }
+
+    private static func routeSegmentAxis(
+        start: CGPoint,
+        end: CGPoint,
+        orientation: EqualLengthJointOrientation
+    ) -> CGFloat {
+        switch orientation {
+        case .vertical:
+            return (start.x + end.x) * 0.5
+        case .horizontal:
+            return (start.y + end.y) * 0.5
+        }
+    }
+
+    private static func routeSegmentsOverlapAlongAxis(
+        _ lhsStart: CGPoint,
+        _ lhsEnd: CGPoint,
+        _ rhsStart: CGPoint,
+        _ rhsEnd: CGPoint,
+        orientation: EqualLengthJointOrientation
+    ) -> Bool {
+        let lhsMin: CGFloat
+        let lhsMax: CGFloat
+        let rhsMin: CGFloat
+        let rhsMax: CGFloat
+        switch orientation {
+        case .vertical:
+            lhsMin = min(lhsStart.y, lhsEnd.y)
+            lhsMax = max(lhsStart.y, lhsEnd.y)
+            rhsMin = min(rhsStart.y, rhsEnd.y)
+            rhsMax = max(rhsStart.y, rhsEnd.y)
+        case .horizontal:
+            lhsMin = min(lhsStart.x, lhsEnd.x)
+            lhsMax = max(lhsStart.x, lhsEnd.x)
+            rhsMin = min(rhsStart.x, rhsEnd.x)
+            rhsMax = max(rhsStart.x, rhsEnd.x)
+        }
+        return min(lhsMax, rhsMax) - max(lhsMin, rhsMin) > 0.5
     }
 
     private static func sharedEndpoints(
