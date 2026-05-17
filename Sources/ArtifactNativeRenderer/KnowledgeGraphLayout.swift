@@ -5999,8 +5999,22 @@ struct KnowledgeGraphLayout: Sendable {
             cardRects: cardRects,
             nodeIndex: nodeIndex
         )
-        return normalizeEqualLengthJointLanes(
+        let portAssignedRoutes = optimizeSharedPortAssignments(
             routes: optimizedRoutes,
+            edges: edges,
+            indexByID: indexByID,
+            cardRects: cardRects,
+            nodeIndex: nodeIndex
+        )
+        let straightenedRoutes = straightenMovableSingletonDirectRoutes(
+            routes: portAssignedRoutes,
+            edges: edges,
+            indexByID: indexByID,
+            cardRects: cardRects,
+            nodeIndex: nodeIndex
+        )
+        return normalizeEqualLengthJointLanes(
+            routes: straightenedRoutes,
             edges: edges,
             indexByID: indexByID,
             cardRects: cardRects,
@@ -6578,6 +6592,130 @@ struct KnowledgeGraphLayout: Sendable {
         }
     }
 
+    private struct PortAssignmentScore {
+        let corners: Int
+        let length: CGFloat
+        let maximumLength: CGFloat
+        let conflict: RouteConflictScore
+
+        func isBetter(than other: PortAssignmentScore) -> Bool {
+            if conflict.crossings != other.conflict.crossings {
+                return conflict.crossings < other.conflict.crossings
+            }
+            if abs(length - other.length) > 0.5 {
+                return length < other.length
+            }
+            if abs(maximumLength - other.maximumLength) > 0.5 {
+                return maximumLength < other.maximumLength
+            }
+            if corners != other.corners {
+                return corners < other.corners
+            }
+            if abs(conflict.clearance - other.conflict.clearance) > 0.001 {
+                return conflict.clearance < other.conflict.clearance
+            }
+            return false
+        }
+    }
+
+    private struct PortAssignmentImprovement {
+        let routes: [EdgeIdentifier: EdgeRoute]
+        let affectedEdgeIDs: Set<EdgeIdentifier>
+        let scoreBefore: PortAssignmentScore
+        let scoreAfter: PortAssignmentScore
+
+        var isValid: Bool {
+            scoreAfter.isBetter(than: scoreBefore)
+        }
+
+        func isBetter(than other: PortAssignmentImprovement) -> Bool {
+            if scoreAfter.conflict.crossings != other.scoreAfter.conflict.crossings {
+                return scoreAfter.conflict.crossings < other.scoreAfter.conflict.crossings
+            }
+            let crossingDelta = scoreAfter.conflict.crossings - scoreBefore.conflict.crossings
+            let otherCrossingDelta = other.scoreAfter.conflict.crossings - other.scoreBefore.conflict.crossings
+            if crossingDelta != otherCrossingDelta {
+                return crossingDelta < otherCrossingDelta
+            }
+            if abs(scoreAfter.length - other.scoreAfter.length) > 0.5 {
+                return scoreAfter.length < other.scoreAfter.length
+            }
+            let lengthDelta = scoreAfter.length - scoreBefore.length
+            let otherLengthDelta = other.scoreAfter.length - other.scoreBefore.length
+            if abs(lengthDelta - otherLengthDelta) > 0.5 {
+                return lengthDelta < otherLengthDelta
+            }
+            if abs(scoreAfter.maximumLength - other.scoreAfter.maximumLength) > 0.5 {
+                return scoreAfter.maximumLength < other.scoreAfter.maximumLength
+            }
+            if scoreAfter.corners != other.scoreAfter.corners {
+                return scoreAfter.corners < other.scoreAfter.corners
+            }
+            let cornerDelta = (scoreAfter.corners - scoreBefore.corners)
+            let otherCornerDelta = (other.scoreAfter.corners - other.scoreBefore.corners)
+            if cornerDelta != otherCornerDelta {
+                return cornerDelta < otherCornerDelta
+            }
+            if affectedEdgeIDs.count != other.affectedEdgeIDs.count {
+                return affectedEdgeIDs.count < other.affectedEdgeIDs.count
+            }
+            return false
+        }
+    }
+
+    private struct DirectRouteAlignmentImprovement {
+        let routes: [EdgeIdentifier: EdgeRoute]
+        let lengthBefore: CGFloat
+        let lengthAfter: CGFloat
+        let cornersBefore: Int
+        let cornersAfter: Int
+        let conflictBefore: RouteConflictScore
+        let conflictAfter: RouteConflictScore
+
+        var isValid: Bool {
+            guard conflictAfter.crossings <= conflictBefore.crossings else { return false }
+            guard lengthAfter <= lengthBefore + 0.5 else { return false }
+            if lengthAfter < lengthBefore - 0.5 {
+                return true
+            }
+            if cornersAfter < cornersBefore {
+                return true
+            }
+            return conflictAfter.isBetter(than: conflictBefore)
+        }
+
+        func isBetter(than other: DirectRouteAlignmentImprovement) -> Bool {
+            if conflictAfter.crossings != other.conflictAfter.crossings {
+                return conflictAfter.crossings < other.conflictAfter.crossings
+            }
+            let crossingDelta = conflictAfter.crossings - conflictBefore.crossings
+            let otherCrossingDelta = other.conflictAfter.crossings - other.conflictBefore.crossings
+            if crossingDelta != otherCrossingDelta {
+                return crossingDelta < otherCrossingDelta
+            }
+            let lengthDelta = lengthAfter - lengthBefore
+            let otherLengthDelta = other.lengthAfter - other.lengthBefore
+            if abs(lengthDelta - otherLengthDelta) > 0.5 {
+                return lengthDelta < otherLengthDelta
+            }
+            if abs(lengthAfter - other.lengthAfter) > 0.5 {
+                return lengthAfter < other.lengthAfter
+            }
+            let cornerDelta = cornersAfter - cornersBefore
+            let otherCornerDelta = other.cornersAfter - other.cornersBefore
+            if cornerDelta != otherCornerDelta {
+                return cornerDelta < otherCornerDelta
+            }
+            if cornersAfter != other.cornersAfter {
+                return cornersAfter < other.cornersAfter
+            }
+            if abs(conflictAfter.clearance - other.conflictAfter.clearance) > 0.001 {
+                return conflictAfter.clearance < other.conflictAfter.clearance
+            }
+            return false
+        }
+    }
+
     private enum EqualLengthJointOrientation {
         case vertical
         case horizontal
@@ -7045,6 +7183,190 @@ struct KnowledgeGraphLayout: Sendable {
         }
     }
 
+    private static func optimizeSharedPortAssignments(
+        routes: [EdgeIdentifier: EdgeRoute],
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex
+    ) -> [EdgeIdentifier: EdgeRoute] {
+        var optimized = routes
+        for _ in 0..<6 {
+            let endpoints = routeEndpoints(
+                routes: optimized,
+                edges: edges,
+                indexByID: indexByID,
+                cardRects: cardRects
+            )
+            let buckets = routeEndpointBuckets(endpoints)
+            var bestImprovement: PortAssignmentImprovement?
+
+            for bucket in sortedEndpointBuckets(buckets.keys) {
+                guard let entries = buckets[bucket], entries.count > 1 else { continue }
+                let sortedEntries = entries.sorted { lhs, rhs in
+                    let lhsCoordinate = portAxisCoordinate(lhs.point, side: lhs.side)
+                    let rhsCoordinate = portAxisCoordinate(rhs.point, side: rhs.side)
+                    if abs(lhsCoordinate - rhsCoordinate) > 0.001 {
+                        return lhsCoordinate < rhsCoordinate
+                    }
+                    return edgeSortKey(lhs.edgeID) < edgeSortKey(rhs.edgeID)
+                }
+
+                for lhsIndex in 0..<(sortedEntries.count - 1) {
+                    for rhsIndex in (lhsIndex + 1)..<sortedEntries.count {
+                        let lhs = sortedEntries[lhsIndex]
+                        let rhs = sortedEntries[rhsIndex]
+                        let affectedEdgeIDs = Set([lhs.edgeID, rhs.edgeID])
+                        let currentScore = portAssignmentScore(
+                            routes: optimized,
+                            edges: edges,
+                            edgeIDs: affectedEdgeIDs
+                        )
+                        guard let candidate = routesBySwappingEndpointPorts(
+                            lhs: lhs,
+                            rhs: rhs,
+                            endpoints: endpoints,
+                            routes: optimized,
+                            edges: edges,
+                            indexByID: indexByID,
+                            cardRects: cardRects,
+                            nodeIndex: nodeIndex
+                        ) else { continue }
+                        let candidateScore = portAssignmentScore(
+                            routes: candidate,
+                            edges: edges,
+                            edgeIDs: affectedEdgeIDs
+                        )
+                        let improvement = PortAssignmentImprovement(
+                            routes: candidate,
+                            affectedEdgeIDs: affectedEdgeIDs,
+                            scoreBefore: currentScore,
+                            scoreAfter: candidateScore
+                        )
+                        guard improvement.isValid else { continue }
+                        if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
+                            bestImprovement = improvement
+                        }
+                    }
+                }
+            }
+
+            if let bestImprovement {
+                optimized = bestImprovement.routes
+            } else {
+                break
+            }
+        }
+        return optimized
+    }
+
+    private static func straightenMovableSingletonDirectRoutes(
+        routes: [EdgeIdentifier: EdgeRoute],
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardRects: [CGRect],
+        nodeIndex: RouteNodeIndex
+    ) -> [EdgeIdentifier: EdgeRoute] {
+        var optimized = routes
+        for _ in 0..<4 {
+            let endpoints = routeEndpoints(
+                routes: optimized,
+                edges: edges,
+                indexByID: indexByID,
+                cardRects: cardRects
+            )
+            let buckets = routeEndpointBuckets(endpoints)
+            var bestImprovement: DirectRouteAlignmentImprovement?
+
+            for edge in edges where edge.source != edge.target {
+                guard
+                    let route = optimized[edge.id],
+                    let sourceIndex = indexByID[edge.source],
+                    let targetIndex = indexByID[edge.target],
+                    let sourceEndpoint = endpoints[EdgeEndpointKey(edgeID: edge.id, isSource: true)],
+                    let targetEndpoint = endpoints[EdgeEndpointKey(edgeID: edge.id, isSource: false)]
+                else { continue }
+
+                let sourceBucketCount = buckets[
+                    EdgePortBucket(cardIndex: sourceEndpoint.cardIndex, side: sourceEndpoint.side)
+                ]?.count ?? 1
+                let targetBucketCount = buckets[
+                    EdgePortBucket(cardIndex: targetEndpoint.cardIndex, side: targetEndpoint.side)
+                ]?.count ?? 1
+                guard sourceBucketCount == 1 || targetBucketCount == 1 else { continue }
+
+                let sourcePort = EdgePort(
+                    point: sourceEndpoint.point,
+                    side: sourceEndpoint.side,
+                    bucketCount: sourceBucketCount
+                )
+                let targetPort = EdgePort(
+                    point: targetEndpoint.point,
+                    side: targetEndpoint.side,
+                    bucketCount: targetBucketCount
+                )
+                guard
+                    let directPoints = directRouteWithPortBias(
+                        sourceRect: cardRects[sourceIndex],
+                        targetRect: cardRects[targetIndex],
+                        sourceSide: sourceEndpoint.side,
+                        targetSide: targetEndpoint.side,
+                        sourcePort: sourcePort,
+                        targetPort: targetPort
+                    ),
+                    routeClearsNodes(
+                        directPoints,
+                        nodeIndex: nodeIndex,
+                        excluding: Set([sourceIndex, targetIndex])
+                    ),
+                    routeJointsClearEndpointNodes(
+                        directPoints,
+                        cardRects: cardRects,
+                        endpointIndices: Set([sourceIndex, targetIndex])
+                    )
+                else { continue }
+
+                let currentPoints = routePoints(from: route)
+                guard routePointDelta(directPoints, currentPoints) > 0.5 else { continue }
+                let currentMetrics = simplifiedRouteMetrics(currentPoints)
+                let directMetrics = simplifiedRouteMetrics(directPoints)
+                var candidateRoutes = optimized
+                candidateRoutes[edge.id] = edgeRoute(points: directPoints)
+                let affectedEdgeIDs = Set([edge.id])
+                let conflictBefore = routeConflictScore(
+                    routes: optimized,
+                    edges: edges,
+                    focusing: affectedEdgeIDs
+                )
+                let conflictAfter = routeConflictScore(
+                    routes: candidateRoutes,
+                    edges: edges,
+                    focusing: affectedEdgeIDs
+                )
+                let improvement = DirectRouteAlignmentImprovement(
+                    routes: candidateRoutes,
+                    lengthBefore: currentMetrics.length,
+                    lengthAfter: directMetrics.length,
+                    cornersBefore: currentMetrics.corners,
+                    cornersAfter: directMetrics.corners,
+                    conflictBefore: conflictBefore,
+                    conflictAfter: conflictAfter
+                )
+                guard improvement.isValid else { continue }
+                if bestImprovement.map({ improvement.isBetter(than: $0) }) ?? true {
+                    bestImprovement = improvement
+                }
+            }
+
+            if let bestImprovement {
+                optimized = bestImprovement.routes
+            } else {
+                break
+            }
+        }
+        return optimized
+    }
+
     private static func routesBySwappingEndpointPorts(
         lhs: RouteEndpoint,
         rhs: RouteEndpoint,
@@ -7107,6 +7429,45 @@ struct KnowledgeGraphLayout: Sendable {
             total += routeLength(routePoints(from: route))
         }
         return total
+    }
+
+    private static func routeMaximumLength(
+        routes: [EdgeIdentifier: EdgeRoute],
+        edges: [CompoundGraph.CardEdge],
+        edgeIDs: Set<EdgeIdentifier>
+    ) -> CGFloat {
+        var maximum: CGFloat = 0
+        for edge in edges where edgeIDs.contains(edge.id) {
+            guard let route = routes[edge.id] else { continue }
+            maximum = max(maximum, routeLength(routePoints(from: route)))
+        }
+        return maximum
+    }
+
+    private static func routeCornerSum(
+        routes: [EdgeIdentifier: EdgeRoute],
+        edges: [CompoundGraph.CardEdge],
+        edgeIDs: Set<EdgeIdentifier>
+    ) -> Int {
+        var total = 0
+        for edge in edges where edgeIDs.contains(edge.id) {
+            guard let route = routes[edge.id] else { continue }
+            total += simplifiedRouteMetrics(routePoints(from: route)).corners
+        }
+        return total
+    }
+
+    private static func portAssignmentScore(
+        routes: [EdgeIdentifier: EdgeRoute],
+        edges: [CompoundGraph.CardEdge],
+        edgeIDs: Set<EdgeIdentifier>
+    ) -> PortAssignmentScore {
+        PortAssignmentScore(
+            corners: routeCornerSum(routes: routes, edges: edges, edgeIDs: edgeIDs),
+            length: routeLengthSum(routes: routes, edges: edges, edgeIDs: edgeIDs),
+            maximumLength: routeMaximumLength(routes: routes, edges: edges, edgeIDs: edgeIDs),
+            conflict: routeConflictScore(routes: routes, edges: edges, focusing: edgeIDs)
+        )
     }
 
     private static func routeConflictScore(

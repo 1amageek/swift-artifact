@@ -932,6 +932,29 @@ struct KnowledgeGraphLayoutCalibrationTests {
         )
 
         let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .none)
+        let eveFrankEdge = try #require(result.compoundGraph.edges.first {
+            $0.source == CompoundGraph.Card.ID(nodeID: eve)
+                && $0.target == CompoundGraph.Card.ID(nodeID: frank)
+        })
+        let eveFrankRoute = try #require(result.edgeRoutes[eveFrankEdge.id])
+        let eveFrankPoints = eveFrankRoute.points.isEmpty
+            ? [eveFrankRoute.start, eveFrankRoute.end]
+            : eveFrankRoute.points
+        let daveFrankEdge = try #require(result.compoundGraph.edges.first {
+            $0.source == CompoundGraph.Card.ID(nodeID: dave)
+                && $0.target == CompoundGraph.Card.ID(nodeID: frank)
+        })
+        let daveFrankRoute = try #require(result.edgeRoutes[daveFrankEdge.id])
+        let daveFrankPoints = daveFrankRoute.points.isEmpty
+            ? [daveFrankRoute.start, daveFrankRoute.end]
+            : daveFrankRoute.points
+        let eveFrankRouted = RoutedTestEdge(edge: eveFrankEdge, points: eveFrankPoints)
+        let daveFrankRouted = RoutedTestEdge(edge: daveFrankEdge, points: daveFrankPoints)
+        #expect(routeCornerCount(eveFrankPoints) == 0)
+        #expect(!routesCrossAwayFromSharedEndpoint(eveFrankRouted, daveFrankRouted))
+        #expect(daveFrankRoute.end.y < eveFrankRoute.end.y)
+        #expect(renderedRouteLength(daveFrankRoute) <= 148.5)
+
         let outline = try nodeOutlineRect(result: result)
         let aspect = Double(outline.width / outline.height)
         let cardRects = try cardRects(result: result)
