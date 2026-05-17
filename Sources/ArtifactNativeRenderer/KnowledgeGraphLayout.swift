@@ -7590,9 +7590,9 @@ struct KnowledgeGraphLayout: Sendable {
                     excludedIndices: excluded
                 )
                 for candidate in candidates {
-                    let points = simplifyRoutePoints(candidate)
+                    let points = candidate
                     guard points.count > 1 else { continue }
-                    guard routeIsOrthogonal(points) else { continue }
+                    guard simplifiedRouteIsOrthogonal(points) else { continue }
                     guard routeUsesPerpendicularPorts(
                         points,
                         sourcePort: sourcePort,
@@ -7614,10 +7614,11 @@ struct KnowledgeGraphLayout: Sendable {
                         currentEdge: currentEdge,
                         routeSegmentIndex: routeSegmentIndex
                     )
+                    let metrics = simplifiedRouteMetrics(points)
                     let score = OrthogonalRouteScore(
                         edgeClearance: edgeClearance,
-                        length: routeLength(points),
-                        corners: routeCornerCount(points),
+                        length: metrics.length,
+                        corners: metrics.corners,
                         portPreference: hypot(
                             sourcePort.point.x - preferredSourcePort.point.x,
                             sourcePort.point.y - preferredSourcePort.point.y
@@ -7660,9 +7661,9 @@ struct KnowledgeGraphLayout: Sendable {
         var best: [CGPoint]?
         var bestScore: OrthogonalRouteScore?
         for candidate in candidates {
-            let points = simplifyRoutePoints(candidate)
+            let points = candidate
             guard points.count > 1 else { continue }
-            guard routeIsOrthogonal(points) else { continue }
+            guard simplifiedRouteIsOrthogonal(points) else { continue }
             guard routeUsesPerpendicularPorts(points, sourcePort: sourcePort, targetPort: targetPort) else { continue }
             guard routeClearsNodes(points, nodeIndex: nodeIndex, excluding: excluded) else { continue }
             guard routeJointsClearEndpointNodes(
@@ -7675,10 +7676,11 @@ struct KnowledgeGraphLayout: Sendable {
                 currentEdge: edge,
                 routeSegmentIndex: routeSegmentIndex
             )
+            let metrics = simplifiedRouteMetrics(points)
             let score = OrthogonalRouteScore(
                 edgeClearance: edgeClearance,
-                length: routeLength(points),
-                corners: routeCornerCount(points),
+                length: metrics.length,
+                corners: metrics.corners,
                 portPreference: 0
             )
             if bestScore.map({ score.isBetter(than: $0) }) ?? true {
@@ -7723,7 +7725,10 @@ struct KnowledgeGraphLayout: Sendable {
         ])
 
         var candidates: [[CGPoint]] = []
-        var seen: Set<String> = []
+        let expectedCandidateCount = stubDistances.count * stubDistances.count * (laneOffsets.count * 2 + 3)
+        candidates.reserveCapacity(expectedCandidateCount)
+        var seen: Set<RouteCandidateKey> = []
+        seen.reserveCapacity(expectedCandidateCount)
         for sourceDistance in stubDistances {
             for targetDistance in stubDistances {
                 let firstCandidateIndex = candidates.count
@@ -7858,6 +7863,81 @@ struct KnowledgeGraphLayout: Sendable {
         }
     }
 
+    private struct RouteSearchQueueEntry {
+        let state: RouteSearchState
+        let cost: RouteSearchCost
+
+        func isBetter(than other: RouteSearchQueueEntry) -> Bool {
+            if cost.isBetter(than: other.cost) {
+                return true
+            }
+            if other.cost.isBetter(than: cost) {
+                return false
+            }
+            if state.pointIndex != other.state.pointIndex {
+                return state.pointIndex < other.state.pointIndex
+            }
+            return axisOrder(state.axis) < axisOrder(other.state.axis)
+        }
+
+        private func axisOrder(_ axis: RouteAxis?) -> Int {
+            switch axis {
+            case nil:
+                return 0
+            case .horizontal:
+                return 1
+            case .vertical:
+                return 2
+            }
+        }
+    }
+
+    private struct RouteSearchPriorityQueue {
+        private var entries: [RouteSearchQueueEntry] = []
+
+        mutating func push(_ entry: RouteSearchQueueEntry) {
+            entries.append(entry)
+            siftUp(from: entries.count - 1)
+        }
+
+        mutating func popMin() -> RouteSearchQueueEntry? {
+            guard !entries.isEmpty else { return nil }
+            guard entries.count > 1 else { return entries.removeLast() }
+            let result = entries[0]
+            entries[0] = entries.removeLast()
+            siftDown(from: 0)
+            return result
+        }
+
+        private mutating func siftUp(from index: Int) {
+            var child = index
+            while child > 0 {
+                let parent = (child - 1) / 2
+                guard entries[child].isBetter(than: entries[parent]) else { break }
+                entries.swapAt(child, parent)
+                child = parent
+            }
+        }
+
+        private mutating func siftDown(from index: Int) {
+            var parent = index
+            while true {
+                let left = parent * 2 + 1
+                let right = left + 1
+                var best = parent
+                if left < entries.count, entries[left].isBetter(than: entries[best]) {
+                    best = left
+                }
+                if right < entries.count, entries[right].isBetter(than: entries[best]) {
+                    best = right
+                }
+                guard best != parent else { break }
+                entries.swapAt(parent, best)
+                parent = best
+            }
+        }
+    }
+
     private static func obstacleAvoidingOrthogonalRoute(
         start: CGPoint,
         end: CGPoint,
@@ -7902,47 +7982,51 @@ struct KnowledgeGraphLayout: Sendable {
 
         let width = xValues.count
         let height = yValues.count
+        var gridPoints: [CGPoint] = []
+        gridPoints.reserveCapacity(width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                gridPoints.append(CGPoint(x: xValues[x], y: yValues[y]))
+            }
+        }
+
         func pointIndex(x: Int, y: Int) -> Int {
             y * width + x
         }
-        func gridPoint(_ index: Int) -> CGPoint {
-            let x = index % width
-            let y = index / width
-            return CGPoint(x: xValues[x], y: yValues[y])
-        }
+
         let startIndex = pointIndex(x: startX, y: startY)
         let endIndex = pointIndex(x: endX, y: endY)
         let startState = RouteSearchState(pointIndex: startIndex, axis: nil)
+        let startCost = RouteSearchCost(length: 0, corners: 0)
         var distances: [RouteSearchState: RouteSearchCost] = [
-            startState: RouteSearchCost(length: 0, corners: 0)
+            startState: startCost
         ]
         var previous: [RouteSearchState: RouteSearchState] = [:]
         var visited: Set<RouteSearchState> = []
+        var queue = RouteSearchPriorityQueue()
+        queue.push(RouteSearchQueueEntry(state: startState, cost: startCost))
 
-        while true {
-            guard let current = distances
-                .filter({ !visited.contains($0.key) })
-                .min(by: { $0.value.isBetter(than: $1.value) })?
-                .key
-            else { break }
+        while let entry = queue.popMin() {
+            let current = entry.state
+            guard !visited.contains(current) else { continue }
+            guard let currentDistance = distances[current] else { continue }
+            guard !currentDistance.isBetter(than: entry.cost) else { continue }
             if current.pointIndex == endIndex {
                 return reconstructRoute(
                     endingAt: current,
                     previous: previous,
-                    pointForIndex: gridPoint
+                    pointForIndex: { gridPoints[$0] }
                 )
             }
             visited.insert(current)
-            guard let currentDistance = distances[current] else { continue }
-            for (neighborIndex, axis) in orthogonalGridNeighbors(
-                pointIndex: current.pointIndex,
-                width: width,
-                height: height
-            ) {
-                let currentPoint = gridPoint(current.pointIndex)
-                let neighborPoint = gridPoint(neighborIndex)
+
+            let currentPoint = gridPoints[current.pointIndex]
+            let x = current.pointIndex % width
+            let y = current.pointIndex / width
+            func visit(neighborIndex: Int, axis: RouteAxis) {
+                let neighborPoint = gridPoints[neighborIndex]
                 guard segmentClearsObstacles(currentPoint, neighborPoint, obstacles: obstacles) else {
-                    continue
+                    return
                 }
                 let turns = current.axis == nil || current.axis == axis ? 0 : 1
                 let stepLength = hypot(neighborPoint.x - currentPoint.x, neighborPoint.y - currentPoint.y)
@@ -7951,7 +8035,21 @@ struct KnowledgeGraphLayout: Sendable {
                 if distances[neighborState].map({ nextCost.isBetter(than: $0) }) ?? true {
                     distances[neighborState] = nextCost
                     previous[neighborState] = current
+                    queue.push(RouteSearchQueueEntry(state: neighborState, cost: nextCost))
                 }
+            }
+
+            if x > 0 {
+                visit(neighborIndex: pointIndex(x: x - 1, y: y), axis: .horizontal)
+            }
+            if x + 1 < width {
+                visit(neighborIndex: pointIndex(x: x + 1, y: y), axis: .horizontal)
+            }
+            if y > 0 {
+                visit(neighborIndex: pointIndex(x: x, y: y - 1), axis: .vertical)
+            }
+            if y + 1 < height {
+                visit(neighborIndex: pointIndex(x: x, y: y + 1), axis: .vertical)
             }
         }
         return nil
@@ -7959,29 +8057,6 @@ struct KnowledgeGraphLayout: Sendable {
 
     private static func sortedUniqueCGFloatValues(_ values: [CGFloat]) -> [CGFloat] {
         uniqueCGFloatValues(values).sorted()
-    }
-
-    private static func orthogonalGridNeighbors(
-        pointIndex: Int,
-        width: Int,
-        height: Int
-    ) -> [(Int, RouteAxis)] {
-        let x = pointIndex % width
-        let y = pointIndex / width
-        var neighbors: [(Int, RouteAxis)] = []
-        if x > 0 {
-            neighbors.append((y * width + x - 1, .horizontal))
-        }
-        if x + 1 < width {
-            neighbors.append((y * width + x + 1, .horizontal))
-        }
-        if y > 0 {
-            neighbors.append(((y - 1) * width + x, .vertical))
-        }
-        if y + 1 < height {
-            neighbors.append(((y + 1) * width + x, .vertical))
-        }
-        return neighbors
     }
 
     private static func reconstructRoute(
@@ -8021,25 +8096,46 @@ struct KnowledgeGraphLayout: Sendable {
         return result
     }
 
+    private struct QuantizedRoutePoint: Hashable {
+        let x: Int
+        let y: Int
+
+        init(_ point: CGPoint) {
+            x = Int(point.x.rounded())
+            y = Int(point.y.rounded())
+        }
+    }
+
+    private struct RouteCandidateKey: Hashable {
+        let points: [QuantizedRoutePoint]
+    }
+
     private static func appendRouteCandidate(
         _ points: [CGPoint],
         to candidates: inout [[CGPoint]],
-        seen: inout Set<String>
+        seen: inout Set<RouteCandidateKey>
     ) {
         let simplified = simplifyRoutePoints(points)
-        let key = simplified
-            .map { "\(Int($0.x.rounded())):\(Int($0.y.rounded()))" }
-            .joined(separator: "|")
+        let key = RouteCandidateKey(points: simplified.map(QuantizedRoutePoint.init))
         guard seen.insert(key).inserted else { return }
         candidates.append(simplified)
     }
 
+    private struct RouteMetrics {
+        let length: CGFloat
+        let corners: Int
+    }
+
     private static func routeIsOrthogonal(_ points: [CGPoint]) -> Bool {
         let simplified = simplifyRoutePoints(points)
-        guard simplified.count > 1 else { return false }
-        for offset in 1..<simplified.count {
-            let previous = simplified[offset - 1]
-            let current = simplified[offset]
+        return simplifiedRouteIsOrthogonal(simplified)
+    }
+
+    private static func simplifiedRouteIsOrthogonal(_ points: [CGPoint]) -> Bool {
+        guard points.count > 1 else { return false }
+        for offset in 1..<points.count {
+            let previous = points[offset - 1]
+            let current = points[offset]
             let sameX = abs(previous.x - current.x) < 0.5
             let sameY = abs(previous.y - current.y) < 0.5
             if !sameX && !sameY {
@@ -8057,34 +8153,33 @@ struct KnowledgeGraphLayout: Sendable {
         return abs(start.x - end.x) < 0.5 || abs(start.y - end.y) < 0.5
     }
 
-    private static func routeCornerCount(_ points: [CGPoint]) -> Int {
-        let simplified = simplifyRoutePoints(points)
-        guard simplified.count > 2 else { return 0 }
-        var count = 0
-        for index in 1..<(simplified.count - 1) {
-            let previous = simplified[index - 1]
-            let current = simplified[index]
-            let next = simplified[index + 1]
+    private static func simplifiedRouteMetrics(_ points: [CGPoint]) -> RouteMetrics {
+        guard points.count > 1 else {
+            return RouteMetrics(length: 0, corners: 0)
+        }
+        var length: CGFloat = 0
+        var corners = 0
+        for offset in 1..<points.count {
+            let previous = points[offset - 1]
+            let current = points[offset]
+            length += hypot(
+                current.x - previous.x,
+                current.y - previous.y
+            )
+            guard offset + 1 < points.count else { continue }
+            let next = points[offset + 1]
             let enteringHorizontal = abs(previous.y - current.y) < 0.5
             let leavingHorizontal = abs(current.y - next.y) < 0.5
             if enteringHorizontal != leavingHorizontal {
-                count += 1
+                corners += 1
             }
         }
-        return count
+        return RouteMetrics(length: length, corners: corners)
     }
 
     private static func routeLength(_ points: [CGPoint]) -> CGFloat {
         let simplified = simplifyRoutePoints(points)
-        guard simplified.count > 1 else { return 0 }
-        var length: CGFloat = 0
-        for offset in 1..<simplified.count {
-            length += hypot(
-                simplified[offset].x - simplified[offset - 1].x,
-                simplified[offset].y - simplified[offset - 1].y
-            )
-        }
-        return length
+        return simplifiedRouteMetrics(simplified).length
     }
 
     private static func offsetPoint(
