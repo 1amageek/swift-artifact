@@ -297,6 +297,8 @@ axis C:  y  60 ───────── 180     load: 1  <- prefer
 
 同じ pass 内で選んだ lane は直ちに segment index へ反映する。
 古い index を見たまま全 Edge が同じ空き lane を選ぶ batch 更新は禁止する。
+segment index は pass 開始時に構築し、lane が実際に動いた時は対象 Edge の segment だけを差し替える。
+Edge ごとの候補評価、または単一 Edge の lane 更新のたびに全 route segment index を作り直してはならない。
 現行 route が Joint-Node / Node 非干渉を満たしていない場合は、現行 route を無条件の基準として残してはならない。
 
 ### 3.5 Node と Edge の干渉

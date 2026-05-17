@@ -5684,6 +5684,7 @@ struct KnowledgeGraphLayout: Sendable {
     private struct SpatialEntry<Item> {
         let item: Item
         let rect: CGRect
+        var isActive = true
     }
 
     private struct SpatialHashIndex<Item> {
@@ -5702,6 +5703,12 @@ struct KnowledgeGraphLayout: Sendable {
             entries.append(SpatialEntry(item: item, rect: normalized))
             forEachCellCovered(by: normalized) { cell in
                 cells[cell, default: []].append(entryIndex)
+            }
+        }
+
+        mutating func removeAll(where shouldRemove: (Item) -> Bool) {
+            for index in entries.indices where entries[index].isActive && shouldRemove(entries[index].item) {
+                entries[index].isActive = false
             }
         }
 
@@ -5737,6 +5744,7 @@ struct KnowledgeGraphLayout: Sendable {
                 if let indices = cells[cell] {
                     for index in indices where seen.insert(index).inserted {
                         let entry = entries[index]
+                        guard entry.isActive else { continue }
                         if rectsOverlapOrTouch(entry.rect, normalized) {
                             shouldContinue = visit(entry)
                             if !shouldContinue {
@@ -5871,6 +5879,11 @@ struct KnowledgeGraphLayout: Sendable {
                 )
                 index.insert(segment, rect: segmentBounds(segment.start, segment.end))
             }
+        }
+
+        mutating func replace(_ routedEdge: RoutedEdge) {
+            index.removeAll { $0.edge.id == routedEdge.edge.id }
+            insert(routedEdge)
         }
 
         func forEachSegmentNear(
@@ -6860,6 +6873,7 @@ struct KnowledgeGraphLayout: Sendable {
     ) -> [EdgeIdentifier: EdgeRoute] {
         var normalized = routes
         for _ in 0..<4 {
+            var routeSegmentIndex = Self.routeSegmentIndex(edges: edges, routes: normalized)
             var changed = false
             for edge in edges where edge.source != edge.target {
                 guard
@@ -6871,11 +6885,6 @@ struct KnowledgeGraphLayout: Sendable {
                 guard let jointRoute = equalLengthJointRoute(points) else { continue }
 
                 let excluded = Set([sourceIndex, targetIndex])
-                let routeSegmentIndex = Self.routeSegmentIndex(
-                    edges: edges,
-                    routes: normalized,
-                    excluding: [edge.id]
-                )
                 var bestPoints = points
                 let currentIsValid = routeClearsNodes(
                     points,
@@ -6898,7 +6907,8 @@ struct KnowledgeGraphLayout: Sendable {
                 for axis in equalLengthJointAxisCandidates(
                     jointRoute: jointRoute,
                     points: points,
-                    routeSegmentIndex: routeSegmentIndex
+                    routeSegmentIndex: routeSegmentIndex,
+                    excluding: edge.id
                 ) {
                     let candidate = routePointsBySlidingEqualLengthJoint(points, jointRoute: jointRoute, axis: axis)
                     guard routeIsOrthogonal(candidate) else { continue }
@@ -6934,6 +6944,7 @@ struct KnowledgeGraphLayout: Sendable {
 
                 if !currentIsValid || routePointDelta(bestPoints, points) > 0.5 {
                     normalized[edge.id] = edgeRoute(points: bestPoints)
+                    routeSegmentIndex.replace(RoutedEdge(edge: edge, points: bestPoints))
                     changed = true
                 }
             }
@@ -7017,7 +7028,8 @@ struct KnowledgeGraphLayout: Sendable {
     private static func equalLengthJointAxisCandidates(
         jointRoute: EqualLengthJointRoute,
         points: [CGPoint],
-        routeSegmentIndex: RouteSegmentIndex
+        routeSegmentIndex: RouteSegmentIndex,
+        excluding excludedEdgeID: EdgeIdentifier
     ) -> [CGFloat] {
         let lower = jointRoute.lowerBound
         let upper = jointRoute.upperBound
@@ -7039,7 +7051,8 @@ struct KnowledgeGraphLayout: Sendable {
         for segment in routeSegmentsInEqualLengthJointSearchArea(
             jointRoute: jointRoute,
             points: points,
-            routeSegmentIndex: routeSegmentIndex
+            routeSegmentIndex: routeSegmentIndex,
+            excluding: excludedEdgeID
         ) {
             guard routeSegmentOrientation(start: segment.start, end: segment.end) == jointRoute.orientation else {
                 continue
@@ -7068,7 +7081,8 @@ struct KnowledgeGraphLayout: Sendable {
     private static func routeSegmentsInEqualLengthJointSearchArea(
         jointRoute: EqualLengthJointRoute,
         points: [CGPoint],
-        routeSegmentIndex: RouteSegmentIndex
+        routeSegmentIndex: RouteSegmentIndex,
+        excluding excludedEdgeID: EdgeIdentifier
     ) -> [IndexedRouteSegment] {
         let simplified = simplifyRoutePoints(points)
         guard simplified.count == 4 else { return [] }
@@ -7092,7 +7106,7 @@ struct KnowledgeGraphLayout: Sendable {
                 height: jointRoute.upperBound - jointRoute.lowerBound
             ).insetBy(dx: -padding, dy: -padding)
         }
-        return routeSegmentIndex.segments(in: rect)
+        return routeSegmentIndex.segments(in: rect).filter { $0.edge.id != excludedEdgeID }
     }
 
     private static func equalLengthJointLaneScore(
