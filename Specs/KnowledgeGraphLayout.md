@@ -121,7 +121,11 @@ Edge 最短を優先する。
 
 同じ Node の同じ辺に 2 本以上の Edge が接続する場合は、Port 群全体を辺中央に揃えたまま分散する。
 複数 Edge が同じ source / target Node の同じ辺へ接続する場合、その endpoint 側の port 群は
-Node 中心を基準に対称配置する。ただし、この分散 port は最短経路より上位の固定制約ではない。
+Node 中心を基準に対称配置する。side が決まった後の複数 port bundle では、この等間隔 slot を
+先に固定し、その slot を endpoint として最短 route を選ぶ。
+偶数本の bundle では中央そのものに port を置かず、中央を挟む 2 つの slot を使う。
+この場合、直線 Edge も中央ぴったりではなく中央に最も近い slot を使い、bundle 全体の中心を
+Node 辺の中心へ合わせる。
 Node 同士を水平または垂直の直線で結べる Edge は、その辺の中心 port を優先して維持する。
 同じ辺に関節付き Edge が混在する場合は、直線 Edge ではなく関節付き Edge 側の port / lane をずらす。
 共有していない endpoint は、その Node 辺の中央 port を使う。直線 Edge にするためだけに、
@@ -148,9 +152,28 @@ Edge-Edge port 距離が収まらない場合
 ┌┬───┬───┬───┬───┬┐
 │        Node        │
 └────────────────────┘
+
+偶数本 bundle の中央 bias
+
+NG: direct を 0 に固定し、残りが片側へ偏る
+       -1   0   +1  +2
+┌──────┬────┬────┬────┬──┐
+│             Node        │
+└─────────────────────────┘
+
+OK: bundle 全体の中心を Node 中心へ合わせる
+      -1.5 -0.5 +0.5 +1.5
+┌───────┬────┬────┬────┬────┐
+│              Node          │
+└────────────────────────────┘
 ```
 
 実装では角の side 判定が曖昧にならないよう、Port は 1 pt の corner guard を残して辺内に収める。
+複数 port の bundle では、同じ Node/side 上の port slot を先に等間隔で確定する。
+その後、各 Edge はその port slot を endpoint として最短 route を選ぶ。個別 Edge が少し短くなることを理由に、
+1 本だけ古い port 位置を残して bundle の等間隔を崩してはならない。
+単一 port endpoint の中央 bias だけは、既存 route が `Edge-Edge port + 2.5 pt` を超えて伸びる場合に採用しない。
+これは、bundle 制約が存在しない場合は中央寄せよりも Edge 最短を優先するためである。
 
 ### 3.4 経路優先順位
 
@@ -205,7 +228,9 @@ Edge B ─┘    └─
 上記の順序で route を選ぶ。Edge 長が短い候補と preferred port に近い候補が競合する場合は、
 必ず Edge 長が短い候補を選ぶ。
 直線 route が成立する場合、同じ endpoint side に他の関節付き Edge があっても、
-直線 route の中心 port を予約する。関節付き Edge はその周辺 port へ再分散する。
+直線 route は維持する。偶数本 bundle では直線 Edge を絶対中央に固定せず、bundle 全体の中心を
+保てる中央近傍 slot を使う。反対側 endpoint が単一 port の場合は、その endpoint も同じ axis へ
+寄せて直線 route を維持する。
 
 同じ Node 辺に複数 Edge が入る endpoint でも、分散済み port だけを固定候補にしてはならない。
 反対側 endpoint が共有されていない場合は反対側 Node 辺の中央 port を維持する。

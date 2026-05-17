@@ -117,6 +117,7 @@ struct KnowledgeGraphLayout: Sendable {
         static let groupNode: CGFloat = 32
         static let groupGroup: CGFloat = 72
         static let portCornerGuard: CGFloat = 1
+        static let portCenterBiasRouteTolerance: CGFloat = edgeEdgePort + 2.5
 
         static let labelHeight: CGFloat = 18
         static let edgeLabelLabel: CGFloat = 4
@@ -6084,6 +6085,90 @@ struct KnowledgeGraphLayout: Sendable {
         return nil
     }
 
+    private static func directRouteWithPortBias(
+        sourceRect: CGRect,
+        targetRect: CGRect,
+        sourceSide: EdgePortSide,
+        targetSide: EdgePortSide,
+        sourcePort: EdgePort,
+        targetPort: EdgePort
+    ) -> [CGPoint]? {
+        guard directSidesFaceEachOther(
+            sourceRect: sourceRect,
+            targetRect: targetRect,
+            sourceSide: sourceSide,
+            targetSide: targetSide
+        ) else {
+            return nil
+        }
+        for coordinate in directRoutePortBiasAxisCandidates(
+            sourceRect: sourceRect,
+            targetRect: targetRect,
+            sourceSide: sourceSide,
+            sourcePort: sourcePort,
+            targetPort: targetPort
+        ) {
+            guard
+                portCoordinateIsAvailable(coordinate, side: sourceSide, rect: sourceRect),
+                portCoordinateIsAvailable(coordinate, side: targetSide, rect: targetRect)
+            else { continue }
+            return [
+                directRoutePoint(rect: sourceRect, side: sourceSide, coordinate: coordinate),
+                directRoutePoint(rect: targetRect, side: targetSide, coordinate: coordinate)
+            ]
+        }
+        return nil
+    }
+
+    private static func directSidesFaceEachOther(
+        sourceRect: CGRect,
+        targetRect: CGRect,
+        sourceSide: EdgePortSide,
+        targetSide: EdgePortSide
+    ) -> Bool {
+        switch (sourceSide, targetSide) {
+        case (.right, .left):
+            return sourceRect.maxX <= targetRect.minX
+        case (.left, .right):
+            return targetRect.maxX <= sourceRect.minX
+        case (.bottom, .top):
+            return sourceRect.maxY <= targetRect.minY
+        case (.top, .bottom):
+            return targetRect.maxY <= sourceRect.minY
+        default:
+            return false
+        }
+    }
+
+    private static func directRoutePortBiasAxisCandidates(
+        sourceRect: CGRect,
+        targetRect: CGRect,
+        sourceSide: EdgePortSide,
+        sourcePort: EdgePort,
+        targetPort: EdgePort
+    ) -> [CGFloat] {
+        let sourceCoordinate = portAxisCoordinate(sourcePort.point, side: sourceSide)
+        let targetCoordinate = portAxisCoordinate(targetPort.point, side: sourceSide)
+        var candidates: [CGFloat] = []
+        if sourcePort.bucketCount > 1 {
+            candidates.append(sourceCoordinate)
+        }
+        if targetPort.bucketCount > 1 {
+            candidates.append(targetCoordinate)
+        }
+        if sourcePort.bucketCount > 1 || targetPort.bucketCount > 1 {
+            candidates.append((sourceCoordinate + targetCoordinate) * 0.5)
+        }
+        candidates.append(overlapCenterCoordinate(
+            sourceRect: sourceRect,
+            targetRect: targetRect,
+            side: sourceSide
+        ))
+        candidates.append(sourceCoordinate)
+        candidates.append(targetCoordinate)
+        return uniqueCGFloatValues(candidates)
+    }
+
     private static func directRouteAxisCandidates(
         sourceRect: CGRect,
         targetRect: CGRect,
@@ -6305,7 +6390,7 @@ struct KnowledgeGraphLayout: Sendable {
                 return edgeSortKey(lhs.edgeID) < edgeSortKey(rhs.edgeID)
             }
             let centerEntries = sorted.filter(\.prefersCenter)
-            if centerEntries.count == 1 {
+            if centerEntries.count == 1, !sorted.count.isMultiple(of: 2) {
                 endpointPoints[centerEntries[0].key] = portPoint(
                     side: bucket.side,
                     rect: rect,
@@ -6322,13 +6407,38 @@ struct KnowledgeGraphLayout: Sendable {
                     endpointPoints[entry.key] = point
                 }
             } else {
-                for (index, entry) in sorted.enumerated() {
-                    endpointPoints[entry.key] = portPoint(
+                var assignedSlotByKey: [EdgeEndpointKey: Int] = [:]
+                var usedSlots = Set<Int>()
+                let slotPoints = (0..<sorted.count).map { index in
+                    portPoint(
                         side: bucket.side,
                         rect: rect,
                         index: index,
                         count: sorted.count
                     )
+                }
+                for entry in centerEntries.sorted(by: { lhs, rhs in
+                    abs(lhs.coordinate - portAxisCenter(side: bucket.side, rect: rect))
+                        < abs(rhs.coordinate - portAxisCenter(side: bucket.side, rect: rect))
+                }) {
+                    guard let slotIndex = centerBiasedSlotIndex(
+                        slotPoints: slotPoints,
+                        side: bucket.side,
+                        rect: rect,
+                        preferredCoordinate: entry.coordinate,
+                        usedSlots: usedSlots
+                    ) else { continue }
+                    assignedSlotByKey[entry.key] = slotIndex
+                    usedSlots.insert(slotIndex)
+                }
+                let remainingEntries = sorted.filter { assignedSlotByKey[$0.key] == nil }
+                let remainingSlots = slotPoints.indices.filter { !usedSlots.contains($0) }
+                for (entry, slotIndex) in zip(remainingEntries, remainingSlots) {
+                    assignedSlotByKey[entry.key] = slotIndex
+                }
+                for entry in sorted {
+                    guard let slotIndex = assignedSlotByKey[entry.key] else { continue }
+                    endpointPoints[entry.key] = slotPoints[slotIndex]
                 }
             }
         }
@@ -6370,6 +6480,26 @@ struct KnowledgeGraphLayout: Sendable {
             let centeredParallel = edge.parallelCount > 1
                 ? CGFloat(edge.parallelIndex) - CGFloat(edge.parallelCount - 1) / 2
                 : 0
+            let currentPoints = routePoints(from: route)
+            if
+                routeIsDirect(currentPoints),
+                let directPoints = directRouteWithPortBias(
+                    sourceRect: cardRects[sourceIndex],
+                    targetRect: cardRects[targetIndex],
+                    sourceSide: sourceSide,
+                    targetSide: targetSide,
+                    sourcePort: centeredSourcePort,
+                    targetPort: centeredTargetPort
+                ),
+                routeClearsNodes(
+                    directPoints,
+                    nodeIndex: nodeIndex,
+                    excluding: Set([sourceIndex, targetIndex])
+                )
+            {
+                updated[edge.id] = edgeRoute(points: directPoints)
+                continue
+            }
             guard let centeredPoints = shortestFixedEndpointRoute(
                 edge: edge,
                 sourcePort: centeredSourcePort,
@@ -6380,6 +6510,12 @@ struct KnowledgeGraphLayout: Sendable {
                 nodeIndex: nodeIndex,
                 routeSegmentIndex: routeSegmentIndex
             ) else { continue }
+            let sharedPortBundle = centeredSourcePort.bucketCount > 1 || centeredTargetPort.bucketCount > 1
+            if !sharedPortBundle {
+                guard routeLength(centeredPoints) <= routeLength(currentPoints) + LayoutSpacing.portCenterBiasRouteTolerance else {
+                    continue
+                }
+            }
             updated[edge.id] = edgeRoute(points: centeredPoints)
         }
 
@@ -7458,6 +7594,33 @@ struct KnowledgeGraphLayout: Sendable {
         }
     }
 
+    private static func centerBiasedSlotIndex(
+        slotPoints: [CGPoint],
+        side: EdgePortSide,
+        rect: CGRect,
+        preferredCoordinate: CGFloat,
+        usedSlots: Set<Int>
+    ) -> Int? {
+        let center = portAxisCenter(side: side, rect: rect)
+        return slotPoints.indices
+            .filter { !usedSlots.contains($0) }
+            .min { lhs, rhs in
+                let lhsCoordinate = portAxisCoordinate(slotPoints[lhs], side: side)
+                let rhsCoordinate = portAxisCoordinate(slotPoints[rhs], side: side)
+                let lhsCenterDistance = abs(lhsCoordinate - center)
+                let rhsCenterDistance = abs(rhsCoordinate - center)
+                if abs(lhsCenterDistance - rhsCenterDistance) > 0.001 {
+                    return lhsCenterDistance < rhsCenterDistance
+                }
+                let lhsPreferredDistance = abs(lhsCoordinate - preferredCoordinate)
+                let rhsPreferredDistance = abs(rhsCoordinate - preferredCoordinate)
+                if abs(lhsPreferredDistance - rhsPreferredDistance) > 0.001 {
+                    return lhsPreferredDistance < rhsPreferredDistance
+                }
+                return lhs < rhs
+            }
+    }
+
     private static func portPointsExcludingCenter(
         side: EdgePortSide,
         rect: CGRect,
@@ -7465,30 +7628,30 @@ struct KnowledgeGraphLayout: Sendable {
     ) -> [CGPoint] {
         guard !coordinates.isEmpty else { return [] }
         let center = portAxisCenter(side: side, rect: rect)
-        let negativeIndices = coordinates.indices.filter { coordinates[$0] < center - 0.5 }
-        let positiveIndices = coordinates.indices.filter { coordinates[$0] >= center - 0.5 }
-        let negativeCount = negativeIndices.count
-        let positiveCount = positiveIndices.count
-        let maxSideCount = max(negativeCount, positiveCount)
+        let orderedIndices = coordinates.indices.sorted { lhs, rhs in
+            if abs(coordinates[lhs] - coordinates[rhs]) > 0.001 {
+                return coordinates[lhs] < coordinates[rhs]
+            }
+            return lhs < rhs
+        }
+        let positiveDemand = coordinates.reduce(CGFloat.zero) { partial, coordinate in
+            partial + max(0, coordinate - center)
+        }
+        let negativeDemand = coordinates.reduce(CGFloat.zero) { partial, coordinate in
+            partial + max(0, center - coordinate)
+        }
+        let slots = nonzeroCenteredPortSlots(
+            count: coordinates.count,
+            preferPositiveOverflow: positiveDemand >= negativeDemand
+        )
+        let maxSlot = max(slots.map { abs($0) }.max() ?? 1, 1)
         let step = min(
             LayoutSpacing.edgeEdgePort,
-            maxSideCount > 0 ? portAvailableLength(side: side, rect: rect) * 0.5 / CGFloat(maxSideCount) : 0
+            portAvailableLength(side: side, rect: rect) * 0.5 / maxSlot
         )
         var points = Array(repeating: CGPoint.zero, count: coordinates.count)
-        for (slot, index) in negativeIndices.enumerated() {
-            let coordinate = center - CGFloat(negativeCount - slot) * step
-            points[index] = directRoutePoint(
-                rect: rect,
-                side: side,
-                coordinate: clampPortCoordinate(
-                    coordinate,
-                    min: portAxisMinimum(side: side, rect: rect),
-                    max: portAxisMaximum(side: side, rect: rect)
-                )
-            )
-        }
-        for (slot, index) in positiveIndices.enumerated() {
-            let coordinate = center + CGFloat(slot + 1) * step
+        for (slotIndex, index) in orderedIndices.enumerated() {
+            let coordinate = center + slots[slotIndex] * step
             points[index] = directRoutePoint(
                 rect: rect,
                 side: side,
@@ -7500,6 +7663,31 @@ struct KnowledgeGraphLayout: Sendable {
             )
         }
         return points
+    }
+
+    private static func nonzeroCenteredPortSlots(
+        count: Int,
+        preferPositiveOverflow: Bool
+    ) -> [CGFloat] {
+        guard count > 0 else { return [] }
+        if count == 1 {
+            return [preferPositiveOverflow ? 1 : -1]
+        }
+        let pairedCount = count / 2
+        var slots: [Int] = []
+        slots.reserveCapacity(count)
+        for distance in stride(from: pairedCount, through: 1, by: -1) {
+            slots.append(-distance)
+        }
+        for distance in 1...pairedCount {
+            slots.append(distance)
+        }
+        if count.isMultiple(of: 2) {
+            return slots.sorted().map(CGFloat.init)
+        }
+        let overflow = preferPositiveOverflow ? pairedCount + 1 : -(pairedCount + 1)
+        slots.append(overflow)
+        return slots.sorted().map(CGFloat.init)
     }
 
     private static func portAxisCenter(side: EdgePortSide, rect: CGRect) -> CGFloat {
