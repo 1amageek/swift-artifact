@@ -48,7 +48,7 @@ Snapshot test                              — FR の数値ドリフトで flaky
 
 ## 4. 型定義
 
-新規型は `Sources/ArtifactNativeRenderer/` 配下、SOLID に従い 1ファイル1型。
+新規型は `Sources/ArtifactNativeRenderer/Graph/KnowledgeGraph/` 配下、SOLID に従い 1ファイル1型。
 全公開型は `Sendable` かつ `Hashable`。
 
 ### 4.1 `CompoundGraph.Group`
@@ -153,7 +153,7 @@ enum GroupingStrategy: Sendable, Hashable {
 
 ### 4.4 `CompoundGraph` の拡張
 
-`KnowledgeGraphCompoundGraph.swift` (modify):
+`Graph/KnowledgeGraph/KnowledgeGraphCompoundGraph.swift` (modify):
 
 ```swift
 struct CompoundGraph: Sendable {
@@ -171,7 +171,7 @@ struct CompoundGraph: Sendable {
 
 ### 4.5 `KnowledgeGraphLayout.Result` の拡張
 
-`KnowledgeGraphLayout.swift` (modify):
+`Graph/KnowledgeGraph/KnowledgeGraphLayout.swift` (modify):
 
 ```swift
 struct Result: Sendable {
@@ -508,15 +508,17 @@ L3. ∀ group: groupBoundingBoxes[group.id] が finite (Inf / NaN なし)
 
 ```
 Sources/ArtifactNativeRenderer/
-├── KnowledgeGraphCompoundGraph.swift       MODIFY  (groups field, derive 呼び出し)
-├── KnowledgeGraphGroup.swift               NEW     (Group, Group.ID)
-├── KnowledgeGraphGroupStyle.swift          NEW     (GroupStyle, Tint, Outline)
-├── KnowledgeGraphGroupingStrategy.swift    NEW     (GroupingStrategy + deriveGroups)
-├── KnowledgeGraphGroupPalette.swift        NEW     (GroupPalette; SwiftUI-aware)
-├── KnowledgeGraphLayout.swift              MODIFY  (cohesion + bbox + Result field)
-└── KnowledgeGraphView.swift                MODIFY  (drawGroups + palette 接続)
+└── Graph/
+    └── KnowledgeGraph/
+        ├── KnowledgeGraphCompoundGraph.swift       MODIFY  (groups field, derive 呼び出し)
+        ├── KnowledgeGraphGroup.swift               NEW     (Group, Group.ID)
+        ├── KnowledgeGraphGroupStyle.swift          NEW     (GroupStyle, Tint, Outline)
+        ├── KnowledgeGraphGroupingStrategy.swift    NEW     (GroupingStrategy + deriveGroups)
+        ├── KnowledgeGraphGroupPalette.swift        NEW     (GroupPalette; SwiftUI-aware)
+        ├── KnowledgeGraphLayout.swift              MODIFY  (cohesion + bbox + Result field)
+        └── KnowledgeGraphView.swift                MODIFY  (drawGroups + palette 接続)
 
-Tests/ArtifactNativeRendererTests/
+Tests/ArtifactRendererTests/
 ├── CompoundGraphGroupTests.swift           NEW
 ├── KnowledgeGraphLayoutGroupTests.swift    NEW
 └── Fixtures/Groups/

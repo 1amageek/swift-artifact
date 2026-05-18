@@ -73,10 +73,19 @@ struct GeoJSONFeature: Identifiable {
 
 enum GeoJSONParser {
     static func parse(_ source: String) -> [GeoJSONFeature] {
-        guard let data = source.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else {
+        guard let data = source.data(using: .utf8) else {
             return []
         }
+
+        let jsonObject: Any
+        do {
+            jsonObject = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        } catch {
+            return []
+        }
+
+        guard let root = jsonObject as? [String: Any] else { return [] }
+
         var features: [GeoJSONFeature] = []
         collect(object: root, title: nil, into: &features)
         return features

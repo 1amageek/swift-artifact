@@ -215,18 +215,16 @@ struct PartialJSONLDProcessor {
             return nil
         }
 
-        do {
-            try builder.insertNode(Node(id: subject))
-        } catch {
-            // Identifier validation is the only failure path here, and the
-            // identifiers we construct above are well-formed by construction.
-            // Re-raise as a runtime issue rather than silently dropping the
-            // subject so genuine bugs surface in development.
-            assertionFailure("PartialJSONLDProcessor: refused subject \(subject): \(error)")
-        }
+        insertNode(Node(id: subject), into: &builder, context: "subject \(subject)")
 
         if let parent, let predicate {
-            try? builder.insertTriple(subject: parent, predicate: predicate, object: subject)
+            insertTriple(
+                subject: parent,
+                predicate: predicate,
+                object: subject,
+                into: &builder,
+                context: "object node \(subject)"
+            )
         }
 
         // `@type` → rdf:type triples.
@@ -382,9 +380,15 @@ struct PartialJSONLDProcessor {
         builder: inout KnowledgeGraphBuilder
     ) -> NodeIdentifier? {
         let literal = NodeIdentifier.literal(value: value, datatype: datatype, language: language)
-        try? builder.insertNode(Node(id: literal))
+        insertNode(Node(id: literal), into: &builder, context: "literal \(literal)")
         if let parent, let predicate {
-            try? builder.insertTriple(subject: parent, predicate: predicate, object: literal)
+            insertTriple(
+                subject: parent,
+                predicate: predicate,
+                object: literal,
+                into: &builder,
+                context: "literal \(literal)"
+            )
         }
         return literal
     }
@@ -399,14 +403,46 @@ struct PartialJSONLDProcessor {
         case .string(let s):
             let iri = resolveIRI(s, in: context)
             let typeNode = NodeIdentifier.iri(iri)
-            try? builder.insertNode(Node(id: typeNode))
-            try? builder.insertTriple(subject: subject, predicate: Self.rdfType, object: typeNode)
+            insertNode(Node(id: typeNode), into: &builder, context: "type node \(typeNode)")
+            insertTriple(
+                subject: subject,
+                predicate: Self.rdfType,
+                object: typeNode,
+                into: &builder,
+                context: "rdf:type \(typeNode)"
+            )
         case .array(let items, _):
             for item in items {
                 emitTypes(item, subject: subject, context: context, builder: &builder)
             }
         default:
             return
+        }
+    }
+
+    private func insertNode(
+        _ node: Node,
+        into builder: inout KnowledgeGraphBuilder,
+        context: String
+    ) {
+        do {
+            try builder.insertNode(node)
+        } catch {
+            assertionFailure("PartialJSONLDProcessor: refused \(context): \(error)")
+        }
+    }
+
+    private func insertTriple(
+        subject: NodeIdentifier,
+        predicate: String,
+        object: NodeIdentifier,
+        into builder: inout KnowledgeGraphBuilder,
+        context: String
+    ) {
+        do {
+            try builder.insertTriple(subject: subject, predicate: predicate, object: object)
+        } catch {
+            assertionFailure("PartialJSONLDProcessor: refused triple for \(context): \(error)")
         }
     }
 

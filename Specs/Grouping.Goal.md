@@ -132,7 +132,7 @@ boundingBoxIsFiniteForSingleMemberGroup
 
 ## H. Fixture (MUST)
 
-`Tests/ArtifactNativeRendererTests/Fixtures/Groups/`:
+`Tests/ArtifactRendererTests/Fixtures/Groups/`:
 
 ```
 two-disjoint-graphs.trig

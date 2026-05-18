@@ -24,7 +24,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.10.0"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.11.0"),
 ]
 ```
 
@@ -202,6 +202,10 @@ alone.
 | Mermaid | `application/vnd.ant.mermaid` | `.mmd`, `.mermaid` | `MermaidWebViewRenderer` |
 | Markdown | `text/markdown` | `.md`, `.markdown` | `MarkdownRenderer` |
 | Code | `application/vnd.ant.code` | — (language carried in attributes) | `CodeRenderer` |
+
+`CodeRenderer` uses CodeEditSourceEditor with CodeEditLanguages-backed
+Tree-sitter highlighting on macOS, and falls back to a readonly monospaced
+SwiftUI surface on other platforms.
 
 ### Tier 2 — Common agent output
 

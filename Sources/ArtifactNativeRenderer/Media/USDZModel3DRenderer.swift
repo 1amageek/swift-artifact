@@ -166,7 +166,9 @@ enum USDZAssetLoader {
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent(
             "artifact-\(UUID().uuidString).usdz"
         )
-        try? FileManager.default.removeItem(at: destination)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
         try FileManager.default.moveItem(at: downloaded, to: destination)
         return destination
     }

@@ -21,6 +21,8 @@ let package = Package(
         .package(url: "https://github.com/1amageek/swift-markdown-ui.git", from: "0.2.0"),
         .package(url: "https://github.com/lukilabs/beautiful-mermaid-swift.git", from: "1.0.4"),
         .package(url: "https://github.com/1amageek/swift-knowledge-graph.git", from: "0.1.0"),
+        .package(url: "https://github.com/1amageek/CodeEditSourceEditor.git", exact: "0.15.3"),
+        .package(url: "https://github.com/CodeEditApp/CodeEditLanguages.git", exact: "0.1.20"),
     ],
     targets: [
         .target(
@@ -44,6 +46,16 @@ let package = Package(
                 .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
                 .product(name: "KnowledgeGraph", package: "swift-knowledge-graph"),
                 .product(name: "KnowledgeGraphParsers", package: "swift-knowledge-graph"),
+                .product(
+                    name: "CodeEditSourceEditor",
+                    package: "CodeEditSourceEditor",
+                    condition: .when(platforms: [.macOS])
+                ),
+                .product(
+                    name: "CodeEditLanguages",
+                    package: "CodeEditLanguages",
+                    condition: .when(platforms: [.macOS])
+                ),
             ]
         ),
         .target(

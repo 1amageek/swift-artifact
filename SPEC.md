@@ -522,7 +522,7 @@ public struct ArtifactCanvas: View {
 | Renderer | 対応 Type | 基盤 |
 |----------|---------|------|
 | `MarkdownRenderer` | `.markdown` | swift-markdown-ui |
-| `CodeRenderer` | `.code` | Splash / Highlightr |
+| `CodeRenderer` | `.code` | CodeEditSourceEditor / CodeEditLanguages |
 | `SVGRenderer` | `.svg` | SVGView / SwiftDraw |
 | `JSONRenderer` | `.json` | OutlineGroup |
 | `CSVRenderer` | `.csv` | SwiftUI Table |
