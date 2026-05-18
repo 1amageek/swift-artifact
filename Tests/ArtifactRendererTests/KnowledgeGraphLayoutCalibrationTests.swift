@@ -273,6 +273,165 @@ struct KnowledgeGraphLayoutCalibrationTests {
         #expect(layoutArea(outline) < singleRowArea)
     }
 
+    @Test
+    func globalPackingPrefersLowerRouteCostWhenAreaComparable() throws {
+        let alpha = Self.iri("route-cost-alpha")
+        let beta = Self.iri("route-cost-beta")
+        let gamma = Self.iri("route-cost-gamma")
+        let delta = Self.iri("route-cost-delta")
+        let graph = KnowledgeGraph(
+            nodes: [alpha, beta, gamma, delta].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: alpha, to: beta),
+                Self.edge(from: gamma, to: delta)
+            ]
+        )
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: [
+                alpha: CGPoint(x: 0, y: 0),
+                gamma: CGPoint(x: 280, y: 0),
+                beta: CGPoint(x: 0, y: 220),
+                delta: CGPoint(x: 280, y: 220)
+            ],
+            groupingStrategy: .explicit(groups: [
+                .init(id: "alpha", label: "Alpha", memberNodeIDs: [alpha]),
+                .init(id: "alpha/inner", label: "Alpha inner", memberNodeIDs: [alpha]),
+                .init(id: "beta", label: "Beta", memberNodeIDs: [beta]),
+                .init(id: "beta/inner", label: "Beta inner", memberNodeIDs: [beta]),
+                .init(id: "gamma", label: "Gamma", memberNodeIDs: [gamma]),
+                .init(id: "gamma/inner", label: "Gamma inner", memberNodeIDs: [gamma]),
+                .init(id: "delta", label: "Delta", memberNodeIDs: [delta]),
+                .init(id: "delta/inner", label: "Delta inner", memberNodeIDs: [delta])
+            ])
+        )
+
+        let alphaBox = try explicitGroupBox("alpha", in: result)
+        let betaBox = try explicitGroupBox("beta", in: result)
+        let gammaBox = try explicitGroupBox("gamma", in: result)
+        let deltaBox = try explicitGroupBox("delta", in: result)
+        let outline = unionRect([alphaBox, betaBox, gammaBox, deltaBox])
+        let totalRouteLength = edgeRouteLengths(result: result).values.reduce(0, +)
+
+        #expect(totalRouteLength <= Double(outline.width + outline.height) + 1)
+    }
+
+    @Test
+    func globalPackingRejectsCompactButCrossingHeavyCandidate() throws {
+        let northWest = Self.iri("crossing-north-west")
+        let northEast = Self.iri("crossing-north-east")
+        let southWest = Self.iri("crossing-south-west")
+        let southEast = Self.iri("crossing-south-east")
+        let graph = KnowledgeGraph(
+            nodes: [northWest, northEast, southWest, southEast].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: northWest, to: southEast),
+                Self.edge(from: northEast, to: southWest)
+            ]
+        )
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: [
+                northWest: CGPoint(x: 0, y: 0),
+                northEast: CGPoint(x: 260, y: 0),
+                southWest: CGPoint(x: 0, y: 220),
+                southEast: CGPoint(x: 260, y: 220)
+            ],
+            groupingStrategy: .explicit(groups: [
+                .init(id: "north-west", label: "North West", memberNodeIDs: [northWest]),
+                .init(id: "north-west/inner", label: "North West inner", memberNodeIDs: [northWest]),
+                .init(id: "north-east", label: "North East", memberNodeIDs: [northEast]),
+                .init(id: "north-east/inner", label: "North East inner", memberNodeIDs: [northEast]),
+                .init(id: "south-west", label: "South West", memberNodeIDs: [southWest]),
+                .init(id: "south-west/inner", label: "South West inner", memberNodeIDs: [southWest]),
+                .init(id: "south-east", label: "South East", memberNodeIDs: [southEast]),
+                .init(id: "south-east/inner", label: "South East inner", memberNodeIDs: [southEast])
+            ])
+        )
+
+        let first = try routedEdge(
+            source: CompoundGraph.Card.ID(nodeID: northWest),
+            target: CompoundGraph.Card.ID(nodeID: southEast),
+            result: result
+        )
+        let second = try routedEdge(
+            source: CompoundGraph.Card.ID(nodeID: northEast),
+            target: CompoundGraph.Card.ID(nodeID: southWest),
+            result: result
+        )
+
+        #expect(!routesCrossAwayFromSharedEndpoint(first, second))
+    }
+
+    @Test
+    func routeCostKeepsShortestRouteBeforePortCenterBias() throws {
+        let graph = try KnowledgeGraphFormat.jsonLD.parse(
+            #"""
+            {
+              "@graph": [
+                {"@id": "http://example.org/alice",
+                 "@type": "http://xmlns.com/foaf/0.1/Person",
+                 "http://xmlns.com/foaf/0.1/knows": {"@id": "http://example.org/bob"}},
+                {"@id": "http://example.org/bob",
+                 "@type": "http://xmlns.com/foaf/0.1/Person",
+                 "http://xmlns.com/foaf/0.1/knows": {"@id": "http://example.org/carol"}},
+                {"@id": "http://example.org/carol",
+                 "@type": "http://xmlns.com/foaf/0.1/Person"},
+
+                {"@id": "http://example.org/laptop",
+                 "@type": "http://example.org/Device"},
+                {"@id": "http://example.org/phone",
+                 "@type": "http://example.org/Device"},
+
+                {"@id": "http://example.org/carol",
+                 "http://example.org/owns": {"@id": "http://example.org/laptop"}},
+                {"@id": "http://example.org/bob",
+                 "http://example.org/owns": {"@id": "http://example.org/phone"}}
+              ]
+            }
+            """#,
+            scope: "route-cost-shortest-before-port-bias",
+            baseIRI: nil
+        )
+        let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .byType())
+        let carolID = CompoundGraph.Card.ID(nodeID: Self.exampleOrgIRI("carol"))
+        let laptopID = CompoundGraph.Card.ID(nodeID: Self.exampleOrgIRI("laptop"))
+        let edge = try #require(result.compoundGraph.edges.first {
+            $0.source == carolID && $0.target == laptopID
+        })
+        let route = try #require(result.edgeRoutes[edge.id])
+        let points = route.points.isEmpty ? [route.start, route.end] : route.points
+
+        #expect(renderedRouteLength(route) <= manhattanDistance(points[0], points[points.count - 1]) + 1)
+    }
+
+    @Test
+    func ungroupedCycleKeepsEdgeLengthsBalanced() throws {
+        let alice = Self.exampleOrgIRI("cycle-alice")
+        let bob = Self.exampleOrgIRI("cycle-bob")
+        let carol = Self.exampleOrgIRI("cycle-carol")
+        let dave = Self.exampleOrgIRI("cycle-dave")
+        let eve = Self.exampleOrgIRI("cycle-eve")
+        let graph = KnowledgeGraph(
+            nodes: [alice, bob, carol, dave, eve].map { Node(id: $0) },
+            edges: [
+                Self.edge(from: alice, to: bob),
+                Self.edge(from: bob, to: carol),
+                Self.edge(from: carol, to: dave),
+                Self.edge(from: dave, to: eve),
+                Self.edge(from: eve, to: alice)
+            ]
+        )
+
+        let result = KnowledgeGraphLayout.compute(graph: graph, groupingStrategy: .none)
+        let lengths = edgeRouteLengths(result: result).values.sorted()
+        try #require(lengths.count == 5)
+        let median = lengths[2]
+        let maximum = try #require(lengths.last)
+
+        #expect(maximum <= median * 2.0)
+    }
+
     // MARK: - D3: disjoint-group tightness
 
     @Test
@@ -2571,6 +2730,13 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let origin = try #require(result.cardPositions[id])
         let card = try #require(result.compoundGraph.cardByID[id])
         return CGRect(origin: origin, size: card.size)
+    }
+
+    private func explicitGroupBox(
+        _ id: String,
+        in result: KnowledgeGraphLayout.Result
+    ) throws -> CGRect {
+        try #require(result.groupBoundingBoxes[CompoundGraph.Group.ID(key: "explicit:\(id)")])
     }
 
     private func edgeLabelRects(result: KnowledgeGraphLayout.Result) throws -> [CGRect] {
