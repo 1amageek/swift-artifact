@@ -36,7 +36,7 @@ public struct LaTeXWebViewRenderer: ArtifactRenderable, Sendable {
         return ArtifactWebView(
             html: WebRendererShells.latex(payload: payload, displayMode: displayMode)
         )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .artifactViewport(minHeight: displayMode ? 160 : 96)
     }
 }
 

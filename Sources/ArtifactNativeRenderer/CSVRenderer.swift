@@ -44,7 +44,9 @@ public struct CSVRenderer: ArtifactRenderable, Sendable {
             header = []
             body = rows
         }
-        return CSVTableView(header: header, rows: body)
+        return ArtifactBoundedScrollView([.vertical, .horizontal]) {
+            CSVTableView(header: header, rows: body)
+        }
     }
 }
 

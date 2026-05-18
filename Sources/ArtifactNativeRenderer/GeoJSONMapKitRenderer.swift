@@ -55,7 +55,7 @@ public struct GeoJSONMapKitRenderer: ArtifactRenderable, Sendable {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .artifactViewport(minHeight: 280)
     }
 }
 

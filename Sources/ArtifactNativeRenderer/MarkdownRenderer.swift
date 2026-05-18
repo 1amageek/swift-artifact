@@ -43,12 +43,11 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
     }
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
-        ScrollView(.vertical) {
+        ArtifactBoundedScrollView(.vertical) {
             MarkdownView(payload)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(defaultArtifactCardContentInsets)
         }
-        .artifactContentHeightLimit()
     }
 }
 

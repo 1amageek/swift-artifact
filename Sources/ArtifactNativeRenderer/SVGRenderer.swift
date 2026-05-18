@@ -65,12 +65,11 @@ private struct SVGBody: View {
             Label("SVG source — install an SVG renderer to rasterize.", systemImage: "info.circle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            ScrollView([.vertical, .horizontal]) {
+            ArtifactBoundedScrollView([.vertical, .horizontal]) {
                 Text(payload)
                     .font(.system(.callout, design: .monospaced))
                     .textSelection(.enabled)
             }
-            .artifactContentHeightLimit()
         }
         .padding(defaultArtifactCardContentInsets)
     }

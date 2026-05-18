@@ -65,7 +65,6 @@ private struct USDZModel3DView: View {
                         apply(to: pivot)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .gesture(rotateGesture())
                 .simultaneousGesture(zoomGesture())
                 .onTapGesture(count: 2) { resetTransform() }
@@ -80,6 +79,7 @@ private struct USDZModel3DView: View {
                     .frame(maxWidth: .infinity, minHeight: 160)
             }
         }
+        .artifactViewport(minHeight: 280)
         .task(id: payload) {
             await loadEntity()
         }

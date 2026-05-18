@@ -147,7 +147,7 @@ private struct MermaidBody: View {
                 diagramScroller
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .artifactViewport(minHeight: 280)
     }
 
     private var diagramScroller: some View {

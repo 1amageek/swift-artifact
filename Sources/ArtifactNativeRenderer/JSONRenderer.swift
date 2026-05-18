@@ -28,14 +28,15 @@ public struct JSONRenderer: ArtifactRenderable, Sendable {
     }
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
-        ScrollView([.vertical, .horizontal]) {
+        ArtifactBoundedScrollView(
+            [.vertical, .horizontal],
+            contentInsets: EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12)
+        ) {
             Text(prettyPrint(payload))
                 .font(.system(.callout, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .artifactContentHeightLimit()
-        .contentMargins(12)
     }
 
     private func prettyPrint(_ source: String) -> String {

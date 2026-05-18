@@ -53,6 +53,7 @@ struct KnowledgeGraphRendererBody: View {
                 KnowledgeGraphErrorView(error: error, source: payload)
             }
         }
+        .artifactViewport(minHeight: 320)
         .task(id: parseKey) {
             let captured = payload
             let captureFormat = format

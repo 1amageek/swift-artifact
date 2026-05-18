@@ -13,13 +13,15 @@ public struct DefaultArtifactView: View {
     }
 
     public var body: some View {
-        ScrollView(.vertical) {
+        ArtifactBoundedScrollView(
+            .vertical,
+            contentInsets: EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12)
+        ) {
             Text(artifact.payload)
                 .font(.system(.callout, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxHeight: 240)
     }
 }
 

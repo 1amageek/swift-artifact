@@ -27,15 +27,11 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         let language = (artifact.attributes["language"]).flatMap { $0.isEmpty ? nil : $0 }
 
         // Layout strategy:
-        // - Vertical-only `ScrollView` so the container's intrinsic
-        //   vertical size equals the content's height. Combined with
-        //   `.fixedSize(horizontal: false, vertical: true)` and the
-        //   environment-driven artifact content height limit, the height hugs
-        //   the content until it exceeds the configured cap, then scrolls.
-        //   A horizontal+vertical scroll view would have proposed
-        //   infinity on both axes and forced us to drive width with a
-        //   `GeometryReader`, which is greedy on height and would always
-        //   inflate the container to 360pt.
+        // - `ArtifactBoundedScrollView` measures the scroll content and
+        //   applies `min(contentHeight, artifactContentMaxHeight)` as the
+        //   viewport height. This preserves the original "hug short snippets,
+        //   scroll long snippets" intent without asking ancestors for an
+        //   unbounded ideal height.
         // - `frame(maxWidth: .infinity, alignment: .topLeading)` on the
         //   `HStack` stretches the gutter+code row to the full viewport
         //   width and anchors it to the top-left corner; lines that
@@ -49,10 +45,11 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         // - The container uses `.glassEffect` (Liquid Glass) as its
         //   surface. The language pill is rendered in an overlay so it
         //   floats above the scrolling content and stays pinned to the
-        //   top-right corner; the top padding of the code content is
-        //   bumped only when a language is present so the first source
-        //   line does not slide under the pill.
-        return ScrollView(.vertical) {
+        //   top-right corner.
+        return ArtifactBoundedScrollView(
+            .vertical,
+            contentInsets: EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12)
+        ) {
             HStack(alignment: .top, spacing: 12) {
                 Text(Self.lineNumbers(for: payload))
                     .foregroundStyle(.tertiary)
@@ -64,9 +61,6 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
             .font(.system(.callout, design: .monospaced))
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .artifactContentHeightLimit()
-        .fixedSize(horizontal: false, vertical: true)
-        .contentMargins(12)
         .overlay(alignment: .topTrailing) {
             if let language {
                 Text(language)

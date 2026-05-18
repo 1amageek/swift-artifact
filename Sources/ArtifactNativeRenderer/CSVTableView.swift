@@ -15,9 +15,9 @@ import UIKit
 ///   the host provides (the card, in practice). Columns share width
 ///   equally; the responsibility of capping width for very wide tables
 ///   sits with the host.
-/// - **Height hugs content**: no outer `ScrollView`, no `maxHeight`. A
-///   four-row table is four-rows tall. Hosts that need to cap height can
-///   wrap the artifact in a scroll/clip view at their level.
+/// - **Height is parent-bounded**: `CSVRenderer` wraps the table in a
+///   scroll view and applies the artifact content height limit so large
+///   tables do not force ancestor split views or inspectors to grow.
 /// - **Sticky header**: pinned via `LazyVStack` + `pinnedViews`. The pin
 ///   only activates if the host adds vertical scrolling above us.
 /// - **Type-aware alignment**: columns where every non-empty value parses
