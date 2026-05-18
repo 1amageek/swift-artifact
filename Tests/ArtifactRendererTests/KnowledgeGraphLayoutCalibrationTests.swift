@@ -1558,6 +1558,40 @@ struct KnowledgeGraphLayoutCalibrationTests {
     }
 
     @Test
+    func denseHubFanoutKeepsJointedRoutesSeparatedAfterCandidatePruning() throws {
+        let hubs = (0..<3).map { Self.iri("clearance-hub-\($0)") }
+        let leaves = (0..<12).map { Self.iri("clearance-leaf-\($0)") }
+        var edges: [Edge] = []
+        for (hubIndex, hub) in hubs.enumerated() {
+            for (leafIndex, leaf) in leaves.enumerated() where leafIndex % hubs.count == hubIndex {
+                edges.append(Self.edge(from: hub, to: leaf, namedGraph: "clearance"))
+            }
+        }
+        edges.append(Self.edge(from: hubs[0], to: hubs[1], namedGraph: "clearance"))
+        edges.append(Self.edge(from: hubs[1], to: hubs[2], namedGraph: "clearance"))
+        edges.append(Self.edge(from: hubs[2], to: hubs[0], namedGraph: "clearance"))
+
+        let graph = KnowledgeGraph(
+            nodes: (hubs + leaves).map { Node(id: $0) },
+            edges: edges,
+            namedGraphs: [NamedGraph(id: "clearance", nodes: hubs + leaves)]
+        )
+        let result = KnowledgeGraphLayout.compute(graph: graph)
+        let leafCardIDs = Set(leaves.map { CompoundGraph.Card.ID(nodeID: $0) })
+
+        // Port-connected stubs are allowed to use the smaller port spacing.
+        // This regression specifically protects interior joint lanes from
+        // collapsing onto the same axis when candidate pruning is tightened.
+        try assertInteriorJointRoutePairsMaintainClearance(
+            result: result,
+            minimum: 8,
+            including: { edge in
+                leafCardIDs.contains(edge.source) || leafCardIDs.contains(edge.target)
+            }
+        )
+    }
+
+    @Test
     func disjointGroupBoxesDoNotOverlap() throws {
         let left = (0..<4).map { Self.iri("left-\($0)") }
         let right = (0..<4).map { Self.iri("right-\($0)") }
@@ -2214,6 +2248,66 @@ struct KnowledgeGraphLayoutCalibrationTests {
             }
         }
         return distance
+    }
+
+    private func assertInteriorJointRoutePairsMaintainClearance(
+        result: KnowledgeGraphLayout.Result,
+        minimum: CGFloat,
+        including shouldInclude: (CompoundGraph.CardEdge) -> Bool = { _ in true }
+    ) throws {
+        let routedEdges = result.compoundGraph.edges.compactMap { edge -> RoutedTestEdge? in
+            guard shouldInclude(edge) else { return nil }
+            guard let route = result.edgeRoutes[edge.id] else { return nil }
+            let points = route.points.isEmpty ? [route.start, route.end] : route.points
+            guard routeCornerCount(points) > 0 else { return nil }
+            return RoutedTestEdge(edge: edge, points: points)
+        }
+        try #require(routedEdges.count >= 2)
+
+        var checkedPairs = 0
+        for lhsIndex in 0..<(routedEdges.count - 1) {
+            for rhsIndex in (lhsIndex + 1)..<routedEdges.count {
+                let distance = routeDistanceAwayFromEndpointStubs(
+                    routedEdges[lhsIndex],
+                    routedEdges[rhsIndex]
+                )
+                guard distance.isFinite else { continue }
+                checkedPairs += 1
+                #expect(
+                    distance >= minimum - 0.5,
+                    "Expected jointed route clearance >= \(minimum), got \(distance) for \(routedEdges[lhsIndex].edge.source)->\(routedEdges[lhsIndex].edge.target) and \(routedEdges[rhsIndex].edge.source)->\(routedEdges[rhsIndex].edge.target)"
+                )
+            }
+        }
+        #expect(checkedPairs > 0)
+    }
+
+    private func routeDistanceAwayFromEndpointStubs(
+        _ lhs: RoutedTestEdge,
+        _ rhs: RoutedTestEdge
+    ) -> CGFloat {
+        var distance = CGFloat.greatestFiniteMagnitude
+        for lhsOffset in 1..<lhs.points.count {
+            guard !segmentTouchesAnyEndpoint(segmentIndex: lhsOffset, pointCount: lhs.points.count) else {
+                continue
+            }
+            let lhsStart = lhs.points[lhsOffset - 1]
+            let lhsEnd = lhs.points[lhsOffset]
+            for rhsOffset in 1..<rhs.points.count {
+                guard !segmentTouchesAnyEndpoint(segmentIndex: rhsOffset, pointCount: rhs.points.count) else {
+                    continue
+                }
+                distance = min(
+                    distance,
+                    segmentDistance(lhsStart, lhsEnd, rhs.points[rhsOffset - 1], rhs.points[rhsOffset])
+                )
+            }
+        }
+        return distance
+    }
+
+    private func segmentTouchesAnyEndpoint(segmentIndex: Int, pointCount: Int) -> Bool {
+        segmentIndex == 1 || segmentIndex == pointCount - 1
     }
 
     private func routesCrossAwayFromSharedEndpoint(

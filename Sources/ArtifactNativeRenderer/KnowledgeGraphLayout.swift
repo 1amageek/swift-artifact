@@ -6991,7 +6991,7 @@ struct KnowledgeGraphLayout: Sendable {
             end: CGPoint,
             excluding excludedIndices: Set<Int>
         ) -> Bool {
-            index.contains(in: segmentBounds(start, end)) { node in
+            return index.contains(in: segmentBounds(start, end)) { node in
                 !excludedIndices.contains(node.index)
                     && KnowledgeGraphLayout.segmentIntersectsRect(start, end, node.rect)
             }
@@ -9810,12 +9810,15 @@ struct KnowledgeGraphLayout: Sendable {
                     nodeIndex: nodeIndex,
                     excludedIndices: excluded
                 ) {
+                    let metrics = simplifiedRouteMetrics(directPoints)
+                    if !routeMetricsCanBeatCurrentBest(metrics, bestScore: bestScore) {
+                        continue
+                    }
                     let edgeClearance = edgeRouteClearanceScore(
                         directPoints,
                         currentEdge: currentEdge,
                         routeSegmentIndex: routeSegmentIndex
                     )
-                    let metrics = simplifiedRouteMetrics(directPoints)
                     let score = OrthogonalRouteScore(
                         edgeClearance: edgeClearance,
                         length: metrics.length,
@@ -9848,6 +9851,10 @@ struct KnowledgeGraphLayout: Sendable {
                         sourcePort: sourcePort,
                         targetPort: targetPort
                     ) else { continue }
+                    let metrics = simplifiedRouteMetrics(points)
+                    if !routeMetricsCanBeatCurrentBest(metrics, bestScore: bestScore) {
+                        continue
+                    }
                     guard routeClearsNodes(
                         points,
                         nodeIndex: nodeIndex,
@@ -9864,7 +9871,6 @@ struct KnowledgeGraphLayout: Sendable {
                         currentEdge: currentEdge,
                         routeSegmentIndex: routeSegmentIndex
                     )
-                    let metrics = simplifiedRouteMetrics(points)
                     let score = OrthogonalRouteScore(
                         edgeClearance: edgeClearance,
                         length: metrics.length,
@@ -10072,12 +10078,15 @@ struct KnowledgeGraphLayout: Sendable {
         var best: [CGPoint]?
         var bestScore: OrthogonalRouteScore?
         for points in candidates {
+            let metrics = simplifiedRouteMetrics(points)
+            if !routeMetricsCanBeatCurrentBest(metrics, bestScore: bestScore) {
+                continue
+            }
             let edgeClearance = edgeRouteClearanceScore(
                 points,
                 currentEdge: edge,
                 routeSegmentIndex: routeSegmentIndex
             )
-            let metrics = simplifiedRouteMetrics(points)
             let score = OrthogonalRouteScore(
                 edgeClearance: edgeClearance,
                 length: metrics.length,
@@ -10185,8 +10194,7 @@ struct KnowledgeGraphLayout: Sendable {
             0,
             laneMagnitude,
             LayoutSpacing.jointNode + laneMagnitude,
-            LayoutSpacing.jointNode + LayoutSpacing.edgeEdgeRoute + laneMagnitude,
-            LayoutSpacing.jointNode + LayoutSpacing.edgeEdgeRoute * 2 + laneMagnitude
+            LayoutSpacing.jointNode + LayoutSpacing.edgeEdgeRoute + laneMagnitude
         ])
         let laneOffsets = uniqueCGFloatValues([
             laneOffset,
@@ -10197,13 +10205,7 @@ struct KnowledgeGraphLayout: Sendable {
             LayoutSpacing.edgeEdgeRoute * 2,
             -LayoutSpacing.edgeEdgeRoute * 2,
             LayoutSpacing.edgeEdgeRoute * 3,
-            -LayoutSpacing.edgeEdgeRoute * 3,
-            LayoutSpacing.edgeEdgeRoute * 4,
-            -LayoutSpacing.edgeEdgeRoute * 4,
-            LayoutSpacing.edgeEdgeRoute * 5,
-            -LayoutSpacing.edgeEdgeRoute * 5,
-            LayoutSpacing.edgeEdgeRoute * 6,
-            -LayoutSpacing.edgeEdgeRoute * 6
+            -LayoutSpacing.edgeEdgeRoute * 3
         ])
 
         var candidates: [[CGPoint]] = []
@@ -10615,6 +10617,21 @@ struct KnowledgeGraphLayout: Sendable {
     private struct RouteMetrics {
         let length: CGFloat
         let corners: Int
+    }
+
+    private static func routeMetricsCanBeatCurrentBest(
+        _ metrics: RouteMetrics,
+        bestScore: OrthogonalRouteScore?
+    ) -> Bool {
+        guard let bestScore else { return true }
+        if metrics.length > bestScore.length + 0.001 {
+            return false
+        }
+        if abs(metrics.length - bestScore.length) <= 0.001,
+           metrics.corners > bestScore.corners {
+            return false
+        }
+        return true
     }
 
     private static func routeIsOrthogonal(_ points: [CGPoint]) -> Bool {
