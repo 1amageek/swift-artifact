@@ -36,6 +36,18 @@ struct ArtifactTypeTests {
         #expect(ArtifactType.latex.rawValue == "application/x-latex")
     }
 
+    @Test func documentAndRasterImageConstants() {
+        #expect(ArtifactType.pdf.rawValue == "application/pdf")
+        #expect(ArtifactType.png.rawValue == "image/png")
+        #expect(ArtifactType.jpeg.rawValue == "image/jpeg")
+        #expect(ArtifactType.jpg == .jpeg)
+        #expect(ArtifactType.webp.rawValue == "image/webp")
+        #expect(ArtifactType.gif.rawValue == "image/gif")
+        #expect(ArtifactType.tiff.rawValue == "image/tiff")
+        #expect(ArtifactType.heic.rawValue == "image/heic")
+        #expect(ArtifactType.bmp.rawValue == "image/bmp")
+    }
+
     @Test func codable() throws {
         let t = ArtifactType("application/vnd.user.custom")
         let data = try JSONEncoder().encode(t)

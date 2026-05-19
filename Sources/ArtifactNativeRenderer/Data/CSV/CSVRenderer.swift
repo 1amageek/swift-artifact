@@ -44,9 +44,45 @@ public struct CSVRenderer: ArtifactRenderable, Sendable {
             header = []
             body = rows
         }
-        return ArtifactBoundedScrollView([.vertical, .horizontal]) {
-            CSVTableView(header: header, rows: body)
+        return CSVRendererBody(header: header, rows: body)
+    }
+}
+
+private struct CSVRendererBody: View {
+    let header: [String]
+    let rows: [[String]]
+
+    @State private var viewportWidth: CGFloat = 0
+
+    var body: some View {
+        ArtifactBoundedScrollView([.vertical, .horizontal]) {
+            CSVTableView(
+                header: header,
+                rows: rows,
+                viewportWidth: viewportWidth
+            )
         }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: CSVViewportWidthPreferenceKey.self,
+                    value: proxy.size.width
+                )
+            }
+        }
+        .onPreferenceChange(CSVViewportWidthPreferenceKey.self) { width in
+            guard width.isFinite, width > 0 else { return }
+            guard abs(viewportWidth - width) > 0.5 else { return }
+            viewportWidth = width
+        }
+    }
+}
+
+private struct CSVViewportWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

@@ -70,6 +70,17 @@ struct PreferredContentInsetsTests {
         #expect(USDZModel3DRenderer.preferredContentInsets == EdgeInsets())
     }
 
+    @Test func documentAndImageRenderersOptOutOfCardPadding() {
+        #expect(PDFRenderer.preferredContentInsets == EdgeInsets())
+        #expect(PNGRenderer.preferredContentInsets == EdgeInsets())
+        #expect(JPEGRenderer.preferredContentInsets == EdgeInsets())
+        #expect(WebPRenderer.preferredContentInsets == EdgeInsets())
+        #expect(GIFRenderer.preferredContentInsets == EdgeInsets())
+        #expect(TIFFRenderer.preferredContentInsets == EdgeInsets())
+        #expect(HEICRenderer.preferredContentInsets == EdgeInsets())
+        #expect(BMPRenderer.preferredContentInsets == EdgeInsets())
+    }
+
     @Test func knowledgeGraphRenderersOptOutOfCardPadding() {
         #expect(TurtleRenderer.preferredContentInsets == EdgeInsets())
         #expect(TriGRenderer.preferredContentInsets == EdgeInsets())

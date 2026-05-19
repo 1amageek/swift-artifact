@@ -225,4 +225,16 @@ struct CSVRefinerTests {
         )
         #expect(types.count == 4)
     }
+
+    // MARK: - CSVTableLayout
+
+    @Test func tableWidthFillsViewportWhenColumnsAreNarrow() {
+        #expect(CSVTableLayout.tableWidth(viewportWidth: 360, columnCount: 3) == 360)
+    }
+
+    @Test func tableWidthExpandsBeyondViewportWhenColumnsNeedScrolling() {
+        let minimumWidth = CSVTableLayout.minimumTableWidth(columnCount: 8)
+        #expect(CSVTableLayout.tableWidth(viewportWidth: 360, columnCount: 8) == minimumWidth)
+        #expect(minimumWidth > 360)
+    }
 }

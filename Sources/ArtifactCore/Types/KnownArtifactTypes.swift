@@ -22,6 +22,18 @@ extension ArtifactType {
     public static let geoJSON: ArtifactType = "application/geo+json"
     public static let latex: ArtifactType = "application/x-latex"
 
+    // MARK: - Documents and raster images
+
+    public static let pdf: ArtifactType = "application/pdf"
+    public static let png: ArtifactType = "image/png"
+    public static let jpeg: ArtifactType = "image/jpeg"
+    public static let jpg: ArtifactType = jpeg
+    public static let webp: ArtifactType = "image/webp"
+    public static let gif: ArtifactType = "image/gif"
+    public static let tiff: ArtifactType = "image/tiff"
+    public static let heic: ArtifactType = "image/heic"
+    public static let bmp: ArtifactType = "image/bmp"
+
     // MARK: - Knowledge graph (RDF)
 
     /// W3C RDF 1.1 Turtle. See <https://www.w3.org/TR/turtle/>.

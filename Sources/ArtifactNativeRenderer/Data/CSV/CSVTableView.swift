@@ -30,6 +30,7 @@ import UIKit
 struct CSVTableView: View {
     let header: [String]
     let rows: [[String]]
+    let viewportWidth: CGFloat
 
     private var columnCount: Int {
         let headerCount = header.count
@@ -60,7 +61,19 @@ struct CSVTableView: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity)
+            .frame(
+                width: CSVTableLayout.tableWidth(
+                    viewportWidth: viewportWidth,
+                    columnCount: columnCount
+                ),
+                alignment: .leading
+            )
+            .frame(
+                minHeight: CSVTableLayout.minimumTableHeight(
+                    rowCount: rows.count,
+                    hasHeader: header.isEmpty == false
+                )
+            )
             .contextMenu {
                 Button {
                     CSVPasteboard.copy(rows: allRowsIncludingHeader, separator: ",")
@@ -86,6 +99,7 @@ struct CSVTableView: View {
                 Text(i < header.count ? header[i] : "")
                     .font(.callout.weight(.semibold))
                     .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: alignment(for: i))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -102,6 +116,8 @@ struct CSVTableView: View {
                 let isNumeric = i < columnTypes.count && columnTypes[i] == .numeric
                 Text(cell)
                     .font(isNumeric ? .callout.monospacedDigit() : .callout)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: alignment(for: i))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -120,6 +136,25 @@ struct CSVTableView: View {
     private func alignment(for column: Int) -> Alignment {
         guard column < columnTypes.count else { return .leading }
         return columnTypes[column] == .numeric ? .trailing : .leading
+    }
+}
+
+enum CSVTableLayout {
+    static let minimumColumnWidth: CGFloat = 72
+    static let rowHeight: CGFloat = 28
+    static let headerHeight: CGFloat = 32
+
+    static func minimumTableWidth(columnCount: Int) -> CGFloat {
+        CGFloat(max(columnCount, 1)) * minimumColumnWidth
+    }
+
+    static func tableWidth(viewportWidth: CGFloat, columnCount: Int) -> CGFloat {
+        max(viewportWidth, minimumTableWidth(columnCount: columnCount))
+    }
+
+    static func minimumTableHeight(rowCount: Int, hasHeader: Bool) -> CGFloat {
+        let header = hasHeader ? headerHeight : 0
+        return header + CGFloat(max(rowCount, 1)) * rowHeight
     }
 }
 

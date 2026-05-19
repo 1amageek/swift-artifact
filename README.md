@@ -59,7 +59,7 @@ want WebKit in your binary), depend on individual products instead:
 | `ArtifactCore` | — | `ArtifactType`, `AnyArtifact`, parsing |
 | `ArtifactRenderer` | Core | `ArtifactRenderable` protocol, `RefinedPayload`, `AnyArtifactRenderer` |
 | `ArtifactView` | Core + Renderer | `ArtifactView`, `ArtifactCard`, `ArtifactCanvas`, env registry |
-| `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) / Turtle / TriG / N-Quads / RDF/XML / JSON-LD |
+| `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / PDF / raster images / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) / Turtle / TriG / N-Quads / RDF/XML / JSON-LD |
 | `ArtifactWebRenderer` | View | HTML / React / Mermaid / LaTeX (KaTeX) / Vega-Lite via `WKWebView` |
 
 `ArtifactNativeRenderer` pulls in [`swift-markdown-ui`](https://github.com/1amageek/swift-markdown-ui)
@@ -83,6 +83,14 @@ struct ChatBubble: View {
             .artifactRenderer(JSONRenderer())
             .artifactRenderer(CSVRenderer())
             .artifactRenderer(SVGRenderer())
+            .artifactRenderer(PDFRenderer())
+            .artifactRenderer(PNGRenderer())
+            .artifactRenderer(JPEGRenderer())
+            .artifactRenderer(WebPRenderer())
+            .artifactRenderer(GIFRenderer())
+            .artifactRenderer(TIFFRenderer())
+            .artifactRenderer(HEICRenderer())
+            .artifactRenderer(BMPRenderer())
             .artifactRenderer(GeoJSONMapKitRenderer())
             .artifactRenderer(USDZModel3DRenderer())
             .artifactRenderer(TurtleRenderer())
@@ -218,6 +226,22 @@ SwiftUI surface on other platforms.
 | LaTeX | `application/x-latex` | `.tex`, `.latex` | `LaTeXWebViewRenderer` |
 | glTF (JSON) | `model/gltf+json` | `.gltf` | `GLTFSceneKitRenderer` |
 | USDZ | `model/vnd.usdz+zip` | `.usdz` | `USDZModel3DRenderer` |
+
+### Documents and raster images
+
+Binary-oriented renderers accept a payload string containing a remote URL,
+`file://` URL, absolute file path, data URL, or base64 data.
+
+| Format | MIME | Extensions | Renderer |
+|---|---|---|---|
+| PDF | `application/pdf` | `.pdf` | `PDFRenderer` |
+| PNG | `image/png` | `.png` | `PNGRenderer` |
+| JPEG | `image/jpeg` | `.jpg`, `.jpeg` | `JPEGRenderer` |
+| WebP | `image/webp` | `.webp` | `WebPRenderer` |
+| GIF | `image/gif` | `.gif` | `GIFRenderer` |
+| TIFF | `image/tiff` | `.tif`, `.tiff` | `TIFFRenderer` |
+| HEIC | `image/heic` | `.heic` | `HEICRenderer` |
+| BMP | `image/bmp` | `.bmp` | `BMPRenderer` |
 
 ### Knowledge graph (W3C RDF)
 
