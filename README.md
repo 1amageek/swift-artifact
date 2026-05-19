@@ -13,7 +13,8 @@ rendering** while a model is still streaming.
   half-formed input
 - **Streaming-aware refiners** for JSON, SVG, Mermaid, LaTeX, CSV, Markdown, GeoJSON,
   Turtle, TriG, N-Quads, RDF/XML, and JSON-LD — partial output is drawn as it
-  arrives, not after the final token
+  arrives, not after the final token. Binary document and image renderers wait
+  for a complete payload before decoding.
 - Environment-driven renderer registry — call `.artifactRenderer(_:)` once at the top
   of your view tree and let `ArtifactView` resolve the right renderer
 
@@ -24,7 +25,7 @@ See [SPEC.md](SPEC.md) for the full specification.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.12.0"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.14.0"),
 ]
 ```
 
@@ -135,23 +136,26 @@ The card respects two environment modifiers:
 ```
 
 If the environment override is not set, the card consults the resolved
-renderer's `preferredContentInsets`. Bundled renderers that fill their frame
-(HTML, Map, Mermaid, Code) opt out of card padding by default; textual
-renderers (Markdown, JSON, CSV) keep the package-level default.
+renderer's `preferredContentInsets`. Bundled renderers that own their own
+spacing or need edge-to-edge content publish a preference, so the renderer body
+is the source of truth for padding and sizing. For example, CSV owns table cell
+padding, Markdown and JSON own their reading/source margins, and raster images
+own their aspect-ratio layout.
 
 ## Sizing policy
 
-Renderers split into two groups:
+Renderers split into three layout families:
 
-- **Content-driven** (Markdown, JSON, CSV, Code, SVG) — height follows the
-  payload. The optional `artifactContentHeightLimit()` modifier scrolls
-  content above a configurable cap (`artifactContentMaxHeight`, default
-  360pt) so a long Markdown doc doesn't grow a chat bubble unboundedly.
-- **Fill-frame** (HTML, React, Mermaid, LaTeX, Vega-Lite, GeoJSON, USDZ,
-  Turtle / TriG / N-Quads / RDF/XML / JSON-LD) — these have no intrinsic
-  height because they render into a WebView / Map / RealityView / Canvas.
-  They expand to fill whatever frame the caller provides. **You are
-  expected to wrap them with `.frame(...)`** at the call site:
+| Family | Renderers | Sizing behavior |
+|---|---|---|
+| Text / table / source | Markdown, JSON, CSV, Code | Own their inner spacing and use bounded scrolling for large payloads. CSV measures the visible viewport, fills it for narrow tables, and expands horizontally only when the column count requires scrolling. |
+| Intrinsic media | SVG, PNG, JPEG, WebP, GIF, TIFF, HEIC, BMP | Size from the rendered content. Raster images make the card body width the source of truth and compute height from the decoded image aspect ratio. |
+| Fill-frame surfaces | HTML, React, Mermaid, LaTeX, Vega-Lite, GeoJSON, USDZ, Turtle / TriG / N-Quads / RDF/XML / JSON-LD, PDF | Render into a WebView / Map / RealityView / Canvas / document viewport and expand to the frame the caller provides. **You are expected to wrap them with `.frame(...)`** at the call site when the default viewport is not appropriate. |
+
+The optional `artifactContentHeightLimit()` modifier scrolls content above a
+configurable cap (`artifactContentMaxHeight`, default 360pt). It is used only
+where a height cap does not corrupt the renderer's own aspect-ratio or viewport
+contract.
 
 ```swift
 ArtifactCard(artifact)
@@ -209,11 +213,34 @@ alone.
 | SVG | `image/svg+xml` | `.svg` | `SVGRenderer` |
 | Mermaid | `application/vnd.ant.mermaid` | `.mmd`, `.mermaid` | `MermaidWebViewRenderer` |
 | Markdown | `text/markdown` | `.md`, `.markdown` | `MarkdownRenderer` |
-| Code | `application/vnd.ant.code` | — (language carried in attributes) | `CodeRenderer` |
+| Code | `application/vnd.ant.code` | `.diff`, `.patch` for unified diffs; otherwise language carried in attributes | `CodeRenderer` |
 
 `CodeRenderer` uses CodeEditSourceEditor with CodeEditLanguages-backed
 Tree-sitter highlighting on macOS, and falls back to a readonly monospaced
 SwiftUI surface on other platforms.
+
+For unified diffs, `CodeRenderer` switches to CodeEditSourceEditor's code
+review surface instead of treating the payload as a plain syntax-highlighted
+file.
+
+| Signal | Behavior |
+|---|---|
+| `language`, `lang`, or `fileExtension` is `diff`, `patch`, `udiff`, or `unified-diff` | Render as a code review diff |
+| `title`, `filename`, or `fileName` ends in `.diff` or `.patch` | Render as a code review diff |
+| Payload contains a unified diff hunk header such as `@@ -1,3 +1,4 @@` | Render as a code review diff |
+| Payload has `---` / `+++` file headers | Use the target path to infer the underlying source language |
+| Artifact has `contentLanguage`, `sourceLanguage`, or `targetLanguage` | Use that language for hunk syntax highlighting |
+
+```swift
+AnyArtifact(
+    id: ArtifactIdentifier("layout-diff"),
+    type: .code,
+    title: "Layout.diff",
+    attributes: ["language": "diff"],
+    payload: patch,
+    isComplete: true
+)
+```
 
 ### Tier 2 — Common agent output
 
@@ -227,10 +254,21 @@ SwiftUI surface on other platforms.
 | glTF (JSON) | `model/gltf+json` | `.gltf` | `GLTFSceneKitRenderer` |
 | USDZ | `model/vnd.usdz+zip` | `.usdz` | `USDZModel3DRenderer` |
 
+`CSVRenderer` presents rows as a spreadsheet-style SwiftUI table. It supports
+sticky headers, type-aware alignment, zebra striping, row/table copy actions,
+and horizontal scrolling only when the table's minimum column widths exceed the
+visible viewport.
+
 ### Documents and raster images
 
 Binary-oriented renderers accept a payload string containing a remote URL,
 `file://` URL, absolute file path, data URL, or base64 data.
+
+Raster image renderers decode only complete payloads. They do not progressively
+render chunked image data; while `artifact.isComplete == false`, they stay in
+the normal pre-renderable waiting state. Once decoded, the image fills the
+available card body width and sets its height from the source image ratio, so
+the card content area does not leave unused side space.
 
 | Format | MIME | Extensions | Renderer |
 |---|---|---|---|

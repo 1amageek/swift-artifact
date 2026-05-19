@@ -47,6 +47,8 @@ struct KnowledgeGraphView: View {
     /// fresh graph re-fits but ongoing manual zoom is preserved.
     @State private var didApplyInitialFit: Bool = false
     @State private var hoveredCardID: CompoundGraph.Card.ID?
+    @State private var pendingHoveredCardID: CompoundGraph.Card.ID?
+    @State private var hoverPopupTask: Task<Void, Never>?
 
     private let minZoom: CGFloat = 0.2
     private let maxZoom: CGFloat = 3.0
@@ -67,6 +69,7 @@ struct KnowledgeGraphView: View {
     private let nodeDetailPopupEstimatedHeight: CGFloat = 220
     private let nodeDetailPopupGap: CGFloat = 10
     private let nodeDetailPopupViewportInset: CGFloat = 12
+    private let nodeDetailPopupDelay: Duration = .milliseconds(180)
 
     /// Transient state mirrored from `MagnifyGesture` via `@GestureState` so
     /// the in-flight pinch can be replayed against `viewportAtMagnifyStart`
@@ -124,6 +127,7 @@ struct KnowledgeGraphView: View {
             applyInitialFitIfPossible()
         }
         .task(id: graphIdentity) {
+            clearHoveredCard()
             didApplyInitialFit = false
             await computeLayout(initial: previousPositions())
         }
@@ -132,6 +136,7 @@ struct KnowledgeGraphView: View {
         }
         .onDisappear {
             layoutTask?.cancel()
+            hoverPopupTask?.cancel()
         }
     }
 
@@ -180,12 +185,12 @@ struct KnowledgeGraphView: View {
             onScroll: { delta, _ in
                 committedViewport.offset.x += delta.width
                 committedViewport.offset.y += delta.height
-                hoveredCardID = nil
+                clearHoveredCard()
             },
             onMagnify: { magnification, location in
                 let target = clamp(committedViewport.zoom * (1 + magnification))
                 committedViewport = committedViewport.zoomed(to: target, anchor: location)
-                hoveredCardID = nil
+                clearHoveredCard()
             }
         ) {
             canvas
@@ -194,9 +199,9 @@ struct KnowledgeGraphView: View {
         .onContinuousHover { phase in
             switch phase {
             case .active(let location):
-                hoveredCardID = cardID(at: location, layout: layout, viewport: effectiveViewport)
+                scheduleHoveredCard(cardID(at: location, layout: layout, viewport: effectiveViewport))
             case .ended:
-                hoveredCardID = nil
+                clearHoveredCard()
             }
         }
         .overlay(alignment: .topLeading) {
@@ -608,6 +613,39 @@ struct KnowledgeGraphView: View {
         }
     }
 
+    private func scheduleHoveredCard(_ cardID: CompoundGraph.Card.ID?) {
+        guard pendingHoveredCardID != cardID else { return }
+        pendingHoveredCardID = cardID
+        hoverPopupTask?.cancel()
+        hoverPopupTask = nil
+
+        guard let cardID else {
+            hoveredCardID = nil
+            return
+        }
+
+        if hoveredCardID != cardID {
+            hoveredCardID = nil
+        }
+        hoverPopupTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: nodeDetailPopupDelay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, pendingHoveredCardID == cardID else { return }
+            hoveredCardID = cardID
+            hoverPopupTask = nil
+        }
+    }
+
+    private func clearHoveredCard() {
+        hoverPopupTask?.cancel()
+        hoverPopupTask = nil
+        pendingHoveredCardID = nil
+        hoveredCardID = nil
+    }
+
     private func cardID(
         at screenPoint: CGPoint,
         layout: KnowledgeGraphLayout.Result,
@@ -660,12 +698,12 @@ struct KnowledgeGraphView: View {
         DragGesture(minimumDistance: 1)
             .updating($liveDragTranslation) { value, state, _ in
                 state = value.translation
-                hoveredCardID = nil
+                clearHoveredCard()
             }
             .onEnded { value in
                 committedViewport.offset.x += value.translation.width
                 committedViewport.offset.y += value.translation.height
-                hoveredCardID = nil
+                clearHoveredCard()
             }
     }
 
@@ -679,6 +717,7 @@ struct KnowledgeGraphView: View {
                 state.magnification = value.magnification
             }
             .onChanged { _ in
+                clearHoveredCard()
                 if viewportAtMagnifyStart == nil {
                     viewportAtMagnifyStart = committedViewport
                 }
@@ -688,6 +727,7 @@ struct KnowledgeGraphView: View {
                 let target = clamp(base.zoom * value.magnification)
                 committedViewport = base.zoomed(to: target, anchor: value.startLocation)
                 viewportAtMagnifyStart = nil
+                clearHoveredCard()
             }
     }
 
@@ -706,6 +746,7 @@ struct KnowledgeGraphView: View {
     }
 
     private func applyZoomStep(factor: CGFloat) {
+        clearHoveredCard()
         let target = clamp(committedViewport.zoom * factor)
         let anchor = viewportCenter()
         withAnimation(.spring(duration: 0.25, bounce: 0.1)) {
@@ -714,6 +755,7 @@ struct KnowledgeGraphView: View {
     }
 
     private func applyZoomTarget(_ value: CGFloat) {
+        clearHoveredCard()
         let target = clamp(value)
         let anchor = viewportCenter()
         withAnimation(.spring(duration: 0.25, bounce: 0.1)) {
@@ -726,6 +768,7 @@ struct KnowledgeGraphView: View {
     }
 
     private func applyFitToView() {
+        clearHoveredCard()
         guard
             let layout,
             viewportSize.width > 0,

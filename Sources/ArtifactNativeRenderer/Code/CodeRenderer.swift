@@ -29,11 +29,19 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         let languageName = Self.languageDisplayName(for: artifact)
 
         #if os(macOS)
-        HighlightedCodeSurface(
-            source: payload,
-            language: Self.codeLanguage(for: artifact, payload: payload),
-            languageDisplayName: languageName
-        )
+        if let codeReviewFile = Self.codeReviewFile(for: artifact, payload: payload) {
+            CodeReviewCodeSurface(
+                file: codeReviewFile,
+                language: Self.diffContentLanguage(for: artifact, payload: payload),
+                languageDisplayName: languageName ?? "diff"
+            )
+        } else {
+            HighlightedCodeSurface(
+                source: payload,
+                language: Self.codeLanguage(for: artifact, payload: payload),
+                languageDisplayName: languageName
+            )
+        }
         #else
         PlainCodeSurface(source: payload, languageDisplayName: languageName)
         #endif
@@ -70,6 +78,174 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
     }
 
     #if os(macOS)
+    private static func codeReviewFile(for artifact: AnyArtifact, payload: String) -> CodeReviewFile? {
+        guard isDiffArtifact(artifact, payload: payload) else { return nil }
+
+        do {
+            let parser = CodeReviewUnifiedDiffParser()
+            let hunks = try parser.parse(patch: payload)
+            let metadata = diffFileMetadata(for: artifact, payload: payload)
+            return CodeReviewFile(
+                path: metadata.path,
+                oldPath: metadata.oldPath,
+                status: metadata.status,
+                hunks: hunks
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private static func isDiffArtifact(_ artifact: AnyArtifact, payload: String) -> Bool {
+        for candidate in diffSignalCandidates(for: artifact) {
+            let normalized = normalizedLanguageIdentifier(candidate)
+            if diffLanguageIdentifiers.contains(normalized) {
+                return true
+            }
+        }
+        return containsUnifiedDiffHunk(payload)
+    }
+
+    private static func diffSignalCandidates(for artifact: AnyArtifact) -> [String] {
+        var candidates: [String] = []
+
+        for key in ["language", "lang", "fileExtension", "filename", "fileName"] {
+            if let value = artifact.attributes[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                candidates.append(value)
+            }
+        }
+
+        if !artifact.title.isEmpty {
+            candidates.append(artifact.title)
+            let titleExtension = URL(fileURLWithPath: artifact.title).pathExtension
+            if !titleExtension.isEmpty {
+                candidates.append(titleExtension)
+            }
+        }
+
+        return candidates
+    }
+
+    private static func containsUnifiedDiffHunk(_ payload: String) -> Bool {
+        for line in payload.split(separator: "\n", omittingEmptySubsequences: false).prefix(200) {
+            let value = String(line)
+            if value.hasPrefix("@@ -"),
+               value.contains(" +"),
+               value.contains(" @@") {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func diffContentLanguage(for artifact: AnyArtifact, payload: String) -> CodeLanguage {
+        for key in ["contentLanguage", "sourceLanguage", "targetLanguage"] {
+            if let value = artifact.attributes[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               let language = codeLanguage(matching: value) {
+                return language
+            }
+        }
+
+        if let path = diffHeaderPath(prefix: "+++", in: payload),
+           path != "/dev/null" {
+            return CodeLanguage.detectLanguageFrom(url: URL(fileURLWithPath: path))
+        }
+
+        let metadata = diffFileMetadata(for: artifact, payload: payload)
+        return CodeLanguage.detectLanguageFrom(url: URL(fileURLWithPath: metadata.path))
+    }
+
+    private static func diffFileMetadata(
+        for artifact: AnyArtifact,
+        payload: String
+    ) -> (path: String, oldPath: String?, status: CodeReviewFileStatus) {
+        let oldHeaderPath = diffHeaderPath(prefix: "---", in: payload)
+        let newHeaderPath = diffHeaderPath(prefix: "+++", in: payload)
+        let fallbackPath = fallbackDiffPath(for: artifact)
+
+        let path: String
+        if let newHeaderPath, newHeaderPath != "/dev/null" {
+            path = newHeaderPath
+        } else if let oldHeaderPath, oldHeaderPath != "/dev/null" {
+            path = oldHeaderPath
+        } else {
+            path = fallbackPath
+        }
+
+        let status: CodeReviewFileStatus
+        if oldHeaderPath == "/dev/null" {
+            status = .added
+        } else if newHeaderPath == "/dev/null" {
+            status = .deleted
+        } else if let oldHeaderPath, oldHeaderPath != path {
+            status = .renamed
+        } else {
+            status = .modified
+        }
+
+        let oldPath: String?
+        if let oldHeaderPath,
+           oldHeaderPath != "/dev/null",
+           oldHeaderPath != path {
+            oldPath = oldHeaderPath
+        } else {
+            oldPath = nil
+        }
+
+        return (path, oldPath, status)
+    }
+
+    private static func fallbackDiffPath(for artifact: AnyArtifact) -> String {
+        for key in ["filename", "fileName"] {
+            if let value = artifact.attributes[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+
+        if !artifact.title.isEmpty {
+            return artifact.title
+        }
+
+        return "patch.diff"
+    }
+
+    private static func diffHeaderPath(prefix: String, in payload: String) -> String? {
+        for line in payload.split(separator: "\n", omittingEmptySubsequences: false) {
+            let value = String(line)
+            if value.hasPrefix("@@ ") {
+                return nil
+            }
+            guard value.hasPrefix("\(prefix) ") else { continue }
+            let rawPath = String(value.dropFirst(prefix.count + 1))
+            return normalizedDiffPath(rawPath)
+        }
+        return nil
+    }
+
+    private static func normalizedDiffPath(_ rawPath: String) -> String? {
+        var path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.isEmpty { return nil }
+
+        if let tabIndex = path.firstIndex(of: "\t") {
+            path = String(path[..<tabIndex])
+        } else if let spaceIndex = path.firstIndex(of: " ") {
+            path = String(path[..<spaceIndex])
+        }
+
+        if path.hasPrefix("\""), path.hasSuffix("\""), path.count >= 2 {
+            path.removeFirst()
+            path.removeLast()
+        }
+
+        if path.hasPrefix("a/") || path.hasPrefix("b/") {
+            path.removeFirst(2)
+        }
+
+        return path.isEmpty ? nil : path
+    }
+
     private static func codeLanguage(for artifact: AnyArtifact, payload: String) -> CodeLanguage {
         for candidate in languageCandidates(for: artifact) {
             if let language = codeLanguage(matching: candidate) {
@@ -164,10 +340,101 @@ public struct CodeRenderer: ArtifactRenderable, Sendable {
         "plain": "txt",
         "plaintext": "txt"
     ]
+
+    private static let diffLanguageIdentifiers: Set<String> = [
+        "diff",
+        "patch",
+        "udiff",
+        "unified-diff",
+        "unifieddiff"
+    ]
     #endif
 }
 
 #if os(macOS)
+private struct CodeReviewCodeSurface: View {
+    let file: CodeReviewFile
+    let language: CodeLanguage
+    let languageDisplayName: String?
+
+    @Environment(\.artifactContentMaxHeight) private var maxHeight
+    @State private var editorState = SourceEditorState()
+    @State private var reviewState = CodeReviewState(displayMode: .unified)
+
+    var body: some View {
+        SourceEditor(
+            codeReviewFile: file,
+            language: language,
+            configuration: configuration,
+            editorState: $editorState,
+            codeReviewState: $reviewState
+        )
+        .frame(height: editorHeight)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(alignment: .topTrailing) {
+            if let languageDisplayName {
+                languageBadge(languageDisplayName)
+            }
+        }
+    }
+
+    private func languageBadge(_ language: String) -> some View {
+        Text(language)
+            .font(.caption2.weight(.medium))
+            .monospaced()
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .glassEffect(in: Capsule())
+            .padding(8)
+    }
+
+    private var configuration: SourceEditorConfiguration {
+        SourceEditorConfiguration(
+            appearance: .init(
+                theme: .artifactCodeDark,
+                useThemeBackground: true,
+                font: Self.font,
+                lineHeightMultiple: Double(Self.lineHeightMultiple),
+                wrapLines: false,
+                tabWidth: 4,
+                bracketPairEmphasis: nil
+            ),
+            behavior: .init(
+                isEditable: false,
+                isSelectable: true,
+                indentOption: .spaces(count: 4),
+                reformatAtColumn: 120
+            ),
+            layout: .init(
+                editorOverscroll: 0,
+                contentInsets: NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0),
+                additionalTextInsets: NSEdgeInsets(top: 1, left: 0, bottom: 1, right: 0)
+            ),
+            peripherals: .init(
+                showGutter: true,
+                showMinimap: false,
+                showReformattingGuide: false,
+                showFoldingRibbon: false
+            )
+        )
+    }
+
+    private var editorHeight: CGFloat {
+        let reviewLineCount = file.hunks.reduce(0) { count, hunk in
+            count + hunk.lines.count + 1
+        }
+        let visibleLineCount = max(reviewLineCount, CodeRenderer.minimumVisibleLineCount)
+        let contentHeight = CGFloat(visibleLineCount) * Self.lineHeight + 24
+        guard let maxHeight else { return contentHeight }
+        return min(contentHeight, maxHeight)
+    }
+
+    private static let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    private static let lineHeightMultiple: CGFloat = 1.22
+    private static let lineHeight = ceil((font.ascender - font.descender + font.leading) * lineHeightMultiple)
+}
+
 private struct HighlightedCodeSurface: View {
     let source: String
     let language: CodeLanguage
@@ -567,6 +834,33 @@ private struct CodeRendererPreviewSample: Identifiable {
               </header>
               <pre><code>readonly source</code></pre>
             </main>
+            """
+        ),
+        CodeRendererPreviewSample(
+            id: "diff",
+            name: "Diff",
+            fileName: "GraphLayout.diff",
+            language: "diff",
+            payload: """
+            diff --git a/Sources/GraphLayout.swift b/Sources/GraphLayout.swift
+            index 4b825dc..7d94c21 100644
+            --- a/Sources/GraphLayout.swift
+            +++ b/Sources/GraphLayout.swift
+            @@ -1,8 +1,12 @@
+             struct GraphLayout {
+                 var nodes: [Node]
+                 var edges: [Edge]
+             
+            -    func solve() -> Layout {
+            -        Layout(nodes: nodes)
+            +    func solve(options: LayoutOptions) -> Layout {
+            +        var layout = Layout(nodes: nodes)
+            +        if options.routesEdges {
+            +            layout.routes = route(edges)
+            +        }
+            +        return layout
+                 }
+             }
             """
         )
     ]

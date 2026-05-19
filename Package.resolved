@@ -1,5 +1,5 @@
 {
-  "originHash" : "8bed6cf2fc378b7963795f044600402acfc5427ec40330e51ae5cbe529ac5e70",
+  "originHash" : "c53a455eaac0053ad8b9dee4594d1096fb275f4753f1b4f1050130c8a74d30e8",
   "pins" : [
     {
       "identity" : "beautiful-mermaid-swift",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/CodeEditSourceEditor.git",
       "state" : {
-        "revision" : "2a0c572b79f4fff50f7db5b3f8eec1be46b47da6",
-        "version" : "0.15.3"
+        "revision" : "d8e55022df351c9f9039259bfbfedd0be4a6ff0f",
+        "version" : "0.16.0"
       }
     },
     {
@@ -33,17 +33,17 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/CodeEditSymbols.git",
       "state" : {
-        "revision" : "c4e88ad064852cd75f38c09b9bca578f06c44081",
-        "version" : "0.2.4"
+        "revision" : "b1019683bceeb1f0e8ee33870942150ef400b90b",
+        "version" : "0.3.0"
       }
     },
     {
       "identity" : "codeedittextview",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/CodeEditApp/CodeEditTextView.git",
+      "location" : "https://github.com/1amageek/CodeEditTextView.git",
       "state" : {
-        "revision" : "d7ac3f11f22ec2e820187acce8f3a3fb7aa8ddec",
-        "version" : "0.12.1"
+        "revision" : "db8939f3156d7f129423b0c34599540098c01773",
+        "version" : "0.13.0"
       }
     },
     {
