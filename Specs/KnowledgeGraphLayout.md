@@ -46,7 +46,7 @@ Canvas 上へ描画
 | Edge-Node | Edge と endpoint ではない Node の最小距離 | 14 pt |
 | Joint-Node | Edge の関節と Node 矩形の最小距離。source / target Node も対象 | 14 pt |
 | Group-Node | Group outline と非member Node の最小距離 | 32 pt |
-| Group-Group | Group outline 同士の最小距離 | 72 pt |
+| Group-Group | Group outline 同士の最小距離 | 48 pt |
 
 Edge-Group の最小距離は定義しない。Edge と Group は互いに干渉しないため、
 Edge は Group outline を横切ってよい。
@@ -60,9 +60,21 @@ Edge 数による拡張:
 | connected group-internal Node-Node horizontal | `max(40 pt, 48 pt + (parallel edge count - 1) * 14 pt)` |
 | connected group-internal Node-Node vertical | `max(28 pt, 36 pt + (parallel edge count - 1) * 14 pt)` |
 | Group-Node | `32 pt` を下限にし、compaction unit 間の Edge 数に応じて余白を追加できる |
-| Group-Group | `72 pt + min(edge count, 6) * 14 pt` |
+| Group-Group horizontal connection | `48 pt + min(max(edge count - 1, 0), 3) * 14 pt` |
+| Group-Group vertical connection | vertical gap: `48 pt`, horizontal lane reserve: `48 pt + min(max(edge count - 1, 0), 3) * 14 pt` |
 
 この拡張は余白を増やすためのものだが、余白を増やした後はその値を新しい最小距離として扱う。
+Group-Group horizontal connection では 1 本目の Edge は基礎距離の中で扱い、追加分は 2 本目以降の lane reserve に限定する。
+Group 間距離だけで全 route lane を抱え込むと outline 面積が過大になるため、追加 reserve は 3 lane で打ち切る。
+Group-Group vertical connection では Edge label が横長で、Edge 本数に応じて縦 gap を広げる必要はない。
+ただし複数の縦 Edge lane は横方向に分散されるため、横方向の lane reserve は Edge 本数に応じて確保する。
+Group alignment / snap pass でも同じ Group-Group 距離式を使い、接続済み Group 用の別固定距離は持たない。
+Nested sibling Group は基礎距離 `14 pt` を使うが、Sibling Group 間に複数 Edge がある場合は横方向だけ
+`14 pt + min(max(edge count - 1, 0), 3) * 14 pt` を確保する。縦方向は header 下 padding と sibling padding の
+基礎距離を維持し、Edge 本数では伸ばさない。
+Sibling Group 間の横方向 reserve は、Sibling 同士の直接 Edge 数だけでなく、最終 routing 後にその gap 内を通る
+縦 segment 数も対象にする。これにより、上位/下位 Group から来た縦 Edge lane が親 Group 内の sibling gap を
+通過する場合も、Group 間の横幅だけを拡張して縦 gap は増やさない。
 
 ---
 
@@ -346,6 +358,10 @@ Node ── Edge 3
 Edge label は Edge の中心線上に置くが、label pill が Edge を視覚的に分断してはならない。
 label pill の中央には、その label が属する route の向きに沿った guide line を描く。
 これにより、同じ predicate label が複数並んでも、label がどの Edge に属するかを追跡できる。
+Edge label / arrowhead / source marker / Edge stroke は decoration scale に従う。
+Decoration scale は zoom out 時に縮小し、zoom in 時は基準サイズを超えて拡大しない。
+これにより、zoom out 時に Edge label だけが固定サイズで大きく残らず、zoom in 時に矢印だけが過大にならない。
+Edge label の基準 font は 10 pt、pill padding は horizontal 4 pt / vertical 2 pt とする。
 また、label pill は他の Edge route を横切る位置を避ける。避けられない場合でも、
 label center は必ず自分の Edge route 上に残す。
 複数関節を持つ Edge では、label center は source / output port から数えて 2 本目の直線 segment 上に置く。
@@ -450,7 +466,9 @@ Outermost Group / Ungrouped Node を compaction unit に変換
   ↓
 ネストした outermost Group layout では MaxRects + 候補幅探索で packing 候補を列挙する
   ↓
-Hard constraint / Edge 品質 / outline 面積の順で候補を採用する
+Hard constraint / outline 面積 / Edge 品質の順で候補を採用する
+  ↓
+Group 内 content packing 後に outermost Group / Ungrouped Node を再 packing する
   ↓
 距離制約を再投影
 ```
@@ -474,15 +492,17 @@ MaxRects packing では全 pair の最小距離要求の最大値を item gap �
 3 つ以上では固定幅ごとの 2D rectangle packing 候補から global layout cost が最小のものを選ぶ。
 
 候補比較は重み付き合算ではなく、次の辞書式順序で行う。
+ただし Edge 品質は outline 面積が同程度の候補同士だけで優先する。
+大きく面積が違う候補では、Hard constraint を満たしたうえで小さい outline を優先する。
 
 | 優先 | Placement cost |
 |---:|---|
 | 1 | Hard constraint 違反数 |
-| 2 | Edge 交差推定数 |
-| 3 | Edge-Edge clearance penalty |
-| 4 | Edge route 推定合計長 |
-| 5 | Edge route 推定最大長 |
-| 6 | global outline 面積 |
+| 2 | global outline 面積。ただし面積差が 8% 以内なら Edge 品質比較へ進む |
+| 3 | Edge 交差推定数 |
+| 4 | Edge-Edge clearance penalty |
+| 5 | Edge route 推定合計長 |
+| 6 | Edge route 推定最大長 |
 | 7 | aspect が `3:2` に近い |
 | 8 | whitespace 面積 |
 
@@ -490,6 +510,8 @@ MaxRects packing では全 pair の最小距離要求の最大値を item gap �
 代わりに outermost unit 間の中心 Manhattan route、Edge multiplicity、Node intersection 推定、
 Edge-Edge clearance 推定を使う。最終 route は従来どおり精密 routing に任せるため、
 候補評価の高速化は斜め禁止、Node 非干渉、Edge 最短優先を弱めてはならない。
+高速 route 推定で Node を横切るものは候補の hard reject ではなく clearance penalty として扱う。
+正確な Node 回避は最終 routing の責務であり、配置候補の段階で過剰に棄却して outline を伸ばしてはならない。
 
 Group が member Node を共有する場合は、別々の compaction unit に分けない。
 共有 member を持つ Group 群は 1 つの overlap component として扱い、bridge group の endpoint を

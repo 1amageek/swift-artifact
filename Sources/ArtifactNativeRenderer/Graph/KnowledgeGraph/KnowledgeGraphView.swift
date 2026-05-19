@@ -54,10 +54,12 @@ struct KnowledgeGraphView: View {
     private let arrowSize: CGFloat = 9
     private let edgeLineWidth: CGFloat = 1.4
     private let edgeSourceMarkerRadius: CGFloat = 2.2
-    private let edgeLabelHorizontalPadding: CGFloat = 6
-    private let edgeLabelVerticalPadding: CGFloat = 3
-    private let edgeLabelCornerRadius: CGFloat = 7
+    private let edgeLabelFontSize: CGFloat = 10
+    private let edgeLabelHorizontalPadding: CGFloat = 4
+    private let edgeLabelVerticalPadding: CGFloat = 2
+    private let edgeLabelCornerRadius: CGFloat = 6
     private let edgeLabelGuideInset: CGFloat = 2
+    private let minEdgeDecorationScale: CGFloat = 0.35
     private let cullingMargin: CGFloat = 120
     private let zoomStep: CGFloat = 1.25
     private let groupLabelMaximumCharacters = 48
@@ -218,6 +220,7 @@ struct KnowledgeGraphView: View {
         var strokePath = Path()
         var sourcePath = Path()
         var headPath = Path()
+        let decorationScale = edgeDecorationScale(for: viewport)
 
         for edge in layout.compoundGraph.edges {
             guard let route = layout.edgeRoutes[edge.id] else { continue }
@@ -238,7 +241,7 @@ struct KnowledgeGraphView: View {
             }
 
             strokePath.move(to: screenStart)
-            appendSourceMarker(at: screenStart, into: &sourcePath)
+            appendSourceMarker(at: screenStart, scale: decorationScale, into: &sourcePath)
             let tangent: CGVector
             if route.isCurved {
                 let screenControl = viewport.canvasToScreen(route.control)
@@ -263,14 +266,14 @@ struct KnowledgeGraphView: View {
                     dy: screenEnd.y - screenStart.y
                 )
             }
-            appendArrowhead(at: screenEnd, along: tangent, into: &headPath)
+            appendArrowhead(at: screenEnd, along: tangent, scale: decorationScale, into: &headPath)
         }
 
         if !strokePath.isEmpty {
             context.stroke(
                 strokePath,
                 with: .color(theme.line),
-                style: StrokeStyle(lineWidth: edgeLineWidth, lineCap: .round)
+                style: StrokeStyle(lineWidth: max(0.5, edgeLineWidth * decorationScale), lineCap: .round)
             )
         }
         if !sourcePath.isEmpty {
@@ -281,11 +284,12 @@ struct KnowledgeGraphView: View {
         }
     }
 
-    private func appendSourceMarker(at point: CGPoint, into path: inout Path) {
-        let diameter = edgeSourceMarkerRadius * 2
+    private func appendSourceMarker(at point: CGPoint, scale: CGFloat, into path: inout Path) {
+        let radius = edgeSourceMarkerRadius * scale
+        let diameter = radius * 2
         path.addEllipse(in: CGRect(
-            x: point.x - edgeSourceMarkerRadius,
-            y: point.y - edgeSourceMarkerRadius,
+            x: point.x - radius,
+            y: point.y - radius,
             width: diameter,
             height: diameter
         ))
@@ -294,6 +298,7 @@ struct KnowledgeGraphView: View {
     private func appendArrowhead(
         at tip: CGPoint,
         along tangent: CGVector,
+        scale: CGFloat,
         into path: inout Path
     ) {
         let length = max(hypot(tangent.dx, tangent.dy), 0.001)
@@ -301,18 +306,23 @@ struct KnowledgeGraphView: View {
         let uy = tangent.dy / length
         let leftAngle: CGFloat = .pi * 5 / 6
         let rightAngle: CGFloat = -.pi * 5 / 6
+        let scaledArrowSize = arrowSize * scale
         let left = CGPoint(
-            x: tip.x + (ux * cos(leftAngle) - uy * sin(leftAngle)) * arrowSize,
-            y: tip.y + (ux * sin(leftAngle) + uy * cos(leftAngle)) * arrowSize
+            x: tip.x + (ux * cos(leftAngle) - uy * sin(leftAngle)) * scaledArrowSize,
+            y: tip.y + (ux * sin(leftAngle) + uy * cos(leftAngle)) * scaledArrowSize
         )
         let right = CGPoint(
-            x: tip.x + (ux * cos(rightAngle) - uy * sin(rightAngle)) * arrowSize,
-            y: tip.y + (ux * sin(rightAngle) + uy * cos(rightAngle)) * arrowSize
+            x: tip.x + (ux * cos(rightAngle) - uy * sin(rightAngle)) * scaledArrowSize,
+            y: tip.y + (ux * sin(rightAngle) + uy * cos(rightAngle)) * scaledArrowSize
         )
         path.move(to: tip)
         path.addLine(to: left)
         path.addLine(to: right)
         path.closeSubpath()
+    }
+
+    private func edgeDecorationScale(for viewport: KnowledgeGraphViewport) -> CGFloat {
+        min(1, max(minEdgeDecorationScale, viewport.zoom))
     }
 
     // MARK: - Drawing — edge labels
@@ -332,30 +342,35 @@ struct KnowledgeGraphView: View {
             let screenPos = viewport.canvasToScreen(position)
             guard visibleRect.contains(screenPos) else { continue }
 
+            let labelScale = edgeDecorationScale(for: viewport)
             let resolved = context.resolve(
                 Text(edge.predicate)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: edgeLabelFontSize * labelScale, weight: .medium))
                     .foregroundStyle(theme.muted)
             )
-            let textSize = resolved.measure(in: CGSize(width: 180, height: 60))
+            let textSize = resolved.measure(in: CGSize(width: 160 * labelScale, height: 48 * labelScale))
+            let horizontalPadding = edgeLabelHorizontalPadding * labelScale
+            let verticalPadding = edgeLabelVerticalPadding * labelScale
             let bgRect = CGRect(
-                x: screenPos.x - textSize.width / 2 - edgeLabelHorizontalPadding,
-                y: screenPos.y - textSize.height / 2 - edgeLabelVerticalPadding,
-                width: textSize.width + edgeLabelHorizontalPadding * 2,
-                height: textSize.height + edgeLabelVerticalPadding * 2
+                x: screenPos.x - textSize.width / 2 - horizontalPadding,
+                y: screenPos.y - textSize.height / 2 - verticalPadding,
+                width: textSize.width + horizontalPadding * 2,
+                height: textSize.height + verticalPadding * 2
             )
-            let labelPath = Path(roundedRect: bgRect, cornerRadius: edgeLabelCornerRadius)
+            let labelPath = Path(roundedRect: bgRect, cornerRadius: edgeLabelCornerRadius * labelScale)
             context.fill(labelPath, with: .color(theme.edgeLabelFill))
             drawEdgeLabelGuide(
                 in: bgRect,
                 axis: edgeLabelAxis(route: route, labelPosition: position),
+                inset: edgeLabelGuideInset * labelScale,
+                lineWidth: edgeLineWidth * labelScale,
                 theme: theme,
                 context: &context
             )
             context.stroke(
                 labelPath,
                 with: .color(theme.edgeLabelStroke),
-                lineWidth: 1
+                lineWidth: max(0.5, labelScale)
             )
             context.draw(resolved, at: screenPos, anchor: .center)
         }
@@ -369,22 +384,24 @@ struct KnowledgeGraphView: View {
     private func drawEdgeLabelGuide(
         in rect: CGRect,
         axis: EdgeLabelAxis,
+        inset: CGFloat,
+        lineWidth: CGFloat,
         theme: KnowledgeGraphVisualTheme,
         context: inout GraphicsContext
     ) {
         var path = Path()
         switch axis {
         case .horizontal:
-            path.move(to: CGPoint(x: rect.minX + edgeLabelGuideInset, y: rect.midY))
-            path.addLine(to: CGPoint(x: rect.maxX - edgeLabelGuideInset, y: rect.midY))
+            path.move(to: CGPoint(x: rect.minX + inset, y: rect.midY))
+            path.addLine(to: CGPoint(x: rect.maxX - inset, y: rect.midY))
         case .vertical:
-            path.move(to: CGPoint(x: rect.midX, y: rect.minY + edgeLabelGuideInset))
-            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY - edgeLabelGuideInset))
+            path.move(to: CGPoint(x: rect.midX, y: rect.minY + inset))
+            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY - inset))
         }
         context.stroke(
             path,
             with: .color(theme.line.opacity(0.9)),
-            style: StrokeStyle(lineWidth: edgeLineWidth, lineCap: .round)
+            style: StrokeStyle(lineWidth: max(0.5, lineWidth), lineCap: .round)
         )
     }
 

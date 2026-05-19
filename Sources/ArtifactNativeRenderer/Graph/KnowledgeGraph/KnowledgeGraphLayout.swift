@@ -115,7 +115,8 @@ struct KnowledgeGraphLayout: Sendable {
         static let edgeNode: CGFloat = 14
         static let jointNode: CGFloat = 14
         static let groupNode: CGFloat = 32
-        static let groupGroup: CGFloat = 72
+        static let groupGroup: CGFloat = 48
+        static let groupGroupEdgeLaneReserveLimit = 3
         static let nestedGroupGroupPadding: CGFloat = 14
         static let groupHeaderHeight: CGFloat = CardSizing.headerHeight
         static let portCornerGuard: CGFloat = 1
@@ -221,6 +222,33 @@ struct KnowledgeGraphLayout: Sendable {
             cardPositions: cardPositions,
             groups: compound.groups
         )
+        var groupBoxes = computeGroupBoundingBoxes(
+            groups: compound.groups,
+            cards: compound.cards,
+            indexByID: indexByID,
+            cardPositions: cardPositions
+        )
+        if expandNestedGroupGapsForRoutedLanes(
+            groups: compound.groups,
+            cardPositions: &cardPositions,
+            groupBoundingBoxes: &groupBoxes,
+            edgeRoutes: routes,
+            indexByID: indexByID
+        ) {
+            routes = computeEdgeRoutes(
+                edges: compound.edges,
+                cards: compound.cards,
+                indexByID: indexByID,
+                cardPositions: cardPositions,
+                groups: compound.groups
+            )
+            groupBoxes = computeGroupBoundingBoxes(
+                groups: compound.groups,
+                cards: compound.cards,
+                indexByID: indexByID,
+                cardPositions: cardPositions
+            )
+        }
         let cardRects = compound.cards.map { card -> CGRect in
             // anchorAndCanvas produces an origin for every card, so a missing
             // lookup here would mean the pipeline desynced — fail loudly.
@@ -233,13 +261,6 @@ struct KnowledgeGraphLayout: Sendable {
             edges: compound.edges,
             routes: routes,
             cardRects: cardRects
-        )
-
-        var groupBoxes = computeGroupBoundingBoxes(
-            groups: compound.groups,
-            cards: compound.cards,
-            indexByID: indexByID,
-            cardPositions: cardPositions
         )
         normalizeFinalGeometry(
             cards: compound.cards,
@@ -1901,6 +1922,7 @@ struct KnowledgeGraphLayout: Sendable {
         alignNestedGroupTops(
             positions: &positions,
             sizes: sizes,
+            edges: edges,
             groups: groups,
             indexByID: indexByID,
             iterations: 3
@@ -1924,19 +1946,18 @@ struct KnowledgeGraphLayout: Sendable {
         alignNestedGroupTops(
             positions: &positions,
             sizes: sizes,
+            edges: edges,
             groups: groups,
             indexByID: indexByID,
             iterations: 2
         )
-        let packed = sizes.count > PackingTuning.largeGraphCardCount
-            ? true
-            : packAxisAlignedGlobalOutline(
-                positions: &positions,
-                sizes: sizes,
-                edges: edges,
-                groups: groups,
-                indexByID: indexByID
-            )
+        let packed = packAxisAlignedGlobalOutline(
+            positions: &positions,
+            sizes: sizes,
+            edges: edges,
+            groups: groups,
+            indexByID: indexByID
+        )
         if !packed && hasNestedGroupStructure(groups: groups, indexByID: indexByID) {
             let finalGroupEdgeCounts = disjointGroupEdgeCounts(edges: edges, groups: groups, indexByID: indexByID)
             _ = resolveGroupDistances(
@@ -1987,9 +2008,18 @@ struct KnowledgeGraphLayout: Sendable {
                         continue
                     }
                     let pair = pairKey(boxes[a].groupIndex, boxes[b].groupIndex)
-                    let targetGap = minimumGroupGroupGap(edgeCount: groupEdgeCounts[pair] ?? 0)
-                    let expandedA = boxes[a].rect.insetBy(dx: -targetGap / 2, dy: -targetGap / 2)
-                    let expandedB = boxes[b].rect.insetBy(dx: -targetGap / 2, dy: -targetGap / 2)
+                    let targetGap = minimumGroupGroupGap(
+                        edgeCount: groupEdgeCounts[pair] ?? 0,
+                        reserveAxis: edgeReserveAxis(lhs: boxes[a].rect, rhs: boxes[b].rect)
+                    )
+                    let expandedA = boxes[a].rect.insetBy(
+                        dx: -targetGap.horizontal / 2,
+                        dy: -targetGap.vertical / 2
+                    )
+                    let expandedB = boxes[b].rect.insetBy(
+                        dx: -targetGap.horizontal / 2,
+                        dy: -targetGap.vertical / 2
+                    )
                     let intersection = expandedA.intersection(expandedB)
                     guard
                         !intersection.isNull,
@@ -2138,6 +2168,15 @@ struct KnowledgeGraphLayout: Sendable {
         )
     }
 
+    private static func nestedGroupGroupHorizontalGap(edgeCount: Int) -> CGFloat {
+        let additionalLaneCount = min(
+            max(edgeCount - 1, 0),
+            LayoutSpacing.groupGroupEdgeLaneReserveLimit
+        )
+        return LayoutSpacing.nestedGroupGroupPadding
+            + CGFloat(additionalLaneCount) * LayoutSpacing.edgeEdgeRoute
+    }
+
     private static func rectsAreApproximatelyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
         abs(lhs.minX - rhs.minX) < 0.001
             && abs(lhs.minY - rhs.minY) < 0.001
@@ -2148,6 +2187,7 @@ struct KnowledgeGraphLayout: Sendable {
     private static func alignNestedGroupTops(
         positions: inout [CGPoint],
         sizes: [CGSize],
+        edges: [CompoundGraph.CardEdge],
         groups: [CompoundGraph.Group],
         indexByID: [CompoundGraph.Card.ID: Int],
         iterations: Int
@@ -2156,6 +2196,7 @@ struct KnowledgeGraphLayout: Sendable {
         let memberSets = groups.map { group -> Set<Int> in
             Set(group.members.compactMap { indexByID[$0] })
         }
+        let edgeCounts = edgeCountByNodePair(edges: edges, indexByID: indexByID)
         let childrenByParent = directNestedChildrenByParent(memberSets: memberSets)
         guard !childrenByParent.isEmpty else { return }
 
@@ -2187,16 +2228,24 @@ struct KnowledgeGraphLayout: Sendable {
                     }
                     return lhs.groupIndex < rhs.groupIndex
                 }
+                let cardRects = cardRects(positions: positions, sizes: sizes)
                 let currentBounds = sortedChildren.reduce(CGRect.null) { partial, child in
                     partial.isNull ? child.rect : partial.union(child.rect)
                 }
-                let siblingGap = LayoutSpacing.nestedGroupGroupPadding
+                let siblingGaps = nestedSiblingGroupHorizontalGaps(
+                    sortedChildren: sortedChildren,
+                    parentRect: parentBox.rect,
+                    edges: edges,
+                    edgeCounts: edgeCounts,
+                    indexByID: indexByID,
+                    cardRects: cardRects
+                )
                 let packedWidth = sortedChildren.reduce(CGFloat(0)) { partial, child in
                     partial + child.rect.width
-                } + siblingGap * CGFloat(max(sortedChildren.count - 1, 0))
+                } + siblingGaps.reduce(CGFloat(0), +)
                 var cursorX = currentBounds.midX - packedWidth / 2
 
-                for childBox in sortedChildren {
+                for (offset, childBox) in sortedChildren.enumerated() {
                     let deltaX = cursorX - childBox.rect.minX
                     let deltaY = targetTop - childBox.rect.minY
                     if abs(deltaX) > 0.5 || abs(deltaY) > 0.5 {
@@ -2206,11 +2255,92 @@ struct KnowledgeGraphLayout: Sendable {
                         }
                         moved = true
                     }
-                    cursorX += childBox.rect.width + siblingGap
+                    cursorX += childBox.rect.width
+                    if siblingGaps.indices.contains(offset) {
+                        cursorX += siblingGaps[offset]
+                    }
                 }
             }
             if !moved { break }
         }
+    }
+
+    private static func nestedSiblingGroupHorizontalGaps(
+        sortedChildren: [LayeredGroupBox],
+        parentRect: CGRect,
+        edges: [CompoundGraph.CardEdge],
+        edgeCounts: [UInt64: Int],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardRects: [CGRect]
+    ) -> [CGFloat] {
+        guard sortedChildren.count > 1 else { return [] }
+        var gaps: [CGFloat] = []
+        gaps.reserveCapacity(sortedChildren.count - 1)
+        for offset in 0..<(sortedChildren.count - 1) {
+            let lhs = sortedChildren[offset]
+            let rhs = sortedChildren[offset + 1]
+            let directEdgeCount = edgeCountBetweenMembers(lhs.memberSet, rhs.memberSet, edgeCounts: edgeCounts)
+            let cutEdgeCount = edgeCountAcrossVerticalCut(
+                lhs: lhs.rect,
+                rhs: rhs.rect,
+                parentRect: parentRect,
+                edges: edges,
+                indexByID: indexByID,
+                cardRects: cardRects
+            )
+            gaps.append(nestedGroupGroupHorizontalGap(edgeCount: max(directEdgeCount, cutEdgeCount)))
+        }
+        return gaps
+    }
+
+    private static func edgeCountAcrossVerticalCut(
+        lhs: CGRect,
+        rhs: CGRect,
+        parentRect: CGRect,
+        edges: [CompoundGraph.CardEdge],
+        indexByID: [CompoundGraph.Card.ID: Int],
+        cardRects: [CGRect]
+    ) -> Int {
+        let left = lhs.midX <= rhs.midX ? lhs : rhs
+        let right = lhs.midX <= rhs.midX ? rhs : lhs
+        guard left.maxX <= right.minX else { return 0 }
+
+        let cutX = (left.maxX + right.minX) / 2
+        let contentMinY = parentRect.minY + LayoutSpacing.groupHeaderHeight
+        let contentMaxY = parentRect.maxY
+        var count = 0
+        for edge in edges where edge.source != edge.target {
+            guard
+                let sourceIndex = indexByID[edge.source],
+                let targetIndex = indexByID[edge.target],
+                cardRects.indices.contains(sourceIndex),
+                cardRects.indices.contains(targetIndex)
+            else { continue }
+
+            let source = CGPoint(x: cardRects[sourceIndex].midX, y: cardRects[sourceIndex].midY)
+            let target = CGPoint(x: cardRects[targetIndex].midX, y: cardRects[targetIndex].midY)
+            let edgeMinX = min(source.x, target.x)
+            let edgeMaxX = max(source.x, target.x)
+            let edgeMinY = min(source.y, target.y)
+            let edgeMaxY = max(source.y, target.y)
+            let edgeWidth = edgeMaxX - edgeMinX
+            let edgeHeight = edgeMaxY - edgeMinY
+            guard edgeHeight > edgeWidth else { continue }
+            let sourceIsInsideLeft = left.minX <= source.x && source.x <= left.maxX
+            let targetIsInsideLeft = left.minX <= target.x && target.x <= left.maxX
+            let sourceIsInsideRight = right.minX <= source.x && source.x <= right.maxX
+            let targetIsInsideRight = right.minX <= target.x && target.x <= right.maxX
+            if (sourceIsInsideLeft && targetIsInsideLeft)
+                || (sourceIsInsideRight && targetIsInsideRight) {
+                continue
+            }
+            let crossesCut = edgeMinX <= cutX && cutX <= edgeMaxX
+            let usesSiblingBand = edgeMinX <= right.maxX && edgeMaxX >= left.minX
+            guard crossesCut || usesSiblingBand else { continue }
+            guard max(edgeMinY, contentMinY) <= min(edgeMaxY, contentMaxY) else { continue }
+            count += 1
+        }
+        return count
     }
 
     private static func packGroupContents(
@@ -2283,7 +2413,11 @@ struct KnowledgeGraphLayout: Sendable {
                 }
 
                 guard hasDirectNodeUnit else { continue }
-                let gapSize = groupContentPackingGapSize(units: units, edges: edges, indexByID: indexByID)
+                let gapSize = groupContentPackingGapSize(
+                    units: units,
+                    edges: edges,
+                    indexByID: indexByID
+                )
                 let itemSizes = units.map { unit in
                     CGSize(
                         width: unit.rect.width + gapSize.width,
@@ -2476,8 +2610,11 @@ struct KnowledgeGraphLayout: Sendable {
         let lhsIsGroup = !lhs.groupIndices.isEmpty
         let rhsIsGroup = !rhs.groupIndices.isEmpty
         if lhsIsGroup && rhsIsGroup {
-            let gap = LayoutSpacing.nestedGroupGroupPadding
-            return CGSize(width: gap, height: gap)
+            let edgeCount = edgeCountBetweenMembers(lhs.memberSet, rhs.memberSet, edgeCounts: edgeCounts)
+            return CGSize(
+                width: nestedGroupGroupHorizontalGap(edgeCount: edgeCount),
+                height: LayoutSpacing.nestedGroupGroupPadding
+            )
         }
         if lhsIsGroup || rhsIsGroup {
             let gap = LayoutSpacing.groupNode
@@ -2514,6 +2651,20 @@ struct KnowledgeGraphLayout: Sendable {
         for left in lhs {
             for right in rhs {
                 result = max(result, edgeCounts[pairKey(left, right)] ?? 0)
+            }
+        }
+        return result
+    }
+
+    private static func edgeCountBetweenMembers(
+        _ lhs: Set<Int>,
+        _ rhs: Set<Int>,
+        edgeCounts: [UInt64: Int]
+    ) -> Int {
+        var result = 0
+        for left in lhs {
+            for right in rhs {
+                result += edgeCounts[pairKey(left, right)] ?? 0
             }
         }
         return result
@@ -3564,6 +3715,104 @@ struct KnowledgeGraphLayout: Sendable {
         return result
     }
 
+    private static func expandNestedGroupGapsForRoutedLanes(
+        groups: [CompoundGraph.Group],
+        cardPositions: inout [CompoundGraph.Card.ID: CGPoint],
+        groupBoundingBoxes: inout [CompoundGraph.Group.ID: CGRect],
+        edgeRoutes: [EdgeIdentifier: EdgeRoute],
+        indexByID: [CompoundGraph.Card.ID: Int]
+    ) -> Bool {
+        guard groups.count > 1, !edgeRoutes.isEmpty else { return false }
+        let memberSets = groups.map { group in
+            Set(group.members.compactMap { indexByID[$0] })
+        }
+        let childrenByParent = directNestedChildrenByParent(memberSets: memberSets)
+        guard !childrenByParent.isEmpty else { return false }
+
+        var shiftsByCardID: [CompoundGraph.Card.ID: CGFloat] = [:]
+        for (parentIndex, childIndices) in childrenByParent {
+            guard
+                nestedChildMemberSetsAreDisjoint(childIndices, memberSets: memberSets),
+                let parentRect = groupBoundingBoxes[groups[parentIndex].id]
+            else { continue }
+            let children = childIndices.compactMap { childIndex -> (index: Int, rect: CGRect)? in
+                guard let rect = groupBoundingBoxes[groups[childIndex].id] else { return nil }
+                return (childIndex, rect)
+            }
+            .sorted { lhs, rhs in
+                if abs(lhs.rect.minX - rhs.rect.minX) > 0.001 {
+                    return lhs.rect.minX < rhs.rect.minX
+                }
+                return lhs.index < rhs.index
+            }
+            guard children.count > 1 else { continue }
+
+            for offset in 0..<(children.count - 1) {
+                let lhs = children[offset]
+                let rhs = children[offset + 1]
+                let laneCount = verticalRouteLaneCountBetween(
+                    lhs: lhs.rect,
+                    rhs: rhs.rect,
+                    parentRect: parentRect,
+                    edgeRoutes: edgeRoutes
+                )
+                let requiredGap = nestedGroupGroupHorizontalGap(edgeCount: laneCount)
+                let currentGap = rhs.rect.minX - lhs.rect.maxX
+                guard currentGap + 0.5 < requiredGap else { continue }
+                let delta = requiredGap - currentGap
+                for child in children[...offset] {
+                    for memberID in groups[child.index].members {
+                        shiftsByCardID[memberID, default: 0] -= delta / 2
+                    }
+                }
+                for child in children[(offset + 1)...] {
+                    for memberID in groups[child.index].members {
+                        shiftsByCardID[memberID, default: 0] += delta / 2
+                    }
+                }
+            }
+        }
+
+        guard !shiftsByCardID.isEmpty else { return false }
+        for (cardID, dx) in shiftsByCardID {
+            guard abs(dx) > 0.001, var origin = cardPositions[cardID] else { continue }
+            origin.x += dx
+            cardPositions[cardID] = origin
+        }
+        return true
+    }
+
+    private static func verticalRouteLaneCountBetween(
+        lhs: CGRect,
+        rhs: CGRect,
+        parentRect: CGRect,
+        edgeRoutes: [EdgeIdentifier: EdgeRoute]
+    ) -> Int {
+        let left = lhs.midX <= rhs.midX ? lhs : rhs
+        let right = lhs.midX <= rhs.midX ? rhs : lhs
+        guard left.maxX < right.minX else { return 0 }
+        let gapMinX = left.maxX
+        let gapMaxX = right.minX
+        let contentMinY = parentRect.minY + LayoutSpacing.groupHeaderHeight
+        let contentMaxY = parentRect.maxY
+        var count = 0
+        for route in edgeRoutes.values {
+            let points = route.points.isEmpty ? [route.start, route.end] : route.points
+            guard points.count > 1 else { continue }
+            let hasVerticalLane = zip(points.dropLast(), points.dropFirst()).contains { start, end in
+                guard abs(start.x - end.x) <= 0.5 else { return false }
+                guard gapMinX <= start.x, start.x <= gapMaxX else { return false }
+                let segmentMinY = min(start.y, end.y)
+                let segmentMaxY = max(start.y, end.y)
+                return max(segmentMinY, contentMinY) <= min(segmentMaxY, contentMaxY)
+            }
+            if hasVerticalLane {
+                count += 1
+            }
+        }
+        return count
+    }
+
     // MARK: - Seeding
 
     /// Seed newcomer cards on a golden-angle (Vogel) spiral around the
@@ -4517,12 +4766,10 @@ struct KnowledgeGraphLayout: Sendable {
             }
         }
 
-        // Detect which member-disjoint group pairs are joined by at least
-        // one cross-edge. FR pulls those pairs together via the cross-edge
-        // spring; without a larger target gap they would settle with their
-        // padded bboxes touching (or overlapping) once the snap aligns
-        // them on a shared row/column. Pairs with no cross-edge are truly
-        // isolated and can sit tight.
+        // Count cross-edges between member-disjoint group pairs. The snap
+        // target must use the same Group-Group distance rule as packing and
+        // distance resolution; a separate large linked-group constant makes
+        // vertical group gaps grow beyond the documented constraint.
         var memberToViews: [Int: [Int]] = [:]
         memberToViews.reserveCapacity(views.reduce(0) { $0 + $1.indices.count })
         for (vi, view) in views.enumerated() {
@@ -4530,7 +4777,7 @@ struct KnowledgeGraphLayout: Sendable {
                 memberToViews[member, default: []].append(vi)
             }
         }
-        var linkedPairs: Set<UInt64> = []
+        var linkedPairEdgeCounts: [UInt64: Int] = [:]
         for edge in edges {
             guard
                 let s = indexByID[edge.source],
@@ -4557,7 +4804,7 @@ struct KnowledgeGraphLayout: Sendable {
                     }
                     let lo = UInt64(min(sv, tv))
                     let hi = UInt64(max(sv, tv))
-                    linkedPairs.insert((lo << 32) | hi)
+                    linkedPairEdgeCounts[(lo << 32) | hi, default: 0] += 1
                 }
             }
         }
@@ -4576,13 +4823,8 @@ struct KnowledgeGraphLayout: Sendable {
         //     "rigid stacking", obscuring genuine asymmetries.
         //
         //   - `gapSnapStrength`: pulls the on-axis gap between padded
-        //     bboxes toward the per-pair target gap. Kept *stronger*
-        //     because the target gap is what enforces "linked groups
-        //     sit at distance 220, isolated groups at distance 72" —
-        //     a weak strength would leave linked pairs much closer
-        //     than 100 and unrelated pairs much farther than 40.
-        //     0.45 × 10 ≈ 0.25% residual, so the gap reaches its
-        //     target reliably.
+        //     bboxes toward the same per-pair Group-Group minimum used by
+        //     packing. Kept stronger so the gap reaches its target reliably.
         //
         // Both run for the same `snapIterations` pass count; only
         // the per-iteration strength differs.
@@ -4593,22 +4835,10 @@ struct KnowledgeGraphLayout: Sendable {
         // axis. `groupBoundingBoxes` adds each group's `style.padding` to
         // its inner card bbox, so the per-pair target gap on the inner
         // card bboxes is `padA + padB + extraGap`.
-        //   - Isolated pairs: 72 pt — enough repulsion that adjacent group
-        //     bboxes do not visually merge, while still keeping disconnected
-        //     islands within the same viewport.
-        //   - Linked pairs: 220 pt — a member of group A connected to a
-        //     member of group B is a strong visual statement ("these
-        //     groups *interact*"). To make that interaction legible
-        //     the two groups must be clearly apart, otherwise the
-        //     cross-edge label gets crammed against the bboxes and
-        //     the diagram reads as one merged region. 180 pt gives
-        //     room for the edge plus its label between the padded
-        //     bboxes, and is large enough that FR's cross-group
-        //     spring (rest length ≈ radii + 1.5 × gap ≈ 280 centre-to-
-        //     centre for average cards) cannot collapse the gap back
-        //     to zero — the snap pass adds the remaining push.
-        let isolatedPaddedGap: Double = 72
-        let linkedPaddedGap: Double = 220
+        // Cross-edge pairs reserve only the documented lane expansion.
+        // Horizontal connections may need extra label corridor width along x.
+        // Vertical connections keep the y gap compact, but still reserve x
+        // width for the parallel vertical lanes that pass between groups.
         for _ in 0..<snapIterations {
             for a in 0..<(views.count - 1) {
                 for b in (a + 1)..<views.count {
@@ -4617,13 +4847,17 @@ struct KnowledgeGraphLayout: Sendable {
                     if !views[a].memberSet.isDisjoint(with: views[b].memberSet) {
                         continue
                     }
-                    let pairKey = (UInt64(a) << 32) | UInt64(b)
-                    let isLinked = linkedPairs.contains(pairKey)
-                    let extraGap = isLinked ? linkedPaddedGap : isolatedPaddedGap
-                    let targetGap = views[a].padding + views[b].padding + extraGap
-
                     let dx = views[b].cx - views[a].cx
                     let dy = views[b].cy - views[a].cy
+                    let pairKey = (UInt64(a) << 32) | UInt64(b)
+                    let edgeCount = linkedPairEdgeCounts[pairKey] ?? 0
+                    let pairGap = minimumGroupGroupGap(
+                        edgeCount: edgeCount,
+                        reserveAxis: abs(dx) >= abs(dy) ? .horizontal : .vertical
+                    )
+                    let extraGap = Double(abs(dx) >= abs(dy) ? pairGap.horizontal : pairGap.vertical)
+                    let targetGap = views[a].padding + views[b].padding + extraGap
+
                     if abs(dx) >= abs(dy) {
                         // Horizontal alignment: snap y centers, then move
                         // along x until the bbox gap matches targetGap.
@@ -5692,7 +5926,7 @@ struct KnowledgeGraphLayout: Sendable {
     }
 
     private enum PackingTuning {
-        static let maxExactMaxRectsUnits = 10
+        static let maxExactMaxRectsUnits = 160
         static let maxPackingOrders = 8
         static let maxPackingWidths = 6
         static let maxPackedCandidates = 16
@@ -6218,9 +6452,12 @@ struct KnowledgeGraphLayout: Sendable {
                         continue
                     }
                     let pair = pairKey(boxes[a].groupIndex, boxes[b].groupIndex)
-                    let gap = minimumGroupGroupGap(edgeCount: groupEdgeCounts[pair] ?? 0)
-                    let expandedA = boxes[a].rect.insetBy(dx: -gap / 2, dy: -gap / 2)
-                    let expandedB = boxes[b].rect.insetBy(dx: -gap / 2, dy: -gap / 2)
+                    let gap = minimumGroupGroupGap(
+                        edgeCount: groupEdgeCounts[pair] ?? 0,
+                        reserveAxis: edgeReserveAxis(lhs: boxes[a].rect, rhs: boxes[b].rect)
+                    )
+                    let expandedA = boxes[a].rect.insetBy(dx: -gap.horizontal / 2, dy: -gap.vertical / 2)
+                    let expandedB = boxes[b].rect.insetBy(dx: -gap.horizontal / 2, dy: -gap.vertical / 2)
                     let intersection = expandedA.intersection(expandedB)
                     guard
                         !intersection.isNull,
@@ -6683,9 +6920,9 @@ struct KnowledgeGraphLayout: Sendable {
             groupEdgeCounts: groupEdgeCounts
         )
         let itemSizes = units.map { unit in
-            CGSize(width: unit.rect.width + gap, height: unit.rect.height + gap)
+            CGSize(width: unit.rect.width + gap.horizontal, height: unit.rect.height + gap.vertical)
         }
-        let gapSize = CGSize(width: gap, height: gap)
+        let gapSize = CGSize(width: gap.horizontal, height: gap.vertical)
         let orders = outlinePackingOrders(units, edgeMultiplicity: edgeMultiplicity)
         return maxRectsPackedPositionCandidates(
             positions: positions,
@@ -6747,8 +6984,8 @@ struct KnowledgeGraphLayout: Sendable {
         units: [KnowledgeGraphLayoutCompactionUnit],
         edgeMultiplicity: [UInt64: Int],
         groupEdgeCounts: [UInt64: Int]
-    ) -> CGFloat {
-        var gap: CGFloat = 0
+    ) -> KnowledgeGraphNodeNodeGap {
+        var gap = KnowledgeGraphNodeNodeGap(horizontal: 0, vertical: 0)
         guard units.count > 1 else { return gap }
         for lhs in 0..<(units.count - 1) {
             for rhs in (lhs + 1)..<units.count where units[lhs].memberSet.isDisjoint(with: units[rhs].memberSet) {
@@ -6758,7 +6995,10 @@ struct KnowledgeGraphLayout: Sendable {
                     edgeMultiplicity: edgeMultiplicity,
                     groupEdgeCounts: groupEdgeCounts
                 )
-                gap = max(gap, pairGap.horizontal, pairGap.vertical)
+                gap = KnowledgeGraphNodeNodeGap(
+                    horizontal: max(gap.horizontal, pairGap.horizontal),
+                    vertical: max(gap.vertical, pairGap.vertical)
+                )
             }
         }
         return gap
@@ -7119,8 +7359,10 @@ struct KnowledgeGraphLayout: Sendable {
                     groupEdgeCount += groupEdgeCounts[pairKey(left, right)] ?? 0
                 }
             }
-            let gap = minimumGroupGroupGap(edgeCount: max(groupEdgeCount, edgeCount))
-            return KnowledgeGraphNodeNodeGap(horizontal: gap, vertical: gap)
+            return minimumGroupGroupGap(
+                edgeCount: max(groupEdgeCount, edgeCount),
+                reserveAxis: edgeReserveAxis(lhs: lhs.rect, rhs: rhs.rect)
+            )
         }
         if !lhs.groupIndices.isEmpty || !rhs.groupIndices.isEmpty {
             let gap = LayoutSpacing.groupNode + CGFloat(min(edgeCount, 4)) * LayoutSpacing.edgeEdgeRoute
@@ -7166,8 +7408,36 @@ struct KnowledgeGraphLayout: Sendable {
         )
     }
 
-    private static func minimumGroupGroupGap(edgeCount: Int) -> CGFloat {
-        LayoutSpacing.groupGroup + CGFloat(min(max(edgeCount, 0), 6)) * LayoutSpacing.edgeEdgeRoute
+    private static func edgeReserveAxis(lhs: CGRect, rhs: CGRect) -> LayoutCompactionAxis {
+        abs(rhs.midX - lhs.midX) >= abs(rhs.midY - lhs.midY) ? .horizontal : .vertical
+    }
+
+    private static func minimumGroupGroupGap(
+        edgeCount: Int,
+        reserveAxis: LayoutCompactionAxis?
+    ) -> KnowledgeGraphNodeNodeGap {
+        let additionalLaneCount = min(
+            max(edgeCount - 1, 0),
+            LayoutSpacing.groupGroupEdgeLaneReserveLimit
+        )
+        let laneReserve = CGFloat(additionalLaneCount) * LayoutSpacing.edgeEdgeRoute
+        switch reserveAxis {
+        case .horizontal:
+            return KnowledgeGraphNodeNodeGap(
+                horizontal: LayoutSpacing.groupGroup + laneReserve,
+                vertical: LayoutSpacing.groupGroup
+            )
+        case .vertical:
+            return KnowledgeGraphNodeNodeGap(
+                horizontal: LayoutSpacing.groupGroup + laneReserve,
+                vertical: LayoutSpacing.groupGroup
+            )
+        case nil:
+            return KnowledgeGraphNodeNodeGap(
+                horizontal: LayoutSpacing.groupGroup,
+                vertical: LayoutSpacing.groupGroup
+            )
+        }
     }
 
     private static func edgeMultiplicityByCardPair(

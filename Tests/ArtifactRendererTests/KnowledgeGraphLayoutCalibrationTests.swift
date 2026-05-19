@@ -267,7 +267,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
         let outline = unionRect(boxes)
         let singleRowWidth = boxes.reduce(CGFloat(0)) { partial, rect in
             partial + rect.width
-        } + CGFloat(boxes.count - 1) * 72
+        } + CGFloat(boxes.count - 1) * 48
         let singleRowArea = singleRowWidth * (boxes.map(\.height).max() ?? 0)
 
         #expect(layoutArea(outline) < singleRowArea)
@@ -1362,7 +1362,11 @@ struct KnowledgeGraphLayoutCalibrationTests {
         )
         let contextChildTop = contextBox.minY + CardSizing.headerHeight + 14
         let outerGroupGap = rectDistance(contextBox, issueBox)
-        let requiredOuterGroupGap = CGFloat(72 + 3 * 14)
+        let outerGroupsAreHorizontallyConnected = abs(contextBox.midX - issueBox.midX)
+            >= abs(contextBox.midY - issueBox.midY)
+        let requiredOuterGroupGap = outerGroupsAreHorizontallyConnected
+            ? CGFloat(48 + 2 * 14)
+            : CGFloat(48)
         let outerGroupsShareRowOrColumn = abs(contextBox.midY - issueBox.midY) < 1.5
             || abs(contextBox.midX - issueBox.midX) < 1.5
 
@@ -1821,7 +1825,7 @@ struct KnowledgeGraphLayoutCalibrationTests {
             for j in (i + 1)..<groups.count {
                 let leftBox = try #require(result.groupBoundingBoxes[groups[i].id])
                 let rightBox = try #require(result.groupBoundingBoxes[groups[j].id])
-                #expect(rectanglesAreSeparated(leftBox, rightBox, byAtLeast: 72))
+                #expect(rectanglesAreSeparated(leftBox, rightBox, byAtLeast: 48))
             }
         }
 
@@ -2051,6 +2055,79 @@ struct KnowledgeGraphLayoutCalibrationTests {
                 #expect(rectDistance(labelRects[i], labelRects[j]) >= 3.5)
             }
         }
+    }
+
+    @Test
+    func largeExplicitGroupedGraphKeepsOuterOutlineCompactAfterGroupPacking() throws {
+        var nodes: [NodeIdentifier] = []
+        var groups: [GroupingStrategy.ExplicitGroup] = []
+        var initial: [NodeIdentifier: CGPoint] = [:]
+        let layerCount = 7
+        let childCount = 3
+        let childSize = 5
+
+        for layer in 0..<layerCount {
+            var layerMembers: [NodeIdentifier] = []
+            for child in 0..<childCount {
+                var childMembers: [NodeIdentifier] = []
+                for offset in 0..<childSize {
+                    let node = Self.iri("large-layer-\(layer)-child-\(child)-node-\(offset)")
+                    nodes.append(node)
+                    layerMembers.append(node)
+                    childMembers.append(node)
+                    initial[node] = CGPoint(
+                        x: CGFloat(layer * 1_600 + child * 480),
+                        y: CGFloat(layer * 1_700 + offset * 360)
+                    )
+                }
+                groups.append(.init(
+                    id: "large/layer-\(layer)/child-\(child)",
+                    label: "Layer \(layer) Child \(child)",
+                    memberNodeIDs: childMembers
+                ))
+            }
+            groups.append(.init(
+                id: "large/layer-\(layer)",
+                label: "Layer \(layer)",
+                memberNodeIDs: layerMembers
+            ))
+        }
+
+        let ungrouped = (0..<75).map { Self.iri("large-ungrouped-\($0)") }
+        for (index, node) in ungrouped.enumerated() {
+            nodes.append(node)
+            initial[node] = CGPoint(
+                x: CGFloat(index % 15) * 620,
+                y: 14_000 + CGFloat(index / 15) * 480
+            )
+        }
+
+        var edges: [Edge] = []
+        for index in 0..<(nodes.count - 1) {
+            edges.append(Self.edge(
+                from: nodes[index],
+                to: nodes[index + 1],
+                predicate: "http://example.org/rel/\(index % 5)"
+            ))
+        }
+        for index in stride(from: 0, to: nodes.count - 20, by: 11) {
+            edges.append(Self.edge(
+                from: nodes[index],
+                to: nodes[index + 19],
+                predicate: "http://example.org/cross/\(index % 7)"
+            ))
+        }
+
+        let graph = KnowledgeGraph(nodes: nodes.map { Node(id: $0) }, edges: edges)
+        let result = KnowledgeGraphLayout.compute(
+            graph: graph,
+            initial: initial,
+            groupingStrategy: .explicit(groups: groups)
+        )
+
+        #expect(result.compoundGraph.cards.count > 160)
+        #expect(result.canvasSize.width < 9_500)
+        #expect(result.canvasSize.height < 9_500)
     }
 
     // MARK: - Helpers

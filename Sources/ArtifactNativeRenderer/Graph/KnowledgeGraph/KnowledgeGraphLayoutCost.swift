@@ -20,6 +20,8 @@ struct KnowledgeGraphLayoutCost {
 }
 
 struct KnowledgeGraphPlacementCost {
+    private static let comparableOutlineAreaRatio: CGFloat = 0.08
+
     let hardViolationCount: Int
     let estimatedCrossings: Int
     let estimatedClearancePenalty: CGFloat
@@ -32,6 +34,9 @@ struct KnowledgeGraphPlacementCost {
     func isBetter(than other: KnowledgeGraphPlacementCost) -> Bool {
         if hardViolationCount != other.hardViolationCount {
             return hardViolationCount < other.hardViolationCount
+        }
+        if !hasComparableOutlineArea(to: other) {
+            return outlineArea < other.outlineArea
         }
         if estimatedCrossings != other.estimatedCrossings {
             return estimatedCrossings < other.estimatedCrossings
@@ -55,6 +60,12 @@ struct KnowledgeGraphPlacementCost {
             return whitespacePenalty < other.whitespacePenalty
         }
         return false
+    }
+
+    private func hasComparableOutlineArea(to other: KnowledgeGraphPlacementCost) -> Bool {
+        let delta = abs(outlineArea - other.outlineArea)
+        let tolerance = max(CGFloat(0.5), max(outlineArea, other.outlineArea) * Self.comparableOutlineAreaRatio)
+        return delta <= tolerance
     }
 }
 

@@ -56,7 +56,8 @@ struct KnowledgeGraphPlacementCostModel {
         }
         let routeCost = estimatedRouteCost(unitRects: rects, cardRects: cardRects)
         let hardViolationCount = unitDistanceViolationCount(unitRects: rects)
-            + routeCost.hardViolationCount
+        let clearancePenalty = routeCost.clearancePenalty
+            + CGFloat(routeCost.hardViolationCount) * spacing.edgeNode
         let outlineArea = Self.area(outline)
         let aspect = outline.width > 0 && outline.height > 0
             ? outline.width / outline.height
@@ -64,7 +65,7 @@ struct KnowledgeGraphPlacementCostModel {
         return KnowledgeGraphLayoutCost(placement: KnowledgeGraphPlacementCost(
             hardViolationCount: hardViolationCount,
             estimatedCrossings: routeCost.crossings,
-            estimatedClearancePenalty: routeCost.clearancePenalty,
+            estimatedClearancePenalty: clearancePenalty,
             estimatedRouteLength: routeCost.totalLength,
             estimatedMaxRouteLength: routeCost.maximumLength,
             outlineArea: outlineArea,

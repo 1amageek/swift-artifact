@@ -76,6 +76,380 @@ public struct JSONLDRenderer: ArtifactRenderable, Sendable {
     .frame(width: 520, height: 420)
 }
 
+#Preview("Card — complex grouped JSON-LD graph") {
+    ArtifactCard(
+        AnyArtifact(
+            id: ArtifactIdentifier("jl-complex-grouped"),
+            type: .jsonLD,
+            title: "Complex Grouped JSON-LD",
+            attributes: ["base": "https://example.org/"],
+            payload: #"""
+            {
+              "@context": {
+                "@base": "https://example.org/",
+                "factor": "https://example.org/factor/",
+                "evidence": "https://example.org/evidence/",
+                "question": "https://example.org/question/",
+                "rel": "https://example.org/relation#",
+                "schema": "https://schema.org/",
+                "vocab": "https://example.org/vocab#",
+                "xsd": "http://www.w3.org/2001/XMLSchema#",
+
+                "Factor": "vocab:Factor",
+                "Evidence": "vocab:Evidence",
+                "Question": "vocab:Question",
+                "Insight": "vocab:Insight",
+                "Risk": "vocab:Risk",
+                "title": "schema:name",
+                "content": "schema:description",
+                "confidence": {
+                  "@id": "vocab:confidence",
+                  "@type": "xsd:decimal"
+                },
+                "supports": {
+                  "@id": "rel:supports",
+                  "@type": "@id"
+                },
+                "derivedFrom": {
+                  "@id": "rel:derivedFrom",
+                  "@type": "@id",
+                  "@container": "@set"
+                },
+                "asksAbout": {
+                  "@id": "rel:asksAbout",
+                  "@type": "@id"
+                },
+                "mitigates": {
+                  "@id": "rel:mitigates",
+                  "@type": "@id"
+                },
+                "chartableData": {
+                  "@id": "rel:chartableData",
+                  "@type": "@id"
+                }
+              },
+              "view": {
+                "groups": [
+                  {
+                    "id": "group:layer/context",
+                    "kind": "layer",
+                    "title": "Context",
+                    "children": [
+                      {
+                        "id": "group:category/context/industrial-base",
+                        "kind": "category",
+                        "title": "Industrial base",
+                        "members": [
+                          "factor:setouchi-industrial-base",
+                          "factor:shipping-corridor",
+                          "evidence:port-throughput"
+                        ]
+                      },
+                      {
+                        "id": "group:category/context/labor-market",
+                        "kind": "category",
+                        "title": "Labor market",
+                        "members": [
+                          "factor:regional-labor-pool",
+                          "evidence:vocational-pipeline"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "id": "group:layer/situation",
+                    "kind": "layer",
+                    "title": "Situation",
+                    "children": [
+                      {
+                        "id": "group:category/situation/demand",
+                        "kind": "category",
+                        "title": "Demand",
+                        "members": [
+                          "factor:shipbuilding-backlog",
+                          "factor:ev-supply-chain-shift",
+                          "evidence:capex-announcements"
+                        ]
+                      },
+                      {
+                        "id": "group:category/situation/cost",
+                        "kind": "category",
+                        "title": "Cost pressure",
+                        "members": [
+                          "factor:energy-cost-pressure",
+                          "factor:procurement-friction"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "id": "group:layer/issue",
+                    "kind": "layer",
+                    "title": "Issue",
+                    "children": [
+                      {
+                        "id": "group:category/issue/capacity",
+                        "kind": "category",
+                        "title": "Capacity risk",
+                        "members": [
+                          "factor:grid-capacity-risk",
+                          "factor:skilled-labor-shortage",
+                          "question:export-demand-durability"
+                        ]
+                      },
+                      {
+                        "id": "group:category/issue/supply",
+                        "kind": "category",
+                        "title": "Supply resilience",
+                        "members": [
+                          "factor:component-supply-volatility",
+                          "factor:inventory-buffer-limit"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "id": "group:layer/outcome",
+                    "kind": "layer",
+                    "title": "Outcome",
+                    "children": [
+                      {
+                        "id": "group:category/outcome/investment",
+                        "kind": "category",
+                        "title": "Investment thesis",
+                        "members": [
+                          "factor:gx-investment-scenario",
+                          "factor:automation-upside"
+                        ]
+                      },
+                      {
+                        "id": "group:category/outcome/resilience",
+                        "kind": "category",
+                        "title": "Regional resilience",
+                        "members": [
+                          "factor:regional-cluster-resilience",
+                          "evidence:scenario-dashboard"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              "@graph": [
+                {
+                  "@id": "factor:setouchi-industrial-base",
+                  "@type": "Factor",
+                  "title": "Setouchi industrial base",
+                  "content": "Existing manufacturing density anchors the regional supply network.",
+                  "confidence": 0.72,
+                  "supports": "factor:regional-cluster-resilience"
+                },
+                {
+                  "@id": "factor:shipping-corridor",
+                  "@type": "Factor",
+                  "title": "Shipping corridor",
+                  "content": "Port and inland routes connect component suppliers with assembly sites.",
+                  "confidence": 0.68,
+                  "supports": "factor:shipbuilding-backlog"
+                },
+                {
+                  "@id": "evidence:port-throughput",
+                  "@type": "Evidence",
+                  "title": "Port throughput trend",
+                  "content": "Cargo throughput remains high enough to support expansion scenarios.",
+                  "confidence": 0.77,
+                  "supports": [
+                    "factor:shipping-corridor",
+                    "factor:regional-cluster-resilience"
+                  ]
+                },
+                {
+                  "@id": "factor:regional-labor-pool",
+                  "@type": "Factor",
+                  "title": "Regional labor pool",
+                  "content": "Specialized workers are available but concentrated in a few districts.",
+                  "confidence": 0.63,
+                  "supports": "factor:automation-upside"
+                },
+                {
+                  "@id": "evidence:vocational-pipeline",
+                  "@type": "Evidence",
+                  "title": "Vocational pipeline",
+                  "content": "Training capacity partially offsets retirement-driven labor losses.",
+                  "confidence": 0.64,
+                  "supports": "factor:regional-labor-pool"
+                },
+                {
+                  "@id": "factor:shipbuilding-backlog",
+                  "@type": "Factor",
+                  "title": "Shipbuilding backlog",
+                  "content": "Backlog creates near-term utilization but raises delivery risk.",
+                  "confidence": 0.70,
+                  "derivedFrom": [
+                    "factor:shipping-corridor",
+                    "evidence:port-throughput"
+                  ],
+                  "supports": "factor:gx-investment-scenario"
+                },
+                {
+                  "@id": "factor:ev-supply-chain-shift",
+                  "@type": "Insight",
+                  "title": "EV supply-chain shift",
+                  "content": "EV component demand is moving procurement toward higher precision suppliers.",
+                  "confidence": 0.66,
+                  "derivedFrom": [
+                    "factor:setouchi-industrial-base",
+                    "evidence:capex-announcements"
+                  ],
+                  "supports": "factor:automation-upside"
+                },
+                {
+                  "@id": "evidence:capex-announcements",
+                  "@type": "Evidence",
+                  "title": "Capex announcements",
+                  "content": "Multiple firms announced expansion plans in adjacent production categories.",
+                  "confidence": 0.74,
+                  "supports": [
+                    "factor:ev-supply-chain-shift",
+                    "factor:gx-investment-scenario"
+                  ]
+                },
+                {
+                  "@id": "factor:energy-cost-pressure",
+                  "@type": "Risk",
+                  "title": "Energy cost pressure",
+                  "content": "Power price volatility can erode margin on energy-intensive production.",
+                  "confidence": 0.61,
+                  "supports": "factor:grid-capacity-risk"
+                },
+                {
+                  "@id": "factor:procurement-friction",
+                  "@type": "Risk",
+                  "title": "Procurement friction",
+                  "content": "Lead times for critical components remain unstable.",
+                  "confidence": 0.58,
+                  "supports": [
+                    "factor:component-supply-volatility",
+                    "factor:inventory-buffer-limit"
+                  ]
+                },
+                {
+                  "@id": "factor:grid-capacity-risk",
+                  "@type": "Risk",
+                  "title": "Grid capacity risk",
+                  "content": "Electricity constraints could delay factory utilization.",
+                  "confidence": 0.57,
+                  "derivedFrom": [
+                    "factor:energy-cost-pressure",
+                    "factor:shipbuilding-backlog"
+                  ],
+                  "mitigates": "factor:gx-investment-scenario"
+                },
+                {
+                  "@id": "factor:skilled-labor-shortage",
+                  "@type": "Risk",
+                  "title": "Skilled labor shortage",
+                  "content": "Retirement pressure creates bottlenecks in welding and controls work.",
+                  "confidence": 0.69,
+                  "derivedFrom": [
+                    "factor:regional-labor-pool",
+                    "evidence:vocational-pipeline"
+                  ],
+                  "supports": "question:export-demand-durability"
+                },
+                {
+                  "@id": "question:export-demand-durability",
+                  "@type": "Question",
+                  "title": "Export demand durability",
+                  "content": "Demand durability depends on overseas infrastructure spending.",
+                  "confidence": 0.45,
+                  "asksAbout": [
+                    "factor:shipbuilding-backlog",
+                    "factor:ev-supply-chain-shift"
+                  ]
+                },
+                {
+                  "@id": "factor:component-supply-volatility",
+                  "@type": "Risk",
+                  "title": "Component supply volatility",
+                  "content": "Supplier concentration makes component availability unstable.",
+                  "confidence": 0.62,
+                  "derivedFrom": "factor:procurement-friction",
+                  "supports": "factor:inventory-buffer-limit"
+                },
+                {
+                  "@id": "factor:inventory-buffer-limit",
+                  "@type": "Risk",
+                  "title": "Inventory buffer limit",
+                  "content": "Small suppliers cannot carry enough inventory to absorb shocks.",
+                  "confidence": 0.55,
+                  "derivedFrom": [
+                    "factor:procurement-friction",
+                    "factor:component-supply-volatility"
+                  ],
+                  "supports": "factor:regional-cluster-resilience"
+                },
+                {
+                  "@id": "factor:gx-investment-scenario",
+                  "@type": "Insight",
+                  "title": "GX investment scenario",
+                  "content": "Green transformation investment is attractive when grid risk is contained.",
+                  "confidence": 0.67,
+                  "derivedFrom": [
+                    "factor:shipbuilding-backlog",
+                    "evidence:capex-announcements",
+                    "factor:grid-capacity-risk"
+                  ],
+                  "chartableData": "evidence:scenario-dashboard"
+                },
+                {
+                  "@id": "factor:automation-upside",
+                  "@type": "Insight",
+                  "title": "Automation upside",
+                  "content": "Automation offsets labor constraints and improves regional productivity.",
+                  "confidence": 0.71,
+                  "derivedFrom": [
+                    "factor:regional-labor-pool",
+                    "factor:ev-supply-chain-shift",
+                    "factor:skilled-labor-shortage"
+                  ],
+                  "supports": "factor:regional-cluster-resilience"
+                },
+                {
+                  "@id": "factor:regional-cluster-resilience",
+                  "@type": "Insight",
+                  "title": "Regional cluster resilience",
+                  "content": "The cluster can stay resilient if supply volatility and grid limits are managed.",
+                  "confidence": 0.65,
+                  "derivedFrom": [
+                    "factor:setouchi-industrial-base",
+                    "factor:automation-upside",
+                    "factor:inventory-buffer-limit"
+                  ],
+                  "chartableData": "evidence:scenario-dashboard"
+                },
+                {
+                  "@id": "evidence:scenario-dashboard",
+                  "@type": "Evidence",
+                  "title": "Scenario dashboard",
+                  "content": "Dashboard metrics connect investment, automation, and resilience outcomes.",
+                  "confidence": 0.73,
+                  "supports": [
+                    "factor:gx-investment-scenario",
+                    "factor:regional-cluster-resilience"
+                  ]
+                }
+              ]
+            }
+            """#,
+            isComplete: true
+        ),
+        renderer: JSONLDRenderer()
+    )
+    .artifactContentMaxHeight(nil)
+    .frame(width: 1120, height: 760)
+}
+
 #Preview("Bare — malformed JSON-LD → error") {
     ArtifactView(
         AnyArtifact(
