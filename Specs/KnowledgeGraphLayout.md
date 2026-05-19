@@ -450,15 +450,46 @@ Outermost Group / Ungrouped Node を compaction unit に変換
   ↓
 ネストした outermost Group layout では MaxRects + 候補幅探索で packing 候補を列挙する
   ↓
-outline 面積が最小の候補を採用する
+Hard constraint / Edge 品質 / outline 面積の順で候補を採用する
   ↓
 距離制約を再投影
 ```
 
+実装責務は次の境界で分離する。
+
+| ファイル | 責務 |
+|---|---|
+| `KnowledgeGraphLayout.swift` | graph を rank / group / compaction unit へ変換し、候補生成と最終 routing pipeline を進める |
+| `KnowledgeGraphLayoutPrimitives.swift` | layout 本体と cost model が共有する最小 data primitive を定義する |
+| `KnowledgeGraphLayoutCost.swift` | 辞書式 cost vector と routing conflict score の比較順だけを定義する |
+| `KnowledgeGraphPlacementCostModel.swift` | packing 候補の高速 route 推定、hard violation 推定、outline cost 評価を行う |
+
+`KnowledgeGraphPlacementCostModel` は `KnowledgeGraphLayout` の private helper に依存しない。
+layout 本体は `placementCostModel(...)` で unit pair、route edge、spacing を渡すだけにする。
+これにより、rank-preserving compaction と packed outline 評価が古い実装名や旧 cost 関数に戻らない。
+
 MaxRects packing では全 pair の最小距離要求の最大値を item gap として使う。
 候補幅は `max item width`、`sqrt(total area)` 近傍、各 order の累積幅、`sum item width` から列挙する。
 これにより、2 つの outermost Group は横並びまたは縦並びのどちらか小さい方になり、
-3 つ以上では固定幅ごとの 2D rectangle packing 候補から global outline 面積が最小のものを選ぶ。
+3 つ以上では固定幅ごとの 2D rectangle packing 候補から global layout cost が最小のものを選ぶ。
+
+候補比較は重み付き合算ではなく、次の辞書式順序で行う。
+
+| 優先 | Placement cost |
+|---:|---|
+| 1 | Hard constraint 違反数 |
+| 2 | Edge 交差推定数 |
+| 3 | Edge-Edge clearance penalty |
+| 4 | Edge route 推定合計長 |
+| 5 | Edge route 推定最大長 |
+| 6 | global outline 面積 |
+| 7 | aspect が `3:2` に近い |
+| 8 | whitespace 面積 |
+
+大規模 graph では全候補に精密 routing を走らせない。
+代わりに outermost unit 間の中心 Manhattan route、Edge multiplicity、Node intersection 推定、
+Edge-Edge clearance 推定を使う。最終 route は従来どおり精密 routing に任せるため、
+候補評価の高速化は斜め禁止、Node 非干渉、Edge 最短優先を弱めてはならない。
 
 Group が member Node を共有する場合は、別々の compaction unit に分けない。
 共有 member を持つ Group 群は 1 つの overlap component として扱い、bridge group の endpoint を
