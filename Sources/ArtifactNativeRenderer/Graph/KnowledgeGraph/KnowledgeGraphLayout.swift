@@ -5722,6 +5722,43 @@ struct KnowledgeGraphLayout: Sendable {
         let area: CGFloat
     }
 
+    private enum PackingTuning {
+        static let maxExactMaxRectsUnits = 10
+        static let maxPackingOrders = 8
+        static let maxPackingWidths = 6
+        static let maxPackedCandidates = 16
+        static let maxLargePackedCandidates = 8
+        static let maxFreeRects = 96
+        static let maxEstimatedConflictRoutes = 120
+        static let largeGraphCardCount = 160
+        static let regularOutlinePasses = 4
+        static let largeGraphOutlinePasses = 2
+        static let regularCandidateConstraintIterations = 6
+        static let largeGraphCandidateConstraintIterations = 3
+    }
+
+    private enum RoutingTuning {
+        static let exactObstacleRoutingNodeCount = 36
+        static let maxRequiredObstacleSeeds = 2
+        static let maxSupplementalObstacleSeeds = 3
+        static let maxObstacleRects = 28
+        static let maxDetourAxisValues = 10
+        static let maxCompoundDetourAxisValues = 5
+        static let maxRouteSearchExpansions = 1_800
+        static let maxRouteSearchStates = 8_000
+        static let maxFullRouteOptimizationEdges = 180
+        static let maxEqualLengthLaneNormalizationEdges = 160
+        static let compactCandidateNodeCount = 120
+    }
+
+    private enum EdgeLabelTuning {
+        static let maxSamplesPerSegment = 9
+        static let maxSamplesPerEdge = 48
+        static let largeGraphEdgeCount = 80
+        static let largeGraphPlacementPasses = 2
+        static let regularPlacementPasses = 4
+    }
+
     private struct ResolvedCardEdge {
         let source: Int
         let target: Int
@@ -5860,7 +5897,15 @@ struct KnowledgeGraphLayout: Sendable {
         let edgeMultiplicity = costContext.edgeMultiplicity
         let groupEdgeCounts = costContext.groupEdgeCounts
 
-        for _ in 0..<4 {
+        let usesLargeGraphTuning = positions.count > PackingTuning.largeGraphCardCount
+        let outlinePasses = usesLargeGraphTuning
+            ? PackingTuning.largeGraphOutlinePasses
+            : PackingTuning.regularOutlinePasses
+        let candidateConstraintIterations = usesLargeGraphTuning
+            ? PackingTuning.largeGraphCandidateConstraintIterations
+            : PackingTuning.regularCandidateConstraintIterations
+
+        for _ in 0..<outlinePasses {
             let globalUnits = layoutCompactionUnits(
                 positions: positions,
                 sizes: sizes,
@@ -5929,7 +5974,7 @@ struct KnowledgeGraphLayout: Sendable {
                     edges: edges,
                     groups: groups,
                     indexByID: indexByID,
-                    iterations: 6
+                    iterations: candidateConstraintIterations
                 )
                 if useAxisAlignedGroupPacking {
                     let candidateCost = graphLayoutCost(
@@ -6196,10 +6241,23 @@ struct KnowledgeGraphLayout: Sendable {
 
         var crossings = 0
         var clearancePenalty: CGFloat = 0
-        if routes.count > 1 {
-            for lhs in 0..<(routes.count - 1) {
-                for rhs in (lhs + 1)..<routes.count {
-                    let pair = estimatedRoutePairConflict(routes[lhs], routes[rhs])
+        let conflictRoutes: [EstimatedPlacementRoute]
+        if routes.count > PackingTuning.maxEstimatedConflictRoutes {
+            conflictRoutes = Array(routes
+                .sorted { lhs, rhs in
+                    if abs(lhs.length - rhs.length) > 0.5 {
+                        return lhs.length > rhs.length
+                    }
+                    return lhs.bounds.minX < rhs.bounds.minX
+                }
+                .prefix(PackingTuning.maxEstimatedConflictRoutes))
+        } else {
+            conflictRoutes = routes
+        }
+        if conflictRoutes.count > 1 {
+            for lhs in 0..<(conflictRoutes.count - 1) {
+                for rhs in (lhs + 1)..<conflictRoutes.count {
+                    let pair = estimatedRoutePairConflict(conflictRoutes[lhs], conflictRoutes[rhs])
                     crossings += pair.crossings
                     clearancePenalty += pair.clearancePenalty
                 }
@@ -6918,14 +6976,11 @@ struct KnowledgeGraphLayout: Sendable {
     ) -> [[Int]] {
         guard units.count > 1, !edgeMultiplicity.isEmpty else { return [] }
         let indices = Array(units.indices)
+        let connections = unitConnectionMatrix(units: units, edgeMultiplicity: edgeMultiplicity)
         let degrees = indices.map { unitIndex in
             indices.reduce(0) { partial, otherIndex in
                 guard unitIndex != otherIndex else { return partial }
-                return partial + edgeCountBetweenUnits(
-                    units[unitIndex],
-                    units[otherIndex],
-                    edgeMultiplicity: edgeMultiplicity
-                )
+                return partial + connections[unitIndex, otherIndex]
             }
         }
         let starts = indices.sorted { lhs, rhs in
@@ -6937,16 +6992,53 @@ struct KnowledgeGraphLayout: Sendable {
         return starts.prefix(min(starts.count, 4)).map { start in
             edgeAwareOutlinePackingOrder(
                 units,
-                edgeMultiplicity: edgeMultiplicity,
+                connections: connections,
                 start: start,
                 degrees: degrees
             )
         }
     }
 
+    private struct UnitConnectionMatrix {
+        let count: Int
+        private let values: [Int]
+
+        init(count: Int, values: [Int]) {
+            self.count = count
+            self.values = values
+        }
+
+        subscript(lhs: Int, rhs: Int) -> Int {
+            values[lhs * count + rhs]
+        }
+    }
+
+    private static func unitConnectionMatrix(
+        units: [LayoutCompactionUnit],
+        edgeMultiplicity: [UInt64: Int]
+    ) -> UnitConnectionMatrix {
+        let count = units.count
+        var values = Array(repeating: 0, count: count * count)
+        guard count > 1 else {
+            return UnitConnectionMatrix(count: count, values: values)
+        }
+        for lhs in 0..<(count - 1) {
+            for rhs in (lhs + 1)..<count {
+                let edgeCount = edgeCountBetweenUnits(
+                    units[lhs],
+                    units[rhs],
+                    edgeMultiplicity: edgeMultiplicity
+                )
+                values[lhs * count + rhs] = edgeCount
+                values[rhs * count + lhs] = edgeCount
+            }
+        }
+        return UnitConnectionMatrix(count: count, values: values)
+    }
+
     private static func edgeAwareOutlinePackingOrder(
         _ units: [LayoutCompactionUnit],
-        edgeMultiplicity: [UInt64: Int],
+        connections: UnitConnectionMatrix,
         start: Int,
         degrees: [Int]
     ) -> [Int] {
@@ -6955,18 +7047,10 @@ struct KnowledgeGraphLayout: Sendable {
         remaining.remove(start)
         while let next = remaining.max(by: { lhs, rhs in
             let leftConnection = order.reduce(0) { partial, placed in
-                partial + edgeCountBetweenUnits(
-                    units[lhs],
-                    units[placed],
-                    edgeMultiplicity: edgeMultiplicity
-                )
+                partial + connections[lhs, placed]
             }
             let rightConnection = order.reduce(0) { partial, placed in
-                partial + edgeCountBetweenUnits(
-                    units[rhs],
-                    units[placed],
-                    edgeMultiplicity: edgeMultiplicity
-                )
+                partial + connections[rhs, placed]
             }
             if leftConnection != rightConnection {
                 return leftConnection < rightConnection
@@ -7016,9 +7100,21 @@ struct KnowledgeGraphLayout: Sendable {
         orders: [[Int]]
     ) -> [[CGPoint]] {
         guard units.count > 1 else { return [] }
-        let widths = maxRectsCandidateWidths(itemSizes: itemSizes, orders: orders)
+        let boundedOrders = Array(orders.prefix(PackingTuning.maxPackingOrders))
+        let widths = maxRectsCandidateWidths(itemSizes: itemSizes, orders: boundedOrders)
+        guard !boundedOrders.isEmpty, !widths.isEmpty else { return [] }
+        if units.count > PackingTuning.maxExactMaxRectsUnits {
+            return shelfPackedPositionCandidates(
+                positions: positions,
+                units: units,
+                itemSizes: itemSizes,
+                gapSize: gapSize,
+                orders: boundedOrders,
+                widths: widths
+            )
+        }
         var candidates: [MaxRectsPacking] = []
-        for order in orders {
+        for order in boundedOrders {
             for width in widths {
                 if let packing = maxRectsPack(
                     positions: positions,
@@ -7032,11 +7128,14 @@ struct KnowledgeGraphLayout: Sendable {
                 }
             }
         }
+        let candidateLimit = units.count > PackingTuning.maxExactMaxRectsUnits
+            ? PackingTuning.maxLargePackedCandidates
+            : PackingTuning.maxPackedCandidates
         return candidates
             .sorted { lhs, rhs in
                 lhs.area < rhs.area
             }
-            .prefix(24)
+            .prefix(candidateLimit)
             .map(\.positions)
     }
 
@@ -7086,7 +7185,130 @@ struct KnowledgeGraphLayout: Sendable {
                 insert(cumulative)
             }
         }
-        return keys.sorted().map(CGFloat.init)
+        let allWidths = keys.sorted().map(CGFloat.init)
+        guard allWidths.count > PackingTuning.maxPackingWidths else { return allWidths }
+        let targetWidth = sqrt(totalArea * CGFloat(1.5))
+        var selected: [CGFloat] = []
+
+        func appendUnique(_ value: CGFloat) {
+            guard !selected.contains(where: { abs($0 - value) < 0.5 }) else { return }
+            selected.append(value)
+        }
+
+        appendUnique(ceil(minWidth))
+        for width in allWidths.sorted(by: { abs($0 - targetWidth) < abs($1 - targetWidth) }) {
+            appendUnique(width)
+            if selected.count >= PackingTuning.maxPackingWidths - 1 { break }
+        }
+        appendUnique(ceil(maxWidth))
+        return selected.sorted()
+    }
+
+    private static func shelfPackedPositionCandidates(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        itemSizes: [CGSize],
+        gapSize: CGSize,
+        orders: [[Int]],
+        widths: [CGFloat]
+    ) -> [[CGPoint]] {
+        var candidates: [MaxRectsPacking] = []
+        candidates.reserveCapacity(orders.count * widths.count)
+        for order in orders {
+            for width in widths {
+                guard let packing = shelfPack(
+                    positions: positions,
+                    units: units,
+                    itemSizes: itemSizes,
+                    order: order,
+                    width: width,
+                    gapSize: gapSize
+                ) else { continue }
+                candidates.append(packing)
+            }
+        }
+        let candidateLimit = units.count > PackingTuning.maxExactMaxRectsUnits
+            ? PackingTuning.maxLargePackedCandidates
+            : PackingTuning.maxPackedCandidates
+        return candidates
+            .sorted { lhs, rhs in
+                if abs(lhs.area - rhs.area) > 0.5 {
+                    return lhs.area < rhs.area
+                }
+                return lhs.positions.lexicographicallyPrecedes(rhs.positions) { lhsPoint, rhsPoint in
+                    if abs(lhsPoint.y - rhsPoint.y) > 0.5 {
+                        return lhsPoint.y < rhsPoint.y
+                    }
+                    return lhsPoint.x < rhsPoint.x
+                }
+            }
+            .prefix(candidateLimit)
+            .map(\.positions)
+    }
+
+    private static func shelfPack(
+        positions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        itemSizes: [CGSize],
+        order: [Int],
+        width: CGFloat,
+        gapSize: CGSize
+    ) -> MaxRectsPacking? {
+        guard order.count == units.count else { return nil }
+        var placedInflated = Array(repeating: CGRect.null, count: units.count)
+        var cursor = CGPoint.zero
+        var rowHeight: CGFloat = 0
+        for unitIndex in order {
+            let size = itemSizes[unitIndex]
+            guard size.width <= width + 0.001 else { return nil }
+            if cursor.x > 0, cursor.x + size.width > width + 0.001 {
+                cursor.x = 0
+                cursor.y += rowHeight
+                rowHeight = 0
+            }
+            placedInflated[unitIndex] = CGRect(origin: cursor, size: size)
+            cursor.x += size.width
+            rowHeight = max(rowHeight, size.height)
+        }
+        return packedPositions(
+            basePositions: positions,
+            units: units,
+            placedInflated: placedInflated,
+            gapSize: gapSize
+        )
+    }
+
+    private static func packedPositions(
+        basePositions: [CGPoint],
+        units: [LayoutCompactionUnit],
+        placedInflated: [CGRect],
+        gapSize: CGSize
+    ) -> MaxRectsPacking {
+        let origins = placedInflated.enumerated().map { unitIndex, rect in
+            CGPoint(
+                x: rect.minX + gapSize.width / 2 - units[unitIndex].rect.minX,
+                y: rect.minY + gapSize.height / 2 - units[unitIndex].rect.minY
+            )
+        }
+        var result = basePositions
+        for (unitIndex, unit) in units.enumerated() {
+            let delta = origins[unitIndex]
+            for index in unit.indices {
+                result[index].x += delta.x
+                result[index].y += delta.y
+            }
+        }
+        let outline = units.indices.reduce(CGRect.null) { partial, unitIndex in
+            let inflated = placedInflated[unitIndex]
+            let rect = CGRect(
+                x: inflated.minX + gapSize.width / 2,
+                y: inflated.minY + gapSize.height / 2,
+                width: units[unitIndex].rect.width,
+                height: units[unitIndex].rect.height
+            )
+            return partial.isNull ? rect : partial.union(rect)
+        }
+        return MaxRectsPacking(positions: result, area: layoutArea(outline))
     }
 
     private static func maxRectsPack(
@@ -7108,33 +7330,17 @@ struct KnowledgeGraphLayout: Sendable {
             }
             placedInflated[unitIndex] = placement
             freeRects = splitMaxRectsFreeSpace(freeRects: freeRects, placed: placement)
-        }
-
-        let origins = placedInflated.enumerated().map { unitIndex, rect in
-            CGPoint(
-                x: rect.minX + gapSize.width / 2 - units[unitIndex].rect.minX,
-                y: rect.minY + gapSize.height / 2 - units[unitIndex].rect.minY
-            )
-        }
-        var result = positions
-        for (unitIndex, unit) in units.enumerated() {
-            let delta = origins[unitIndex]
-            for index in unit.indices {
-                result[index].x += delta.x
-                result[index].y += delta.y
+            if freeRects.count > PackingTuning.maxFreeRects {
+                freeRects = rankedMaxRects(freeRects, limit: PackingTuning.maxFreeRects)
             }
         }
-        let outline = units.indices.reduce(CGRect.null) { partial, unitIndex in
-            let inflated = placedInflated[unitIndex]
-            let rect = CGRect(
-                x: inflated.minX + gapSize.width / 2,
-                y: inflated.minY + gapSize.height / 2,
-                width: units[unitIndex].rect.width,
-                height: units[unitIndex].rect.height
-            )
-            return partial.isNull ? rect : partial.union(rect)
-        }
-        return MaxRectsPacking(positions: result, area: layoutArea(outline))
+
+        return packedPositions(
+            basePositions: positions,
+            units: units,
+            placedInflated: placedInflated,
+            gapSize: gapSize
+        )
     }
 
     private static func bestMaxRectsPlacement(size: CGSize, freeRects: [CGRect]) -> CGRect? {
@@ -7211,6 +7417,23 @@ struct KnowledgeGraphLayout: Sendable {
             }
         }
         return result
+    }
+
+    private static func rankedMaxRects(_ rects: [CGRect], limit: Int) -> [CGRect] {
+        rects
+            .sorted { lhs, rhs in
+                let leftArea = layoutArea(lhs)
+                let rightArea = layoutArea(rhs)
+                if abs(leftArea - rightArea) > 0.5 {
+                    return leftArea > rightArea
+                }
+                if abs(lhs.minY - rhs.minY) > 0.5 {
+                    return lhs.minY < rhs.minY
+                }
+                return lhs.minX < rhs.minX
+            }
+            .prefix(limit)
+            .map { $0 }
     }
 
     private static func deduplicatedOrders(_ orders: [[Int]]) -> [[Int]] {
@@ -7964,6 +8187,9 @@ struct KnowledgeGraphLayout: Sendable {
             routedEdges.append(routedEdge)
             routeSegmentIndex.insert(routedEdge)
         }
+        guard edges.count <= RoutingTuning.maxFullRouteOptimizationEdges else {
+            return routes
+        }
         let recenteredRoutes = recenterSingletonPorts(
             routes: routes,
             edges: edges,
@@ -8034,6 +8260,9 @@ struct KnowledgeGraphLayout: Sendable {
                 : straightenedRoutes
         } else {
             routesBeforeNormalization = straightenedRoutes
+        }
+        guard edges.count <= RoutingTuning.maxEqualLengthLaneNormalizationEdges else {
+            return routesBeforeNormalization
         }
         return normalizeEqualLengthJointLanes(
             routes: routesBeforeNormalization,
@@ -8934,17 +9163,18 @@ struct KnowledgeGraphLayout: Sendable {
                         baseRouteSegmentIndex: fullRouteSegmentIndex,
                         ignoringIndexedEdgeIDs: affectedEdgeIDs
                     )
-                    guard let candidate = routesBySwappingEndpointPorts(
-                        lhs: lhs,
-                        rhs: rhs,
-                        endpoints: endpoints,
-                        routes: optimized,
-                        edges: edges,
-                        indexByID: indexByID,
-                        nodeIndex: nodeIndex,
-                        affectedEdges: affectedEdgeList,
-                        routeCandidateCache: &routeCandidateCache
-                    ) else { continue }
+	                    guard let candidate = routesBySwappingEndpointPorts(
+	                        lhs: lhs,
+	                        rhs: rhs,
+	                        endpoints: endpoints,
+	                        routes: optimized,
+	                        edges: edges,
+	                        indexByID: indexByID,
+	                        nodeIndex: nodeIndex,
+	                        affectedEdges: affectedEdgeList,
+	                        baseRouteSegmentIndex: fullRouteSegmentIndex,
+	                        routeCandidateCache: &routeCandidateCache
+	                    ) else { continue }
                     let candidateLength = routeLengthSum(
                         routes: candidate,
                         affectedEdges: affectedEdgeList
@@ -9530,6 +9760,7 @@ struct KnowledgeGraphLayout: Sendable {
                         indexByID: indexByID,
                         nodeIndex: nodeIndex,
                         affectedEdges: affectedEdgeList,
+                        baseRouteSegmentIndex: fullRouteSegmentIndex,
                         routeCandidateCache: &routeCandidateCache
                     ) else { continue }
                     let candidateScore = portAssignmentScore(
@@ -9673,17 +9904,18 @@ struct KnowledgeGraphLayout: Sendable {
         return optimized
     }
 
-    private static func routesBySwappingEndpointPorts(
-        lhs: RouteEndpoint,
-        rhs: RouteEndpoint,
-        endpoints: [EdgeEndpointKey: RouteEndpoint],
-        routes: [EdgeIdentifier: EdgeRoute],
-        edges: [CompoundGraph.CardEdge],
-        indexByID: [CompoundGraph.Card.ID: Int],
-        nodeIndex: RouteNodeIndex,
-        affectedEdges: [CompoundGraph.CardEdge],
-        routeCandidateCache: inout FixedEndpointRouteCandidateCache
-    ) -> [EdgeIdentifier: EdgeRoute]? {
+	    private static func routesBySwappingEndpointPorts(
+	        lhs: RouteEndpoint,
+	        rhs: RouteEndpoint,
+	        endpoints: [EdgeEndpointKey: RouteEndpoint],
+	        routes: [EdgeIdentifier: EdgeRoute],
+	        edges: [CompoundGraph.CardEdge],
+	        indexByID: [CompoundGraph.Card.ID: Int],
+	        nodeIndex: RouteNodeIndex,
+	        affectedEdges: [CompoundGraph.CardEdge],
+	        baseRouteSegmentIndex: RouteSegmentIndex,
+	        routeCandidateCache: inout FixedEndpointRouteCandidateCache
+	    ) -> [EdgeIdentifier: EdgeRoute]? {
         var swappedLHS = lhs
         var swappedRHS = rhs
         swappedLHS.point = rhs.point
@@ -9718,22 +9950,17 @@ struct KnowledgeGraphLayout: Sendable {
                 updated[edge.id] = edgeRoute(points: directPoints)
                 continue
             }
-            let routeSegmentIndex = Self.routeSegmentIndex(
-                edges: edges,
-                routes: updated,
-                excluding: [edge.id]
-            )
-            guard let points = shortestFixedEndpointRoute(
-                edge: edge,
-                sourcePort: sourcePort,
-                targetPort: targetPort,
-                laneOffset: centeredParallel * LayoutSpacing.edgeEdgeRoute,
-                sourceIndex: sourceIndex,
-                targetIndex: targetIndex,
-                nodeIndex: nodeIndex,
-                routeSegmentIndex: routeSegmentIndex,
-                routeCandidateCache: &routeCandidateCache
-            ) else { return nil }
+	            guard let points = shortestFixedEndpointRoute(
+	                edge: edge,
+	                sourcePort: sourcePort,
+	                targetPort: targetPort,
+	                laneOffset: centeredParallel * LayoutSpacing.edgeEdgeRoute,
+	                sourceIndex: sourceIndex,
+	                targetIndex: targetIndex,
+	                nodeIndex: nodeIndex,
+	                routeSegmentIndex: baseRouteSegmentIndex,
+	                routeCandidateCache: &routeCandidateCache
+	            ) else { return nil }
             updated[edge.id] = edgeRoute(points: points)
         }
         return updated
@@ -10946,29 +11173,44 @@ struct KnowledgeGraphLayout: Sendable {
         excludedIndices: Set<Int>
     ) -> [[CGPoint]] {
         let laneMagnitude = abs(laneOffset)
-        let stubDistances = uniqueCGFloatValues([
-            0,
-            laneMagnitude,
-            LayoutSpacing.jointNode + laneMagnitude,
-            LayoutSpacing.jointNode + LayoutSpacing.edgeEdgeRoute + laneMagnitude
-        ])
-        let laneOffsets = uniqueCGFloatValues([
-            laneOffset,
-            0,
-            -laneOffset,
-            LayoutSpacing.edgeEdgeRoute,
-            -LayoutSpacing.edgeEdgeRoute,
-            LayoutSpacing.edgeEdgeRoute * 2,
-            -LayoutSpacing.edgeEdgeRoute * 2,
-            LayoutSpacing.edgeEdgeRoute * 3,
-            -LayoutSpacing.edgeEdgeRoute * 3
-        ])
+        let usesCompactCandidates = nodeIndex.cardRects.count > RoutingTuning.compactCandidateNodeCount
+        let stubDistances = usesCompactCandidates
+            ? uniqueCGFloatValues([
+                0,
+                LayoutSpacing.jointNode + laneMagnitude
+            ])
+            : uniqueCGFloatValues([
+                0,
+                laneMagnitude,
+                LayoutSpacing.jointNode + laneMagnitude,
+                LayoutSpacing.jointNode + LayoutSpacing.edgeEdgeRoute + laneMagnitude
+            ])
+        let laneOffsets = usesCompactCandidates
+            ? uniqueCGFloatValues([
+                laneOffset,
+                0,
+                -laneOffset
+            ])
+            : uniqueCGFloatValues([
+                laneOffset,
+                0,
+                -laneOffset,
+                LayoutSpacing.edgeEdgeRoute,
+                -LayoutSpacing.edgeEdgeRoute,
+                LayoutSpacing.edgeEdgeRoute * 2,
+                -LayoutSpacing.edgeEdgeRoute * 2,
+                LayoutSpacing.edgeEdgeRoute * 3,
+                -LayoutSpacing.edgeEdgeRoute * 3
+            ])
 
         var candidates: [[CGPoint]] = []
         let expectedCandidateCount = stubDistances.count * stubDistances.count * (laneOffsets.count * 2 + 3)
         candidates.reserveCapacity(expectedCandidateCount)
         var seen: Set<RouteCandidateKey> = []
         seen.reserveCapacity(expectedCandidateCount)
+        var obstacleSeeds: [ObstacleRouteSeed] = []
+        obstacleSeeds.reserveCapacity(stubDistances.count * stubDistances.count)
+        var hasClearingSimpleCandidate = false
         for sourceDistance in stubDistances {
             for targetDistance in stubDistances {
                 let firstCandidateIndex = candidates.count
@@ -11044,37 +11286,90 @@ struct KnowledgeGraphLayout: Sendable {
                     seen: &seen
                 )
 
-                let simpleCandidateClearsNodeConstraints = candidates[firstCandidateIndex...].contains { candidate in
-                    routeClearsNodes(candidate, nodeIndex: nodeIndex, excluding: excludedIndices)
-                        && routeJointsClearEndpointNodes(
-                            candidate,
-                            cardRects: nodeIndex.cardRects,
-                            endpointIndices: excludedIndices
-                        )
-                }
-                if !simpleCandidateClearsNodeConstraints,
-                   let obstacleAvoidingCore = obstacleAvoidingOrthogonalRoute(
-                    start: sourceOut,
-                    end: targetOut,
-                    laneOffset: laneOffset,
-                    nodeIndex: nodeIndex,
-                    excludedIndices: excludedIndices
-                ) {
-                    appendRouteCandidate(
-                        routeWithEndpointStubs(
-                            sourcePoint: sourcePort.point,
+                if !usesCompactCandidates {
+                    let simpleCandidateClearsNodeConstraints = candidates[firstCandidateIndex...].contains { candidate in
+                        routeClearsNodes(candidate, nodeIndex: nodeIndex, excluding: excludedIndices)
+                            && routeJointsClearEndpointNodes(
+                                candidate,
+                                cardRects: nodeIndex.cardRects,
+                                endpointIndices: excludedIndices
+                            )
+                    }
+                    if simpleCandidateClearsNodeConstraints {
+                        hasClearingSimpleCandidate = true
+                    } else {
+                        obstacleSeeds.append(ObstacleRouteSeed(
                             sourceOut: sourceOut,
-                            core: obstacleAvoidingCore,
                             targetOut: targetOut,
-                            targetPoint: targetPort.point
-                        ),
-                        to: &candidates,
-                        seen: &seen
-                    )
+                            sourceDistance: sourceDistance,
+                            targetDistance: targetDistance
+                        ))
+                    }
                 }
             }
         }
+        let shouldUseObstacleSearch = !usesCompactCandidates && (!hasClearingSimpleCandidate
+            || nodeIndex.cardRects.count <= RoutingTuning.exactObstacleRoutingNodeCount
+        )
+        if shouldUseObstacleSearch {
+            let seedLimit = hasClearingSimpleCandidate
+                ? RoutingTuning.maxSupplementalObstacleSeeds
+                : RoutingTuning.maxRequiredObstacleSeeds
+            for seed in obstacleSeeds.sorted(by: { $0.isPreferred(to: $1) }).prefix(seedLimit) {
+                guard let obstacleAvoidingCore = obstacleAvoidingOrthogonalRoute(
+                    start: seed.sourceOut,
+                    end: seed.targetOut,
+                    laneOffset: laneOffset,
+                    nodeIndex: nodeIndex,
+                    excludedIndices: excludedIndices
+                ) else { continue }
+                let route = routeWithEndpointStubs(
+                    sourcePoint: sourcePort.point,
+                    sourceOut: seed.sourceOut,
+                    core: obstacleAvoidingCore,
+                    targetOut: seed.targetOut,
+                    targetPoint: targetPort.point
+                )
+                guard routeClearsNodes(route, nodeIndex: nodeIndex, excluding: excludedIndices) else {
+                    continue
+                }
+                guard routeJointsClearEndpointNodes(
+                    route,
+                    cardRects: nodeIndex.cardRects,
+                    endpointIndices: excludedIndices
+                ) else {
+                    continue
+                }
+                appendRouteCandidate(
+                    route,
+                    to: &candidates,
+                    seen: &seen
+                )
+            }
+        }
         return candidates
+    }
+
+    private struct ObstacleRouteSeed {
+        let sourceOut: CGPoint
+        let targetOut: CGPoint
+        let sourceDistance: CGFloat
+        let targetDistance: CGFloat
+
+        func isPreferred(to other: ObstacleRouteSeed) -> Bool {
+            let distance = sourceDistance + targetDistance
+            let otherDistance = other.sourceDistance + other.targetDistance
+            if abs(distance - otherDistance) > 0.001 {
+                return distance < otherDistance
+            }
+            let length = abs(sourceOut.x - targetOut.x) + abs(sourceOut.y - targetOut.y)
+            let otherLength = abs(other.sourceOut.x - other.targetOut.x)
+                + abs(other.sourceOut.y - other.targetOut.y)
+            if abs(length - otherLength) > 0.001 {
+                return length < otherLength
+            }
+            return sourceDistance < other.sourceDistance
+        }
     }
 
     private enum RouteAxis: Hashable {
@@ -11197,10 +11492,22 @@ struct KnowledgeGraphLayout: Sendable {
             dx: -(lanePadding + LayoutSpacing.edgeNode * 4),
             dy: -(lanePadding + LayoutSpacing.edgeNode * 4)
         )
-        let obstacles = nodeIndex.nodes(in: searchRect).compactMap { node -> CGRect? in
+        let rawObstacles = nodeIndex.nodes(in: searchRect).compactMap { node -> CGRect? in
             excludedIndices.contains(node.index) ? nil : node.rect
         }
+        let obstacles = boundedObstacleRects(rawObstacles, start: start, end: end)
         guard !obstacles.isEmpty else { return nil }
+        if let detour = deterministicObstacleAvoidingOrthogonalRoute(
+            start: start,
+            end: end,
+            laneOffset: laneOffset,
+            obstacles: obstacles
+        ) {
+            return detour
+        }
+        guard nodeIndex.cardRects.count <= RoutingTuning.exactObstacleRoutingNodeCount else {
+            return nil
+        }
 
         var xValues: [CGFloat] = [
             start.x,
@@ -11229,6 +11536,9 @@ struct KnowledgeGraphLayout: Sendable {
 
         let width = xValues.count
         let height = yValues.count
+        guard width * height * 3 <= RoutingTuning.maxRouteSearchStates else {
+            return nil
+        }
         var gridPoints: [CGPoint] = []
         gridPoints.reserveCapacity(width * height)
         for y in 0..<height {
@@ -11252,12 +11562,15 @@ struct KnowledgeGraphLayout: Sendable {
         distances[startStateID] = startCost
         var queue = RouteSearchPriorityQueue()
         queue.push(RouteSearchQueueEntry(stateID: startStateID, cost: startCost))
+        var expansions = 0
 
         while let entry = queue.popMin() {
             let currentID = entry.stateID
             guard !visited[currentID] else { continue }
             guard let currentDistance = distances[currentID] else { continue }
             guard !currentDistance.isBetter(than: entry.cost) else { continue }
+            expansions += 1
+            guard expansions <= RoutingTuning.maxRouteSearchExpansions else { return nil }
             let currentPointIndex = currentID / 3
             if currentPointIndex == endIndex {
                 return reconstructRoute(
@@ -11304,6 +11617,149 @@ struct KnowledgeGraphLayout: Sendable {
         return nil
     }
 
+    private static func boundedObstacleRects(
+        _ rects: [CGRect],
+        start: CGPoint,
+        end: CGPoint
+    ) -> [CGRect] {
+        guard rects.count > RoutingTuning.maxObstacleRects else { return rects }
+        let midpoint = CGPoint(x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5)
+        return Array(rects.sorted { lhs, rhs in
+            let leftScore = obstacleRouteRelevanceScore(lhs, start: start, end: end, midpoint: midpoint)
+            let rightScore = obstacleRouteRelevanceScore(rhs, start: start, end: end, midpoint: midpoint)
+            if abs(leftScore - rightScore) > 0.001 {
+                return leftScore < rightScore
+            }
+            return layoutArea(lhs) > layoutArea(rhs)
+        }.prefix(RoutingTuning.maxObstacleRects))
+    }
+
+    private static func obstacleRouteRelevanceScore(
+        _ rect: CGRect,
+        start: CGPoint,
+        end: CGPoint,
+        midpoint: CGPoint
+    ) -> CGFloat {
+        let center = rectCenter(rect)
+        return pointSegmentDistance(center, start, end)
+            + pointRectDistance(midpoint, rect) * 0.25
+            + min(pointRectDistance(start, rect), pointRectDistance(end, rect)) * 0.1
+    }
+
+    private static func deterministicObstacleAvoidingOrthogonalRoute(
+        start: CGPoint,
+        end: CGPoint,
+        laneOffset: CGFloat,
+        obstacles: [CGRect]
+    ) -> [CGPoint]? {
+        let lanePadding = LayoutSpacing.edgeEdgeRoute + abs(laneOffset)
+        let midX = (start.x + end.x) * 0.5 + laneOffset
+        let midY = (start.y + end.y) * 0.5 + laneOffset
+        var xValues = [start.x, end.x, midX]
+        var yValues = [start.y, end.y, midY]
+        for obstacle in obstacles {
+            xValues.append(obstacle.minX - lanePadding)
+            xValues.append(obstacle.maxX + lanePadding)
+            yValues.append(obstacle.minY - lanePadding)
+            yValues.append(obstacle.maxY + lanePadding)
+        }
+        xValues = limitedDetourValues(xValues, target: midX)
+        yValues = limitedDetourValues(yValues, target: midY)
+
+        var best: [CGPoint]?
+        var bestMetrics: RouteMetrics?
+        var seen: Set<RouteCandidateKey> = []
+
+        func consider(_ rawPoints: [CGPoint]) {
+            let points = simplifyRoutePoints(rawPoints)
+            guard points.count > 1 else { return }
+            let key = RouteCandidateKey(points: points.map(QuantizedRoutePoint.init))
+            guard seen.insert(key).inserted else { return }
+            guard simplifiedRouteIsOrthogonal(points) else { return }
+            guard routeClearsObstacles(points, obstacles: obstacles) else { return }
+            let metrics = simplifiedRouteMetrics(points)
+            if let current = bestMetrics {
+                if metrics.length < current.length - 0.001 ||
+                    (abs(metrics.length - current.length) <= 0.001 && metrics.corners < current.corners) {
+                    best = points
+                    bestMetrics = metrics
+                }
+            } else {
+                best = points
+                bestMetrics = metrics
+            }
+        }
+
+        consider([start, end])
+        consider([start, CGPoint(x: end.x, y: start.y), end])
+        consider([start, CGPoint(x: start.x, y: end.y), end])
+        for x in xValues {
+            consider([
+                start,
+                CGPoint(x: x, y: start.y),
+                CGPoint(x: x, y: end.y),
+                end
+            ])
+        }
+        for y in yValues {
+            consider([
+                start,
+                CGPoint(x: start.x, y: y),
+                CGPoint(x: end.x, y: y),
+                end
+            ])
+        }
+
+        if best != nil {
+            return best
+        }
+
+        let compactX = Array(xValues.prefix(RoutingTuning.maxCompoundDetourAxisValues))
+        let compactY = Array(yValues.prefix(RoutingTuning.maxCompoundDetourAxisValues))
+        for x in compactX {
+            for y in compactY {
+                consider([
+                    start,
+                    CGPoint(x: x, y: start.y),
+                    CGPoint(x: x, y: y),
+                    CGPoint(x: end.x, y: y),
+                    end
+                ])
+                consider([
+                    start,
+                    CGPoint(x: start.x, y: y),
+                    CGPoint(x: x, y: y),
+                    CGPoint(x: x, y: end.y),
+                    end
+                ])
+            }
+        }
+        return best
+    }
+
+    private static func limitedDetourValues(_ values: [CGFloat], target: CGFloat) -> [CGFloat] {
+        let unique = sortedUniqueCGFloatValues(values)
+        guard unique.count > RoutingTuning.maxDetourAxisValues else { return unique }
+        return Array(unique.sorted { lhs, rhs in
+            let leftDistance = abs(lhs - target)
+            let rightDistance = abs(rhs - target)
+            if abs(leftDistance - rightDistance) > 0.001 {
+                return leftDistance < rightDistance
+            }
+            return lhs < rhs
+        }.prefix(RoutingTuning.maxDetourAxisValues))
+    }
+
+    private static func routeClearsObstacles(_ points: [CGPoint], obstacles: [CGRect]) -> Bool {
+        guard points.count > 1 else { return true }
+        for offset in 1..<points.count {
+            guard segmentClearsObstacles(points[offset - 1], points[offset], obstacles: obstacles) else {
+                return false
+            }
+        }
+        return true
+    }
+
     private static func sortedUniqueCGFloatValues(_ values: [CGFloat]) -> [CGFloat] {
         uniqueCGFloatValues(values).sorted()
     }
@@ -11336,13 +11792,26 @@ struct KnowledgeGraphLayout: Sendable {
     }
 
     private static func uniqueCGFloatValues(_ values: [CGFloat]) -> [CGFloat] {
-        var result: [CGFloat] = []
-        for value in values {
-            if !result.contains(where: { abs($0 - value) < 0.5 }) {
-                result.append(value)
+        guard values.count > 1 else { return values }
+        let sorted = values.enumerated().sorted { lhs, rhs in
+            if abs(lhs.element - rhs.element) > 0.001 {
+                return lhs.element < rhs.element
             }
+            return lhs.offset < rhs.offset
         }
-        return result
+        var accepted: [(offset: Int, value: CGFloat)] = []
+        accepted.reserveCapacity(values.count)
+        var lastValue: CGFloat?
+        for item in sorted {
+            if let lastValue, abs(item.element - lastValue) < 0.5 {
+                continue
+            }
+            accepted.append((offset: item.offset, value: item.element))
+            lastValue = item.element
+        }
+        return accepted
+            .sorted { $0.offset < $1.offset }
+            .map(\.value)
     }
 
     private struct QuantizedRoutePoint: Hashable {
@@ -12078,6 +12547,11 @@ struct KnowledgeGraphLayout: Sendable {
         let end: CGPoint
     }
 
+    private struct IndexedEdgeLabelRect {
+        let edgeID: EdgeIdentifier
+        let rect: CGRect
+    }
+
     /// Place each edge label on the rendered route itself. Collision handling
     /// may only choose another point along the route; it must never move the
     /// label centre perpendicular to the edge.
@@ -12115,19 +12589,30 @@ struct KnowledgeGraphLayout: Sendable {
             placedLabelRects[candidateSet.edge.id] = edgeLabelRect(center: center, size: candidateSet.size)
         }
 
-        let blockingRouteSegments = edgeLabelBlockingRouteSegments(routes: routes)
-        for _ in 0..<4 {
+        let cardIndex = edgeLabelCardIndex(cardRects: cardRects)
+        let blockingRouteSegmentIndex = edgeLabelBlockingRouteSegmentIndex(routes: routes)
+        let placementPasses = candidateSets.count > EdgeLabelTuning.largeGraphEdgeCount
+            ? EdgeLabelTuning.largeGraphPlacementPasses
+            : EdgeLabelTuning.regularPlacementPasses
+        for _ in 0..<placementPasses {
+            var labelIndex = edgeLabelRectIndex(labelRects: placedLabelRects)
             for candidateSet in candidateSets {
                 let center = bestEdgeLabelPosition(
                     edgeID: candidateSet.edge.id,
                     samples: candidateSet.samples,
                     size: candidateSet.size,
-                    cardRects: cardRects,
-                    placedLabelRects: placedLabelRects,
-                    blockingRouteSegments: blockingRouteSegments
+                    cardIndex: cardIndex,
+                    labelIndex: labelIndex,
+                    blockingRouteSegmentIndex: blockingRouteSegmentIndex
                 )
                 placed[candidateSet.edge.id] = center
-                placedLabelRects[candidateSet.edge.id] = edgeLabelRect(center: center, size: candidateSet.size)
+                let rect = edgeLabelRect(center: center, size: candidateSet.size)
+                placedLabelRects[candidateSet.edge.id] = rect
+                labelIndex.removeAll { $0.edgeID == candidateSet.edge.id }
+                labelIndex.insert(
+                    IndexedEdgeLabelRect(edgeID: candidateSet.edge.id, rect: rect),
+                    rect: rect
+                )
             }
         }
         return placed
@@ -12137,9 +12622,9 @@ struct KnowledgeGraphLayout: Sendable {
         edgeID: EdgeIdentifier,
         samples: [RoutePathSample],
         size: CGSize,
-        cardRects: [CGRect],
-        placedLabelRects: [EdgeIdentifier: CGRect],
-        blockingRouteSegments: [EdgeRouteSegment]
+        cardIndex: SpatialHashIndex<CGRect>,
+        labelIndex: SpatialHashIndex<IndexedEdgeLabelRect>,
+        blockingRouteSegmentIndex: SpatialHashIndex<EdgeRouteSegment>
     ) -> CGPoint {
         let fallback = samples.first?.point ?? .zero
         var chosen = fallback
@@ -12150,9 +12635,9 @@ struct KnowledgeGraphLayout: Sendable {
             let collision = edgeLabelCollisionMetrics(
                 rect,
                 edgeID: edgeID,
-                cardRects: cardRects,
-                placedLabelRects: placedLabelRects,
-                blockingRouteSegments: blockingRouteSegments
+                cardIndex: cardIndex,
+                labelIndex: labelIndex,
+                blockingRouteSegmentIndex: blockingRouteSegmentIndex
             )
             let placementScore = EdgeLabelPlacementScore(
                 cardCollision: collision.card,
@@ -12169,22 +12654,47 @@ struct KnowledgeGraphLayout: Sendable {
         return chosen
     }
 
-    private static func edgeLabelBlockingRouteSegments(
+    private static func edgeLabelCardIndex(cardRects: [CGRect]) -> SpatialHashIndex<CGRect> {
+        var index = SpatialHashIndex<CGRect>()
+        for card in cardRects {
+            index.insert(
+                card,
+                rect: card.insetBy(
+                    dx: -LayoutSpacing.edgeNode,
+                    dy: -LayoutSpacing.edgeNode
+                )
+            )
+        }
+        return index
+    }
+
+    private static func edgeLabelRectIndex(
+        labelRects: [EdgeIdentifier: CGRect]
+    ) -> SpatialHashIndex<IndexedEdgeLabelRect> {
+        var index = SpatialHashIndex<IndexedEdgeLabelRect>()
+        for (edgeID, rect) in labelRects {
+            index.insert(IndexedEdgeLabelRect(edgeID: edgeID, rect: rect), rect: rect)
+        }
+        return index
+    }
+
+    private static func edgeLabelBlockingRouteSegmentIndex(
         routes: [EdgeIdentifier: EdgeRoute]
-    ) -> [EdgeRouteSegment] {
-        var segments: [EdgeRouteSegment] = []
+    ) -> SpatialHashIndex<EdgeRouteSegment> {
+        var index = SpatialHashIndex<EdgeRouteSegment>()
         for (edgeID, route) in routes {
             let points = routePoints(from: route)
             guard points.count > 1 else { continue }
             for offset in 1..<points.count {
-                segments.append(EdgeRouteSegment(
+                let segment = EdgeRouteSegment(
                     edgeID: edgeID,
                     start: points[offset - 1],
                     end: points[offset]
-                ))
+                )
+                index.insert(segment, rect: segmentBounds(segment.start, segment.end))
             }
         }
-        return segments
+        return index
     }
 
     private static func edgeLabelAnchorSamples(_ route: EdgeRoute, labelSize: CGSize) -> [RoutePathSample] {
@@ -12208,12 +12718,14 @@ struct KnowledgeGraphLayout: Sendable {
         }
         let points = routePoints(from: route)
         if points.count >= 4 {
-            return edgeLabelSecondSegmentSamples(points, labelSize: labelSize)
-                + edgeLabelSegmentSamples(points, labelSize: labelSize)
+            return limitedEdgeLabelSamples(
+                edgeLabelSecondSegmentSamples(points, labelSize: labelSize)
+                    + edgeLabelSegmentSamples(points, labelSize: labelSize)
+            )
         }
         var samples = fractions.map { routePathSample(points, fraction: $0) }
         samples.append(contentsOf: edgeLabelSegmentSamples(points, labelSize: labelSize))
-        return samples
+        return limitedEdgeLabelSamples(samples)
     }
 
     private static func edgeLabelSecondSegmentSamples(
@@ -12269,7 +12781,9 @@ struct KnowledgeGraphLayout: Sendable {
         var fractions: [CGFloat] = [center]
         let step = max(LayoutSpacing.edgeLabelLabel, min(axisLabelLength * 0.25, 10))
         var offset = step
-        while offset <= length * 0.5 - endGuard + 0.5 {
+        var pairCount = 0
+        let maxPairCount = max(0, (EdgeLabelTuning.maxSamplesPerSegment - 1) / 2)
+        while offset <= length * 0.5 - endGuard + 0.5, pairCount < maxPairCount {
             let delta = offset / length
             let left = center - delta
             let right = center + delta
@@ -12279,6 +12793,7 @@ struct KnowledgeGraphLayout: Sendable {
             if right <= upper {
                 fractions.append(right)
             }
+            pairCount += 1
             offset += step
         }
         if fractions.count == 1 {
@@ -12294,6 +12809,11 @@ struct KnowledgeGraphLayout: Sendable {
         return uniqueFractions.map { fraction in
             routeSegmentSample(start: start, end: end, fraction: fraction)
         }
+    }
+
+    private static func limitedEdgeLabelSamples(_ samples: [RoutePathSample]) -> [RoutePathSample] {
+        guard samples.count > EdgeLabelTuning.maxSamplesPerEdge else { return samples }
+        return Array(samples.prefix(EdgeLabelTuning.maxSamplesPerEdge))
     }
 
     private static func routeSegmentSample(
@@ -12350,12 +12870,17 @@ struct KnowledgeGraphLayout: Sendable {
     private static func edgeLabelCollisionMetrics(
         _ rect: CGRect,
         edgeID: EdgeIdentifier,
-        cardRects: [CGRect],
-        placedLabelRects: [EdgeIdentifier: CGRect],
-        blockingRouteSegments: [EdgeRouteSegment]
+        cardIndex: SpatialHashIndex<CGRect>,
+        labelIndex: SpatialHashIndex<IndexedEdgeLabelRect>,
+        blockingRouteSegmentIndex: SpatialHashIndex<EdgeRouteSegment>
     ) -> EdgeLabelCollisionMetrics {
         var metrics = EdgeLabelCollisionMetrics()
-        for card in cardRects {
+        let cardQueryRect = rect.insetBy(
+            dx: -LayoutSpacing.edgeNode,
+            dy: -LayoutSpacing.edgeNode
+        )
+        cardIndex.forEach(in: cardQueryRect) { entry in
+            let card = entry.item
             let cardIntersection = rect.intersection(card)
             if !cardIntersection.isNull {
                 metrics.card += cardIntersection.width * cardIntersection.height
@@ -12367,9 +12892,15 @@ struct KnowledgeGraphLayout: Sendable {
             if !marginIntersection.isNull {
                 metrics.cardMargin += marginIntersection.width * marginIntersection.height
             }
+            return true
         }
-        for (otherEdgeID, occupiedRect) in placedLabelRects where otherEdgeID != edgeID {
-            let occupied = occupiedRect.insetBy(
+        let labelQueryRect = rect.insetBy(
+            dx: -LayoutSpacing.edgeLabelLabel,
+            dy: -LayoutSpacing.edgeLabelLabel
+        )
+        labelIndex.forEach(in: labelQueryRect) { entry in
+            guard entry.item.edgeID != edgeID else { return true }
+            let occupied = entry.item.rect.insetBy(
                 dx: -LayoutSpacing.edgeLabelLabel,
                 dy: -LayoutSpacing.edgeLabelLabel
             )
@@ -12377,17 +12908,19 @@ struct KnowledgeGraphLayout: Sendable {
             if !intersection.isNull {
                 metrics.label += intersection.width * intersection.height
             }
+            return true
         }
         let routeRect = rect.insetBy(
             dx: -LayoutSpacing.edgeEdgeRoute * 0.25,
             dy: -LayoutSpacing.edgeEdgeRoute * 0.25
         )
-        for segment in blockingRouteSegments where segment.edgeID != edgeID && segmentIntersectsRect(
-            segment.start,
-            segment.end,
-            routeRect
-        ) {
-            metrics.route += rect.width * rect.height
+        blockingRouteSegmentIndex.forEach(in: routeRect) { entry in
+            let segment = entry.item
+            if segment.edgeID != edgeID,
+               segmentIntersectsRect(segment.start, segment.end, routeRect) {
+                metrics.route += rect.width * rect.height
+            }
+            return true
         }
         return metrics
     }
