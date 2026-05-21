@@ -65,6 +65,8 @@ struct KnowledgeGraphView: View {
     private let cullingMargin: CGFloat = 120
     private let zoomStep: CGFloat = 1.25
     private let groupLabelMaximumCharacters = 48
+    private let groupLabelCollisionGap: CGFloat = 6
+    private let groupLabelMinimumUsefulWidth: CGFloat = 24
     private let nodeDetailPopupWidth: CGFloat = 320
     private let nodeDetailPopupEstimatedHeight: CGFloat = 220
     private let nodeDetailPopupGap: CGFloat = 10
@@ -460,6 +462,9 @@ struct KnowledgeGraphView: View {
         visibleRect: CGRect,
         context: inout GraphicsContext
     ) {
+        var visibleGroups: [VisibleGroupDrawing] = []
+        visibleGroups.reserveCapacity(renderInfos.count)
+
         for info in renderInfos {
             // computeGroupBoundingBoxes emits a rect for every group in
             // compoundGraph.groups; a missing entry is a pipeline desync.
@@ -474,6 +479,11 @@ struct KnowledgeGraphView: View {
                 height: bbox.height * viewport.zoom
             )
             guard visibleRect.intersects(screenRect) else { continue }
+            visibleGroups.append(VisibleGroupDrawing(
+                info: info,
+                bbox: bbox,
+                screenRect: screenRect
+            ))
 
             let style = info.group.style
             let scaledRadius = style.cornerRadius * viewport.zoom
@@ -508,23 +518,155 @@ struct KnowledgeGraphView: View {
             separatorPath.move(to: CGPoint(x: screenRect.minX, y: headerBottomY))
             separatorPath.addLine(to: CGPoint(x: screenRect.maxX, y: headerBottomY))
             context.stroke(separatorPath, with: .color(info.strokeColor), lineWidth: 0.8)
+        }
+
+        for placement in groupLabelPlacements(
+            visibleGroups: visibleGroups,
+            viewport: viewport,
+            context: context
+        ) {
+            let screenRect = placement.visibleGroup.screenRect
 
             var labelContext = context
             labelContext.translateBy(x: screenRect.minX, y: screenRect.minY)
             labelContext.scaleBy(x: viewport.zoom, y: viewport.zoom)
-            let labelClipRect = CGRect(
-                x: CardSizing.horizontalPad,
-                y: 0,
-                width: max(1, bbox.width - CardSizing.horizontalPad * 2),
-                height: CardSizing.headerHeight
-            )
-            labelContext.clip(to: Path(labelClipRect))
+            labelContext.clip(to: Path(placement.localClipRect))
             labelContext.draw(
-                context.resolve(info.labelText),
-                at: CGPoint(x: CardSizing.horizontalPad, y: CardSizing.headerHeight / 2),
+                context.resolve(placement.visibleGroup.info.labelText),
+                at: CGPoint(
+                    x: placement.localClipRect.minX,
+                    y: CardSizing.headerHeight / 2
+                ),
                 anchor: .leading
             )
         }
+    }
+
+    private struct VisibleGroupDrawing {
+        let info: GroupRenderInfo
+        let bbox: CGRect
+        let screenRect: CGRect
+    }
+
+    private struct GroupLabelPlacement {
+        let visibleGroup: VisibleGroupDrawing
+        let localClipRect: CGRect
+    }
+
+    private struct LabelInterval {
+        let minX: CGFloat
+        let maxX: CGFloat
+
+        var width: CGFloat {
+            max(0, maxX - minX)
+        }
+    }
+
+    private func groupLabelPlacements(
+        visibleGroups: [VisibleGroupDrawing],
+        viewport: KnowledgeGraphViewport,
+        context: GraphicsContext
+    ) -> [GroupLabelPlacement] {
+        guard viewport.zoom > 0 else { return [] }
+        var placements: [GroupLabelPlacement] = []
+        var occupiedScreenRects: [CGRect] = []
+        placements.reserveCapacity(visibleGroups.count)
+        occupiedScreenRects.reserveCapacity(visibleGroups.count)
+
+        for visibleGroup in visibleGroups {
+            let availableMinX = CardSizing.horizontalPad
+            let availableMaxX = visibleGroup.bbox.width - CardSizing.horizontalPad
+            guard availableMaxX > availableMinX else { continue }
+
+            let headerHeight = min(
+                visibleGroup.screenRect.height,
+                CardSizing.headerHeight * viewport.zoom
+            )
+            guard headerHeight > 1 else { continue }
+            let headerScreenRect = CGRect(
+                x: visibleGroup.screenRect.minX + availableMinX * viewport.zoom,
+                y: visibleGroup.screenRect.minY,
+                width: (availableMaxX - availableMinX) * viewport.zoom,
+                height: headerHeight
+            )
+            let textSize = context.resolve(visibleGroup.info.labelText).measure(in: CGSize(
+                width: CGFloat.greatestFiniteMagnitude,
+                height: CardSizing.headerHeight
+            ))
+            let preferredWidth = min(ceil(textSize.width), availableMaxX - availableMinX)
+            let minimumWidth = min(
+                preferredWidth,
+                min(groupLabelMinimumUsefulWidth, availableMaxX - availableMinX)
+            )
+            guard preferredWidth > 1, minimumWidth > 1 else { continue }
+
+            let freeIntervals = freeLabelIntervals(
+                available: LabelInterval(minX: availableMinX, maxX: availableMaxX),
+                headerScreenRect: headerScreenRect,
+                groupScreenMinX: visibleGroup.screenRect.minX,
+                zoom: viewport.zoom,
+                occupiedScreenRects: occupiedScreenRects
+            )
+            guard let interval = freeIntervals.first(where: { $0.width >= minimumWidth }) else {
+                continue
+            }
+
+            let clipWidth = min(preferredWidth, interval.width)
+            let localClipRect = CGRect(
+                x: interval.minX,
+                y: 0,
+                width: clipWidth,
+                height: CardSizing.headerHeight
+            )
+            occupiedScreenRects.append(CGRect(
+                x: visibleGroup.screenRect.minX + localClipRect.minX * viewport.zoom,
+                y: visibleGroup.screenRect.minY,
+                width: localClipRect.width * viewport.zoom,
+                height: headerHeight
+            ))
+            placements.append(GroupLabelPlacement(
+                visibleGroup: visibleGroup,
+                localClipRect: localClipRect
+            ))
+        }
+
+        return placements
+    }
+
+    private func freeLabelIntervals(
+        available: LabelInterval,
+        headerScreenRect: CGRect,
+        groupScreenMinX: CGFloat,
+        zoom: CGFloat,
+        occupiedScreenRects: [CGRect]
+    ) -> [LabelInterval] {
+        var free = [available]
+        for occupied in occupiedScreenRects {
+            let expanded = occupied.insetBy(
+                dx: -groupLabelCollisionGap * zoom,
+                dy: -2 * zoom
+            )
+            guard expanded.intersects(headerScreenRect) else { continue }
+            let blocked = LabelInterval(
+                minX: max(available.minX, (expanded.minX - groupScreenMinX) / zoom),
+                maxX: min(available.maxX, (expanded.maxX - groupScreenMinX) / zoom)
+            )
+            guard blocked.maxX > blocked.minX else { continue }
+            free = free.flatMap { interval -> [LabelInterval] in
+                guard blocked.maxX > interval.minX, blocked.minX < interval.maxX else {
+                    return [interval]
+                }
+                var next: [LabelInterval] = []
+                if blocked.minX > interval.minX {
+                    next.append(LabelInterval(minX: interval.minX, maxX: blocked.minX))
+                }
+                if blocked.maxX < interval.maxX {
+                    next.append(LabelInterval(minX: blocked.maxX, maxX: interval.maxX))
+                }
+                return next
+            }
+        }
+        return free.filter { $0.width > 1 }
     }
 
     /// Per-group SwiftUI values that depend only on the layout snapshot
