@@ -13,6 +13,7 @@ struct KnowledgeGraphCardView: View {
 
     let card: CompoundGraph.Card
     let theme: KnowledgeGraphVisualTheme
+    var presentationStyle = KnowledgeGraphCardStyle()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,10 +26,11 @@ struct KnowledgeGraphCardView: View {
         }
         .frame(width: card.size.width, height: card.size.height, alignment: .topLeading)
         .background(cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .clipShape(cardClipShape)
         .overlay(border)
         .shadow(color: theme.cardShadow, radius: 5, x: 0, y: 2)
         .help(card.qualifiedTitle)
+        .opacity(presentationStyle.opacity ?? 1.0)
     }
 
     // MARK: - Header
@@ -40,7 +42,7 @@ struct KnowledgeGraphCardView: View {
                 .foregroundStyle(accent)
             Text(card.title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.foreground)
+                .foregroundStyle(presentationStyle.text ?? theme.foreground)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
@@ -74,7 +76,7 @@ struct KnowledgeGraphCardView: View {
             HStack(spacing: 2) {
                 Text(attribute.value)
                     .font(.system(size: 11))
-                    .foregroundStyle(theme.foreground)
+                    .foregroundStyle(presentationStyle.text ?? theme.foreground)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if let qualifier = attribute.valueQualifier {
@@ -107,21 +109,93 @@ struct KnowledgeGraphCardView: View {
     }
 
     private var cardBackground: Color {
-        theme.surfaceRaised
+        presentationStyle.fill ?? theme.surfaceRaised
     }
 
     @ViewBuilder
     private var border: some View {
+        let stroke = presentationStyle.stroke
+        let lineWidth = presentationStyle.strokeWidth ?? 1
+        let line = presentationStyle.strokeLine
         switch card.kind {
         case .resource(.blank):
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            cardBorderShape
                 .strokeBorder(
-                    accent.opacity(0.58),
-                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])
+                    stroke ?? accent.opacity(0.58),
+                    style: line.map { StrokeStyle(lineWidth: lineWidth, line: $0) }
+                        ?? StrokeStyle(lineWidth: lineWidth, dash: [3, 3])
                 )
         default:
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(theme.border, lineWidth: 1)
+            cardBorderShape
+                .strokeBorder(
+                    stroke ?? theme.border,
+                    style: StrokeStyle(lineWidth: lineWidth, line: line)
+                )
         }
+    }
+
+    private var cardClipShape: AnyShape {
+        AnyShape(CardPresentationShape(shape: presentationStyle.shape))
+    }
+
+    private var cardBorderShape: AnyInsettableShape {
+        AnyInsettableShape(CardPresentationShape(shape: presentationStyle.shape))
+    }
+}
+
+private struct CardPresentationShape: InsettableShape {
+    var shape: GraphShape?
+    var insetAmount: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let rect = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        switch shape {
+        case .rectangle:
+            return Path(rect)
+        case .roundedRectangle(let radius):
+            return Path(roundedRect: rect, cornerRadius: radius.map { CGFloat($0) } ?? 10)
+        case .capsule:
+            return Path(roundedRect: rect, cornerRadius: min(rect.width, rect.height) / 2)
+        case .ellipse:
+            return Path(ellipseIn: rect)
+        case .none:
+            return Path(roundedRect: rect, cornerRadius: 10)
+        }
+    }
+
+    func inset(by amount: CGFloat) -> CardPresentationShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+}
+
+private struct AnyShape: Shape {
+    private let pathBuilder: @Sendable (CGRect) -> Path
+
+    init<S: Shape>(_ shape: S) {
+        self.pathBuilder = { shape.path(in: $0) }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        pathBuilder(rect)
+    }
+}
+
+private struct AnyInsettableShape: InsettableShape {
+    private let pathBuilder: @Sendable (CGRect) -> Path
+    private let insetBuilder: @Sendable (CGFloat) -> AnyInsettableShape
+
+    init<S: InsettableShape>(_ shape: S) {
+        self.pathBuilder = { shape.path(in: $0) }
+        self.insetBuilder = { AnyInsettableShape(shape.inset(by: $0)) }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        pathBuilder(rect)
+    }
+
+    func inset(by amount: CGFloat) -> AnyInsettableShape {
+        insetBuilder(amount)
     }
 }

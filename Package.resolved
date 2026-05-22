@@ -1,5 +1,5 @@
 {
-  "originHash" : "02539a67dccbe7f119356d17013369d051a0dc6ef35523ab0aae52d7b1df0a82",
+  "originHash" : "e33261ece886939dda977f6ead39818c211399b3b92fb87add668ad8dc919907",
   "pins" : [
     {
       "identity" : "beautiful-mermaid-swift",
@@ -87,8 +87,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/swift-knowledge-graph.git",
       "state" : {
-        "revision" : "0eaef93592e1c5560618d42ef44c8a21fec1f205",
-        "version" : "0.2.0"
+        "revision" : "c6b9b7489c1f2c405d81f0c0facda06bee854b35",
+        "version" : "0.3.0"
       }
     },
     {

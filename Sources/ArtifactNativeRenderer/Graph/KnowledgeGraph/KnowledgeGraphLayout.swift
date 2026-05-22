@@ -166,7 +166,8 @@ struct KnowledgeGraphLayout: Sendable {
         graph: KnowledgeGraph,
         iterations: Int = defaultIterations,
         initial: [NodeIdentifier: CGPoint] = [:],
-        groupingStrategy: GroupingStrategy = .namedGraphs()
+        groupingStrategy: GroupingStrategy = .namedGraphs(),
+        presentation: GraphPresentation? = nil
     ) -> Result {
         let compound = CompoundGraph.decompose(graph, groupingStrategy: groupingStrategy)
         guard !compound.cards.isEmpty else {
@@ -213,6 +214,14 @@ struct KnowledgeGraphLayout: Sendable {
             centerPositions: positions,
             padding: canvasPadding
         )
+        if let presentation {
+            applyPresentationLayouts(
+                presentation.layouts,
+                compound: compound,
+                cardPositions: &cardPositions,
+                canvasSize: &canvasSize
+            )
+        }
 
         // Step 5 & 6: edge routes and label slotting.
         var routes = computeEdgeRoutes(
@@ -7569,6 +7578,267 @@ struct KnowledgeGraphLayout: Sendable {
     private static func layoutArea(_ rect: CGRect) -> CGFloat {
         guard !rect.isNull else { return 0 }
         return max(rect.width, 0) * max(rect.height, 0)
+    }
+
+    // MARK: - Presentation layout hints
+
+    private struct PresentationLayoutItem {
+        let reference: GraphElementReference
+        let cardIDs: [CompoundGraph.Card.ID]
+        let rect: CGRect
+    }
+
+    private static func applyPresentationLayouts(
+        _ directives: [GraphLayoutDirective],
+        compound: CompoundGraph,
+        cardPositions: inout [CompoundGraph.Card.ID: CGPoint],
+        canvasSize: inout CGSize
+    ) {
+        guard !directives.isEmpty else { return }
+        let sortedDirectives = directives.enumerated().sorted { lhs, rhs in
+            let lhsRank = lhs.element.priority == .required ? 1 : 0
+            let rhsRank = rhs.element.priority == .required ? 1 : 0
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+
+        for directive in sortedDirectives {
+            let scopeCardIDs: Set<CompoundGraph.Card.ID>?
+            if let scope = directive.scope {
+                guard let scopedCards = presentationScopeCardIDs(
+                    for: scope,
+                    compound: compound,
+                    cardPositions: cardPositions
+                ) else { continue }
+                scopeCardIDs = Set(scopedCards)
+            } else {
+                scopeCardIDs = nil
+            }
+            switch directive.arrangement {
+            case .stack(let stack):
+                applyStackLayout(
+                    stack,
+                    items: directive.items,
+                    scopeCardIDs: scopeCardIDs,
+                    compound: compound,
+                    cardPositions: &cardPositions
+                )
+            case .order:
+                applyStackLayout(
+                    GraphStackArrangement(direction: .leftToRight, alignment: .center, spacing: nil),
+                    items: directive.items,
+                    scopeCardIDs: scopeCardIDs,
+                    compound: compound,
+                    cardPositions: &cardPositions
+                )
+            case .rank(let axis):
+                let direction: GraphStackDirection = axis == .vertical ? .topToBottom : .leftToRight
+                applyStackLayout(
+                    GraphStackArrangement(direction: direction, alignment: .center, spacing: nil),
+                    items: directive.items,
+                    scopeCardIDs: scopeCardIDs,
+                    compound: compound,
+                    cardPositions: &cardPositions
+                )
+            case .grid, .pin, .align:
+                continue
+            }
+        }
+
+        canvasSize = canvasSizeForCardPositions(
+            cards: compound.cards,
+            cardPositions: cardPositions,
+            padding: compound.groups.isEmpty ? 36 : 64
+        )
+    }
+
+    private static func applyStackLayout(
+        _ stack: GraphStackArrangement,
+        items: [GraphElementReference],
+        scopeCardIDs: Set<CompoundGraph.Card.ID>?,
+        compound: CompoundGraph,
+        cardPositions: inout [CompoundGraph.Card.ID: CGPoint]
+    ) {
+        let layoutItems = items.compactMap {
+            presentationLayoutItem(
+                for: $0,
+                scopeCardIDs: scopeCardIDs,
+                compound: compound,
+                cardPositions: cardPositions
+            )
+        }
+        guard layoutItems.count > 1 else { return }
+
+        let spacing = CGFloat(stack.spacing ?? (stack.axis == .horizontal ? 56 : 24))
+        let primaryStart: CGFloat
+        let crossStart: CGFloat
+        switch stack.axis {
+        case .horizontal:
+            primaryStart = layoutItems.map(\.rect.minX).min() ?? 0
+            crossStart = layoutItems.map(\.rect.minY).min() ?? 0
+        case .vertical:
+            primaryStart = layoutItems.map(\.rect.minY).min() ?? 0
+            crossStart = layoutItems.map(\.rect.minX).min() ?? 0
+        }
+        let crossExtent = layoutItems.map { stack.axis == .horizontal ? $0.rect.height : $0.rect.width }.max() ?? 0
+        let orderedItems = orderedStackItems(layoutItems, direction: stack.direction)
+
+        var cursor = primaryStart
+        for item in orderedItems {
+            let primaryLength = stack.axis == .horizontal ? item.rect.width : item.rect.height
+            let crossLength = stack.axis == .horizontal ? item.rect.height : item.rect.width
+            let targetCross = alignedCrossOrigin(
+                start: crossStart,
+                extent: crossExtent,
+                itemExtent: crossLength,
+                alignment: stack.alignment
+            )
+            let targetOrigin: CGPoint
+            switch stack.axis {
+            case .horizontal:
+                targetOrigin = CGPoint(x: cursor, y: targetCross)
+            case .vertical:
+                targetOrigin = CGPoint(x: targetCross, y: cursor)
+            }
+            translateCards(
+                item.cardIDs,
+                dx: targetOrigin.x - item.rect.minX,
+                dy: targetOrigin.y - item.rect.minY,
+                cardPositions: &cardPositions
+            )
+            cursor += primaryLength + spacing
+        }
+    }
+
+    private static func orderedStackItems(
+        _ items: [PresentationLayoutItem],
+        direction: GraphStackDirection
+    ) -> [PresentationLayoutItem] {
+        switch direction {
+        case .leftToRight, .topToBottom:
+            return items
+        case .rightToLeft, .bottomToTop:
+            return items.reversed()
+        }
+    }
+
+    private static func alignedCrossOrigin(
+        start: CGFloat,
+        extent: CGFloat,
+        itemExtent: CGFloat,
+        alignment: GraphStackAlignment
+    ) -> CGFloat {
+        switch alignment {
+        case .leading, .stretch:
+            return start
+        case .center:
+            return start + (extent - itemExtent) / 2
+        case .trailing:
+            return start + extent - itemExtent
+        }
+    }
+
+    private static func presentationLayoutItem(
+        for reference: GraphElementReference,
+        scopeCardIDs: Set<CompoundGraph.Card.ID>?,
+        compound: CompoundGraph,
+        cardPositions: [CompoundGraph.Card.ID: CGPoint]
+    ) -> PresentationLayoutItem? {
+        let resolvedCardIDs: [CompoundGraph.Card.ID]
+        switch reference {
+        case .node(let nodeID):
+            let cardID = CompoundGraph.Card.ID(nodeID: nodeID)
+            guard compound.cardByID[cardID] != nil else { return nil }
+            resolvedCardIDs = [cardID]
+        case .group(let id):
+            guard let group = group(forPresentationID: id, in: compound) else { return nil }
+            resolvedCardIDs = group.members
+        case .namedGraph(let id):
+            guard let group = compound.groupByID[CompoundGraph.Group.ID(key: "namedGraph:\(id)")] else {
+                return nil
+            }
+            resolvedCardIDs = group.members
+        case .edge:
+            return nil
+        }
+        let cardIDs = scopeCardIDs.map { scope in
+            resolvedCardIDs.filter { scope.contains($0) }
+        } ?? resolvedCardIDs
+        guard !cardIDs.isEmpty else { return nil }
+        guard let rect = rectForCards(cardIDs, compound: compound, cardPositions: cardPositions) else {
+            return nil
+        }
+        return PresentationLayoutItem(reference: reference, cardIDs: cardIDs, rect: rect)
+    }
+
+    private static func presentationScopeCardIDs(
+        for reference: GraphElementReference,
+        compound: CompoundGraph,
+        cardPositions: [CompoundGraph.Card.ID: CGPoint]
+    ) -> [CompoundGraph.Card.ID]? {
+        presentationLayoutItem(
+            for: reference,
+            scopeCardIDs: nil,
+            compound: compound,
+            cardPositions: cardPositions
+        )?.cardIDs
+    }
+
+    private static func group(forPresentationID id: String, in compound: CompoundGraph) -> CompoundGraph.Group? {
+        let candidates = [
+            id,
+            "explicit:\(id)",
+            id.hasPrefix("group:") ? "explicit:\(String(id.dropFirst("group:".count)))" : "group:\(id)"
+        ]
+        for key in candidates {
+            if let group = compound.groupByID[CompoundGraph.Group.ID(key: key)] {
+                return group
+            }
+        }
+        return nil
+    }
+
+    private static func rectForCards(
+        _ cardIDs: [CompoundGraph.Card.ID],
+        compound: CompoundGraph,
+        cardPositions: [CompoundGraph.Card.ID: CGPoint]
+    ) -> CGRect? {
+        var rect = CGRect.null
+        for cardID in cardIDs {
+            guard let card = compound.cardByID[cardID],
+                  let origin = cardPositions[cardID]
+            else { continue }
+            rect = rect.union(CGRect(origin: origin, size: card.size))
+        }
+        return rect.isNull ? nil : rect
+    }
+
+    private static func translateCards(
+        _ cardIDs: [CompoundGraph.Card.ID],
+        dx: CGFloat,
+        dy: CGFloat,
+        cardPositions: inout [CompoundGraph.Card.ID: CGPoint]
+    ) {
+        guard abs(dx) > 0.001 || abs(dy) > 0.001 else { return }
+        for cardID in Set(cardIDs) {
+            guard let point = cardPositions[cardID] else { continue }
+            cardPositions[cardID] = CGPoint(x: point.x + dx, y: point.y + dy)
+        }
+    }
+
+    private static func canvasSizeForCardPositions(
+        cards: [CompoundGraph.Card],
+        cardPositions: [CompoundGraph.Card.ID: CGPoint],
+        padding: CGFloat
+    ) -> CGSize {
+        var bounds = CGRect.null
+        for card in cards {
+            guard let origin = cardPositions[card.id] else { continue }
+            bounds = bounds.union(CGRect(origin: origin, size: card.size))
+        }
+        guard !bounds.isNull else { return CGSize(width: 420, height: 280) }
+        bounds = bounds.insetBy(dx: -padding, dy: -padding)
+        return CGSize(width: max(bounds.width, 320), height: max(bounds.height, 240))
     }
 
     // MARK: - Canvas anchoring

@@ -22,10 +22,16 @@ struct KnowledgeGraphView: View {
 
     let graph: KnowledgeGraph
     let groupingStrategy: GroupingStrategy
+    let presentation: GraphPresentation?
 
-    init(graph: KnowledgeGraph, groupingStrategy: GroupingStrategy = .namedGraphs()) {
+    init(
+        graph: KnowledgeGraph,
+        groupingStrategy: GroupingStrategy = .namedGraphs(),
+        presentation: GraphPresentation? = nil
+    ) {
         self.graph = graph
         self.groupingStrategy = groupingStrategy
+        self.presentation = presentation
     }
 
     @State private var layout: KnowledgeGraphLayout.Result?
@@ -151,7 +157,16 @@ struct KnowledgeGraphView: View {
         // every pan/zoom tick. `context.resolve` and `Text.measure` still run
         // inside the Canvas closure because they need a `GraphicsContext`,
         // but the inputs feeding them are now stable values.
-        let groupRenderInfos = makeGroupRenderInfos(layout: layout, theme: theme)
+        let presentationStyleResolver = KnowledgeGraphPresentationStyleResolver(
+            graph: graph,
+            presentation: presentation
+        )
+        let canvasStyle = presentationStyleResolver.canvasStyle(theme: theme)
+        let groupRenderInfos = makeGroupRenderInfos(
+            layout: layout,
+            theme: theme,
+            styleResolver: presentationStyleResolver
+        )
         let canvas = Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { context, size in
             let viewport = effectiveViewport
             let visibleRect = CGRect(origin: .zero, size: size)
@@ -166,17 +181,35 @@ struct KnowledgeGraphView: View {
                 visibleRect: visibleRect,
                 context: &context
             )
-            drawEdges(layout: layout, viewport: viewport, visibleRect: visibleRect, theme: theme, context: &context)
-            drawEdgeLabels(layout: layout, viewport: viewport, visibleRect: visibleRect, theme: theme, context: &context)
+            drawEdges(
+                layout: layout,
+                viewport: viewport,
+                visibleRect: visibleRect,
+                theme: theme,
+                styleResolver: presentationStyleResolver,
+                context: &context
+            )
+            drawEdgeLabels(
+                layout: layout,
+                viewport: viewport,
+                visibleRect: visibleRect,
+                theme: theme,
+                styleResolver: presentationStyleResolver,
+                context: &context
+            )
             drawCards(layout: layout, viewport: viewport, visibleRect: visibleRect, context: &context)
         } symbols: {
             ForEach(layout.compoundGraph.cards) { card in
-                KnowledgeGraphCardView(card: card, theme: theme)
+                KnowledgeGraphCardView(
+                    card: card,
+                    theme: theme,
+                    presentationStyle: presentationStyleResolver.cardStyle(for: card, theme: theme)
+                )
                     .tag(card.id)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.background)
+        .background((canvasStyle.fill ?? theme.background).opacity(canvasStyle.opacity ?? 1.0))
 
         // `KnowledgeGraphCanvasHost` taps the native scroll-wheel (macOS) /
         // two-finger trackpad pan (iOS / Catalyst / visionOS) events that
@@ -222,11 +255,9 @@ struct KnowledgeGraphView: View {
         viewport: KnowledgeGraphViewport,
         visibleRect: CGRect,
         theme: KnowledgeGraphVisualTheme,
+        styleResolver: KnowledgeGraphPresentationStyleResolver,
         context: inout GraphicsContext
     ) {
-        var strokePath = Path()
-        var sourcePath = Path()
-        var headPath = Path()
         let decorationScale = edgeDecorationScale(for: viewport)
 
         for edge in layout.compoundGraph.edges {
@@ -247,8 +278,16 @@ struct KnowledgeGraphView: View {
                 continue
             }
 
+            var strokePath = Path()
+            var sourcePath = Path()
+            var headPath = Path()
+            let style = styleResolver.edgeStyle(for: edge, theme: theme)
+            let strokeColor = (style.stroke ?? theme.line).opacity(style.opacity ?? 1.0)
+            let markerColor = (style.stroke ?? theme.arrow).opacity(style.opacity ?? 1.0)
+            let lineWidth = max(0.5, (style.strokeWidth ?? edgeLineWidth) * decorationScale)
+
             strokePath.move(to: screenStart)
-            appendSourceMarker(at: screenStart, scale: decorationScale, into: &sourcePath)
+            appendMarker(style.sourceMarker ?? .circle, at: screenStart, scale: decorationScale, into: &sourcePath)
             let tangent: CGVector
             if route.isCurved {
                 let screenControl = viewport.canvasToScreen(route.control)
@@ -273,25 +312,53 @@ struct KnowledgeGraphView: View {
                     dy: screenEnd.y - screenStart.y
                 )
             }
-            appendArrowhead(at: screenEnd, along: tangent, scale: decorationScale, into: &headPath)
-        }
+            appendMarker(style.targetMarker ?? .arrow, at: screenEnd, tangent: tangent, scale: decorationScale, into: &headPath)
 
-        if !strokePath.isEmpty {
             context.stroke(
                 strokePath,
-                with: .color(theme.line),
-                style: StrokeStyle(lineWidth: max(0.5, edgeLineWidth * decorationScale), lineCap: .round)
+                with: .color(strokeColor),
+                style: StrokeStyle(lineWidth: lineWidth, line: style.strokeLine)
             )
-        }
-        if !sourcePath.isEmpty {
-            context.fill(sourcePath, with: .color(theme.arrow.opacity(0.82)))
-        }
-        if !headPath.isEmpty {
-            context.fill(headPath, with: .color(theme.arrow))
+            if !sourcePath.isEmpty {
+                context.fill(sourcePath, with: .color(markerColor.opacity(0.82)))
+            }
+            if !headPath.isEmpty {
+                context.fill(headPath, with: .color(markerColor))
+            }
         }
     }
 
-    private func appendSourceMarker(at point: CGPoint, scale: CGFloat, into path: inout Path) {
+    private func appendMarker(_ marker: GraphMarker, at point: CGPoint, scale: CGFloat, into path: inout Path) {
+        switch marker {
+        case .none, .arrow:
+            break
+        case .circle:
+            appendCircleMarker(at: point, scale: scale, into: &path)
+        case .diamond:
+            appendDiamondMarker(at: point, scale: scale, into: &path)
+        }
+    }
+
+    private func appendMarker(
+        _ marker: GraphMarker,
+        at point: CGPoint,
+        tangent: CGVector,
+        scale: CGFloat,
+        into path: inout Path
+    ) {
+        switch marker {
+        case .none:
+            break
+        case .arrow:
+            appendArrowhead(at: point, along: tangent, scale: scale, into: &path)
+        case .circle:
+            appendCircleMarker(at: point, scale: scale, into: &path)
+        case .diamond:
+            appendDiamondMarker(at: point, scale: scale, into: &path)
+        }
+    }
+
+    private func appendCircleMarker(at point: CGPoint, scale: CGFloat, into path: inout Path) {
         let radius = edgeSourceMarkerRadius * scale
         let diameter = radius * 2
         path.addEllipse(in: CGRect(
@@ -300,6 +367,15 @@ struct KnowledgeGraphView: View {
             width: diameter,
             height: diameter
         ))
+    }
+
+    private func appendDiamondMarker(at point: CGPoint, scale: CGFloat, into path: inout Path) {
+        let radius = max(edgeSourceMarkerRadius * 1.6 * scale, 2)
+        path.move(to: CGPoint(x: point.x, y: point.y - radius))
+        path.addLine(to: CGPoint(x: point.x + radius, y: point.y))
+        path.addLine(to: CGPoint(x: point.x, y: point.y + radius))
+        path.addLine(to: CGPoint(x: point.x - radius, y: point.y))
+        path.closeSubpath()
     }
 
     private func appendArrowhead(
@@ -339,6 +415,7 @@ struct KnowledgeGraphView: View {
         viewport: KnowledgeGraphViewport,
         visibleRect: CGRect,
         theme: KnowledgeGraphVisualTheme,
+        styleResolver: KnowledgeGraphPresentationStyleResolver,
         context: inout GraphicsContext
     ) {
         for edge in layout.compoundGraph.edges {
@@ -350,10 +427,16 @@ struct KnowledgeGraphView: View {
             guard visibleRect.contains(screenPos) else { continue }
 
             let labelScale = edgeDecorationScale(for: viewport)
+            let style = styleResolver.edgeStyle(for: edge, theme: theme)
+            let labelStyle = style.label
+            let labelOpacity = labelStyle?.opacity ?? style.opacity ?? 1.0
+            let textColor = (labelStyle?.text ?? style.stroke ?? theme.muted).opacity(labelOpacity)
+            let fontSize = (labelStyle?.textSize ?? edgeLabelFontSize) * labelScale
+            let fontWeight = labelStyle?.textWeight ?? .medium
             let resolved = context.resolve(
                 Text(edge.predicate)
-                    .font(.system(size: edgeLabelFontSize * labelScale, weight: .medium))
-                    .foregroundStyle(theme.muted)
+                    .font(.system(size: fontSize, weight: fontWeight))
+                    .foregroundStyle(textColor)
             )
             let textSize = resolved.measure(in: CGSize(width: 160 * labelScale, height: 48 * labelScale))
             let horizontalPadding = edgeLabelHorizontalPadding * labelScale
@@ -364,20 +447,31 @@ struct KnowledgeGraphView: View {
                 width: textSize.width + horizontalPadding * 2,
                 height: textSize.height + verticalPadding * 2
             )
-            let labelPath = Path(roundedRect: bgRect, cornerRadius: edgeLabelCornerRadius * labelScale)
-            context.fill(labelPath, with: .color(theme.edgeLabelFill))
+            let labelPath = groupPath(
+                in: bgRect,
+                shape: labelStyle?.shape,
+                fallbackCornerRadius: edgeLabelCornerRadius * labelScale
+            )
+            context.fill(
+                labelPath,
+                with: .color((labelStyle?.fill ?? theme.edgeLabelFill).opacity(labelOpacity))
+            )
             drawEdgeLabelGuide(
                 in: bgRect,
                 axis: edgeLabelAxis(route: route, labelPosition: position),
                 inset: edgeLabelGuideInset * labelScale,
-                lineWidth: edgeLineWidth * labelScale,
+                lineWidth: (labelStyle?.strokeWidth ?? edgeLineWidth) * labelScale,
                 theme: theme,
+                lineColor: labelStyle?.stroke ?? style.stroke,
                 context: &context
             )
             context.stroke(
                 labelPath,
-                with: .color(theme.edgeLabelStroke),
-                lineWidth: max(0.5, labelScale)
+                with: .color((labelStyle?.stroke ?? theme.edgeLabelStroke).opacity(labelOpacity)),
+                style: StrokeStyle(
+                    lineWidth: max(0.5, (labelStyle?.strokeWidth ?? 1.0) * labelScale),
+                    line: labelStyle?.strokeLine
+                )
             )
             context.draw(resolved, at: screenPos, anchor: .center)
         }
@@ -394,6 +488,7 @@ struct KnowledgeGraphView: View {
         inset: CGFloat,
         lineWidth: CGFloat,
         theme: KnowledgeGraphVisualTheme,
+        lineColor: Color?,
         context: inout GraphicsContext
     ) {
         var path = Path()
@@ -407,7 +502,7 @@ struct KnowledgeGraphView: View {
         }
         context.stroke(
             path,
-            with: .color(theme.line.opacity(0.9)),
+            with: .color((lineColor ?? theme.line).opacity(0.9)),
             style: StrokeStyle(lineWidth: max(0.5, lineWidth), lineCap: .round)
         )
     }
@@ -486,28 +581,44 @@ struct KnowledgeGraphView: View {
             ))
 
             let style = info.group.style
-            let scaledRadius = style.cornerRadius * viewport.zoom
-            let rounded = Path(roundedRect: screenRect, cornerRadius: scaledRadius)
+            let outlinePath = groupPath(
+                in: screenRect,
+                shape: info.shape,
+                fallbackCornerRadius: style.cornerRadius * viewport.zoom
+            )
             let headerHeight = CardSizing.headerHeight * viewport.zoom
             let headerBottomY = min(screenRect.maxY, screenRect.minY + headerHeight)
 
-            context.fill(rounded, with: .color(info.fillColor))
+            context.fill(outlinePath, with: .color(info.fillColor))
+            if let headerFillColor = info.headerFillColor {
+                var headerContext = context
+                headerContext.clip(to: outlinePath)
+                headerContext.fill(
+                    Path(CGRect(
+                        x: screenRect.minX,
+                        y: screenRect.minY,
+                        width: screenRect.width,
+                        height: max(0, headerBottomY - screenRect.minY)
+                    )),
+                    with: .color(headerFillColor)
+                )
+            }
 
-            switch style.outline {
+            switch info.strokeLine.map(GroupStyle.Outline.init(lineStyle:)) ?? style.outline {
             case .none:
                 break
             case .solid:
                 context.stroke(
-                    rounded,
+                    outlinePath,
                     with: .color(info.strokeColor),
-                    style: StrokeStyle(lineWidth: 1.2)
+                    style: StrokeStyle(lineWidth: info.strokeWidth)
                 )
             case .dashed:
                 context.stroke(
-                    rounded,
+                    outlinePath,
                     with: .color(info.strokeColor),
                     style: StrokeStyle(
-                        lineWidth: 1.2,
+                        lineWidth: info.strokeWidth,
                         lineCap: .round,
                         dash: [6, 4]
                     )
@@ -539,6 +650,21 @@ struct KnowledgeGraphView: View {
                 ),
                 anchor: .leading
             )
+        }
+    }
+
+    private func groupPath(in rect: CGRect, shape: GraphShape?, fallbackCornerRadius: CGFloat) -> Path {
+        switch shape {
+        case .rectangle:
+            return Path(rect)
+        case .roundedRectangle(let radius):
+            return Path(roundedRect: rect, cornerRadius: radius.map { CGFloat($0) } ?? fallbackCornerRadius)
+        case .capsule:
+            return Path(roundedRect: rect, cornerRadius: min(rect.width, rect.height) / 2)
+        case .ellipse:
+            return Path(ellipseIn: rect)
+        case .none:
+            return Path(roundedRect: rect, cornerRadius: fallbackCornerRadius)
         }
     }
 
@@ -678,14 +804,20 @@ struct KnowledgeGraphView: View {
         let labelText: Text
         let fillColor: Color
         let strokeColor: Color
+        let headerFillColor: Color?
+        let shape: GraphShape?
+        let strokeWidth: CGFloat
+        let strokeLine: GraphLineStyle?
     }
 
     private func makeGroupRenderInfos(
         layout: KnowledgeGraphLayout.Result,
-        theme: KnowledgeGraphVisualTheme
+        theme: KnowledgeGraphVisualTheme,
+        styleResolver: KnowledgeGraphPresentationStyleResolver
     ) -> [GroupRenderInfo] {
         layout.compoundGraph.groups.enumerated().map { groupIndex, group in
             let style = group.style
+            let presentationStyle = styleResolver.groupStyle(for: group, groupIndex: groupIndex, theme: theme)
             let baseColor = KnowledgeGraphGroupPalette.color(
                 for: style.tint,
                 groupIndex: groupIndex
@@ -694,9 +826,16 @@ struct KnowledgeGraphView: View {
                 group: group,
                 labelText: Text(compactGroupLabel(group.label))
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(baseColor.opacity(min(max(style.opacity * 6.0, 0.72), 0.98))),
-                fillColor: baseColor.opacity(style.opacity),
-                strokeColor: baseColor.opacity(min(style.opacity * 3.0, 0.9))
+                    .foregroundStyle(
+                        presentationStyle.text
+                            ?? baseColor.opacity(min(max((presentationStyle.opacity ?? style.opacity) * 6.0, 0.72), 0.98))
+                    ),
+                fillColor: presentationStyle.fill ?? baseColor.opacity(presentationStyle.opacity ?? style.opacity),
+                strokeColor: presentationStyle.stroke ?? baseColor.opacity(min((presentationStyle.opacity ?? style.opacity) * 3.0, 0.9)),
+                headerFillColor: presentationStyle.headerFill,
+                shape: presentationStyle.shape,
+                strokeWidth: presentationStyle.strokeWidth ?? 1.2,
+                strokeLine: presentationStyle.strokeLine
             )
         }
     }
@@ -990,8 +1129,14 @@ struct KnowledgeGraphView: View {
         layoutTask?.cancel()
         let snapshot = graph
         let strategy = groupingStrategy
+        let presentation = presentation
         let task = Task.detached(priority: .userInitiated) {
-            KnowledgeGraphLayout.compute(graph: snapshot, initial: initial, groupingStrategy: strategy)
+            KnowledgeGraphLayout.compute(
+                graph: snapshot,
+                initial: initial,
+                groupingStrategy: strategy,
+                presentation: presentation
+            )
         }
         layoutTask = Task { @MainActor in
             let result = await task.value

@@ -1,6 +1,7 @@
 import SwiftUI
 import ArtifactCore
 import KnowledgeGraph
+import KnowledgeGraphParsers
 
 /// Shared `body` host for every RDF artifact renderer.
 ///
@@ -21,7 +22,7 @@ struct KnowledgeGraphRendererBody: View {
 
     private enum ParseResult: Sendable {
         case pending
-        case success(KnowledgeGraph)
+        case success(KnowledgeGraph, GraphPresentation?)
         case failure(Error)
     }
 
@@ -33,7 +34,7 @@ struct KnowledgeGraphRendererBody: View {
     }
 
     private var currentGraph: KnowledgeGraph? {
-        if case .success(let graph) = parseResult { return graph }
+        if case .success(let graph, _) = parseResult { return graph }
         return nil
     }
 
@@ -44,10 +45,11 @@ struct KnowledgeGraphRendererBody: View {
                 ProgressView()
                     .controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .success(let graph):
+            case .success(let graph, let presentation):
                 KnowledgeGraphView(
                     graph: graph,
-                    groupingStrategy: groupingStrategy(for: payload)
+                    groupingStrategy: groupingStrategy(for: payload, presentation: presentation),
+                    presentation: presentation
                 )
             case .failure(let error):
                 KnowledgeGraphErrorView(error: error, source: payload)
@@ -59,13 +61,21 @@ struct KnowledgeGraphRendererBody: View {
             let captureFormat = format
             let isComplete = artifact.isComplete
             let scope = artifact.id.rawValue
+            let artifactTitle = artifact.title
             let baseIRI = artifact.attributes["base"]
             let previousGraph = currentGraph
             let result: ParseResult = await Task.detached(priority: .userInitiated) {
                 if isComplete {
                     do {
                         let graph = try captureFormat.parse(captured, scope: scope, baseIRI: baseIRI)
-                        return .success(graph)
+                        let presentation = captureFormat == .jsonLD
+                            ? try JSONLDGraphPresentationExtractor.presentation(
+                                from: captured,
+                                id: "presentation:\(scope)",
+                                title: artifactTitle
+                            )
+                            : nil
+                        return .success(graph, presentation)
                     } catch {
                         return .failure(error)
                     }
@@ -76,21 +86,36 @@ struct KnowledgeGraphRendererBody: View {
                     // Hold the previous valid snapshot so the diagram stays
                     // stable across snapshots — the next chunk usually
                     // resolves the issue.
-                    return .success(previousGraph)
+                    return .success(previousGraph, nil)
                 }
-                return .success(outcome.graph)
+                return .success(outcome.graph, nil)
             }.value
             if Task.isCancelled { return }
             parseResult = result
         }
     }
 
-    private func groupingStrategy(for payload: String) -> GroupingStrategy {
-        guard format == .jsonLD,
-              let strategy = JSONLDViewGroupExtractor.groupingStrategy(from: payload)
-        else {
-            return .namedGraphs()
+    private func groupingStrategy(for payload: String, presentation: GraphPresentation?) -> GroupingStrategy {
+        guard format == .jsonLD else { return .namedGraphs() }
+        if let groups = presentation?.groups, !groups.isEmpty {
+            return .explicit(groups: explicitGroups(from: groups))
         }
-        return strategy
+        return JSONLDViewGroupExtractor.groupingStrategy(from: payload) ?? .namedGraphs()
+    }
+
+    private func explicitGroups(from groups: [GraphPresentationGroup]) -> [GroupingStrategy.ExplicitGroup] {
+        groups.flatMap { group -> [GroupingStrategy.ExplicitGroup] in
+            let members = group.members.compactMap { reference -> NodeIdentifier? in
+                guard case .node(let node) = reference else { return nil }
+                return node
+            }
+            return [
+                GroupingStrategy.ExplicitGroup(
+                    id: group.id,
+                    label: group.title,
+                    memberNodeIDs: members
+                )
+            ] + explicitGroups(from: group.children)
+        }
     }
 }
