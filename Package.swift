@@ -20,7 +20,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/1amageek/swift-markdown-ui.git", from: "0.2.0"),
         .package(url: "https://github.com/lukilabs/beautiful-mermaid-swift.git", from: "1.0.4"),
-        .package(url: "https://github.com/1amageek/swift-knowledge-graph.git", from: "0.1.0"),
+        .package(path: "../swift-knowledge-graph"),
         .package(url: "https://github.com/1amageek/CodeEditSourceEditor.git", from: "0.16.0"),
         .package(url: "https://github.com/CodeEditApp/CodeEditLanguages.git", exact: "0.1.20"),
     ],
