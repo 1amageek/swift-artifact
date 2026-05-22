@@ -1,5 +1,5 @@
 {
-  "originHash" : "601468aafd76d28fce454d2cd4179c92e1ed149c4596dc057b09072295f2acb5",
+  "originHash" : "02539a67dccbe7f119356d17013369d051a0dc6ef35523ab0aae52d7b1df0a82",
   "pins" : [
     {
       "identity" : "beautiful-mermaid-swift",
@@ -13,10 +13,10 @@
     {
       "identity" : "codeeditlanguages",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/CodeEditApp/CodeEditLanguages.git",
+      "location" : "https://github.com/1amageek/CodeEditLanguages.git",
       "state" : {
-        "revision" : "331d5dbc5fc8513be5848fce8a2a312908f36a11",
-        "version" : "0.1.20"
+        "revision" : "0f6eff59a04c7e74a304f19086e2217e4bc13fa8",
+        "version" : "0.1.22"
       }
     },
     {
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/CodeEditSourceEditor.git",
       "state" : {
-        "revision" : "d8e55022df351c9f9039259bfbfedd0be4a6ff0f",
-        "version" : "0.16.0"
+        "revision" : "74353f71fc5e603d7a3ad3f8e7d21a206efb0fad",
+        "version" : "0.16.1"
       }
     },
     {
@@ -80,6 +80,15 @@
       "state" : {
         "revision" : "fea17c02d767f46b23070fdfdacc28a03a39232a",
         "version" : "1.5.1"
+      }
+    },
+    {
+      "identity" : "swift-knowledge-graph",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-knowledge-graph.git",
+      "state" : {
+        "revision" : "0eaef93592e1c5560618d42ef44c8a21fec1f205",
+        "version" : "0.2.0"
       }
     },
     {
