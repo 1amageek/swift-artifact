@@ -128,7 +128,7 @@ public struct ArtifactCard<Content: View, Actions: View>: View {
     private var resolvedContentInsets: EdgeInsets {
         if let explicitInsets { return explicitInsets }
         if let captured = capturedRendererPreference { return captured }
-        if let preferred = renderers[artifact.type]?.preferredContentInsets {
+        if let preferred = renderers.artifactRenderer(for: artifact.type)?.preferredContentInsets {
             return preferred
         }
         return defaultArtifactCardContentInsets

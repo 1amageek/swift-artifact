@@ -5,6 +5,7 @@ import ArtifactView
 
 public struct JPEGRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .jpeg
+    public static let fileInput: ArtifactFileInput = .localFileURL
     public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}

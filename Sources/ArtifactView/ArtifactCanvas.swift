@@ -9,6 +9,7 @@ import ArtifactRenderer
 /// return `some View` without any `AnyView` erasure at the call site.
 public struct ArtifactCanvas<ArtifactBody: View>: View {
     public let message: ArtifactMessage
+    private let fileRequest: ArtifactFileRequest?
     private let renderArtifact: @MainActor (AnyArtifact) -> ArtifactBody
 
     public init(
@@ -16,19 +17,46 @@ public struct ArtifactCanvas<ArtifactBody: View>: View {
         @ViewBuilder renderArtifact: @escaping @MainActor (AnyArtifact) -> ArtifactBody
     ) {
         self.message = message
+        self.fileRequest = nil
+        self.renderArtifact = renderArtifact
+    }
+
+    public init(
+        url: URL,
+        type: ArtifactType? = nil,
+        title: String? = nil,
+        loadingPolicy: ArtifactFileLoadingPolicy = .standard,
+        @ViewBuilder renderArtifact: @escaping @MainActor (AnyArtifact) -> ArtifactBody
+    ) {
+        self.message = .empty
+        self.fileRequest = ArtifactFileRequest(
+            url: url,
+            declaredType: type,
+            title: title,
+            policy: loadingPolicy
+        )
         self.renderArtifact = renderArtifact
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(message.segments) { segment in
-                switch segment {
-                case .text(let text):
-                    Text(text)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .artifact(let artifact):
-                    renderArtifact(artifact)
+        Group {
+            if let fileRequest {
+                ArtifactURLCanvas(
+                    request: fileRequest,
+                    renderArtifact: renderArtifact
+                )
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(message.segments) { segment in
+                        switch segment {
+                        case .text(let text):
+                            Text(text)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        case .artifact(let artifact):
+                            renderArtifact(artifact)
+                        }
+                    }
                 }
             }
         }
@@ -45,6 +73,121 @@ extension ArtifactCanvas where ArtifactBody == ArtifactCard<ArtifactView, EmptyV
             ArtifactCard(artifact)
         }
     }
+
+    /// Parse a completed message and render any embedded artifacts. Malformed
+    /// artifact markup remains visible as plain text instead of disappearing.
+    public init(text: String) {
+        let parsedMessage: ArtifactMessage
+        do {
+            parsedMessage = try ArtifactParser.parse(text)
+        } catch {
+            parsedMessage = ArtifactMessage(segments: [.text(text)])
+        }
+        self.init(parsedMessage)
+    }
+
+    /// Resolve a local or remote file and render it through the environment
+    /// registry. The declared type is optional; the resolver otherwise uses
+    /// magic bytes, filename, response metadata, and text detection.
+    public init(
+        url: URL,
+        type: ArtifactType? = nil,
+        title: String? = nil,
+        loadingPolicy: ArtifactFileLoadingPolicy = .standard
+    ) {
+        self.init(
+            url: url,
+            type: type,
+            title: title,
+            loadingPolicy: loadingPolicy
+        ) { artifact in
+            ArtifactCard(artifact)
+        }
+    }
+}
+
+private struct ArtifactURLCanvas<ArtifactBody: View>: View {
+    let request: ArtifactFileRequest
+    let renderArtifact: @MainActor (AnyArtifact) -> ArtifactBody
+
+    @Environment(\.artifactFileResolver) private var fileResolver
+    @Environment(\.artifactRenderers) private var renderers
+    @State private var state: ArtifactURLCanvasState = .loading
+    @State private var retryAttempt = 0
+
+    var body: some View {
+        Group {
+            switch state {
+            case .loading:
+                let title = ArtifactFileArtifactLoader.displayTitle(for: request)
+                ProgressView("Loading \(title)")
+                    .frame(maxWidth: .infinity, minHeight: 160)
+            case let .loaded(artifact):
+                renderArtifact(artifact)
+            case let .failed(message):
+                ContentUnavailableView {
+                    Label("Unable to render file", systemImage: "doc.badge.xmark")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Retry", systemImage: "arrow.clockwise") {
+                        retryAttempt += 1
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 160)
+            }
+        }
+        .task(
+            id: ArtifactURLLoadID(
+                request: request,
+                attempt: retryAttempt,
+                rendererInputs: rendererInputSignature
+            )
+        ) {
+            await loadArtifact()
+        }
+    }
+
+    @MainActor
+    private func loadArtifact() async {
+        state = .loading
+        do {
+            let loader = ArtifactFileArtifactLoader(resolver: fileResolver)
+            let artifact = try await loader.load(request, renderers: renderers)
+            guard !Task.isCancelled else { return }
+            state = .loaded(artifact)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    private var rendererInputSignature: [ArtifactRendererInputID] {
+        renderers
+            .map { type, renderer in
+                ArtifactRendererInputID(type: type, fileInput: renderer.fileInput)
+            }
+            .sorted { $0.type.rawValue < $1.type.rawValue }
+    }
+}
+
+private enum ArtifactURLCanvasState {
+    case loading
+    case loaded(AnyArtifact)
+    case failed(String)
+}
+
+private struct ArtifactURLLoadID: Hashable {
+    let request: ArtifactFileRequest
+    let attempt: Int
+    let rendererInputs: [ArtifactRendererInputID]
+}
+
+private struct ArtifactRendererInputID: Hashable {
+    let type: ArtifactType
+    let fileInput: ArtifactFileInput
 }
 
 private struct _PreviewMarkdownRenderer: ArtifactRenderable, Sendable {

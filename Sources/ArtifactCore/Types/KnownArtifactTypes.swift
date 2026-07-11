@@ -2,6 +2,11 @@ import Foundation
 
 extension ArtifactType {
 
+    // MARK: - Generic file fallbacks
+
+    public static let plainText: ArtifactType = "text/plain"
+    public static let octetStream: ArtifactType = "application/octet-stream"
+
     // MARK: - Tier 1: Claude-compatible
 
     public static let html: ArtifactType = "text/html"

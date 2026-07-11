@@ -23,7 +23,7 @@ enum ArtifactBinaryPayloadResolver {
             return url
         }
         if trimmed.hasPrefix("~/") {
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let home = NSHomeDirectory()
             let path = home + String(trimmed.dropFirst())
             return URL(fileURLWithPath: path)
         }

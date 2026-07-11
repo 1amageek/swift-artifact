@@ -5,6 +5,11 @@ import Foundation
 @Suite("ArtifactType")
 struct ArtifactTypeTests {
 
+    @Test func genericFileFallbackConstants() {
+        #expect(ArtifactType.plainText.rawValue == "text/plain")
+        #expect(ArtifactType.octetStream.rawValue == "application/octet-stream")
+    }
+
     @Test func stringLiteralInit() {
         let t: ArtifactType = "application/vnd.example"
         #expect(t.rawValue == "application/vnd.example")

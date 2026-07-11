@@ -23,6 +23,17 @@ struct MediaRendererTests {
         #expect(BMPRenderer.artifactType == .bmp)
     }
 
+    @Test func mediaRenderersConsumeResolvedFileURLs() {
+        #expect(PDFRenderer.fileInput == .localFileURL)
+        #expect(PNGRenderer.fileInput == .localFileURL)
+        #expect(JPEGRenderer.fileInput == .localFileURL)
+        #expect(WebPRenderer.fileInput == .localFileURL)
+        #expect(GIFRenderer.fileInput == .localFileURL)
+        #expect(TIFFRenderer.fileInput == .localFileURL)
+        #expect(HEICRenderer.fileInput == .localFileURL)
+        #expect(BMPRenderer.fileInput == .localFileURL)
+    }
+
     @Test func completePayloadIsRenderable() {
         let artifact = AnyArtifact(
             id: ArtifactIdentifier("image"),
@@ -52,6 +63,25 @@ struct MediaRendererTests {
             from: "data:text/plain;base64,SGVsbG8="
         )
         #expect(String(data: data, encoding: .utf8) == "Hello")
+    }
+
+    @Test func binaryDataLoaderReadsResolvedLocalFile() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appending(path: "swift-artifact-media-\(UUID().uuidString)")
+        defer {
+            do {
+                try FileManager.default.removeItem(at: fileURL)
+            } catch {
+                Issue.record("Failed to remove temporary media file: \(error)")
+            }
+        }
+        try Data("artifact".utf8).write(to: fileURL)
+
+        let data = try await ArtifactBinaryDataLoader.shared.data(
+            from: fileURL.absoluteString
+        )
+
+        #expect(String(data: data, encoding: .utf8) == "artifact")
     }
 
     @Test func previewPayloadsDecodeToBytes() throws {

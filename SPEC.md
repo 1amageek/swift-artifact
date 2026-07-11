@@ -1,3 +1,11 @@
+# Historical pre-implementation design draft
+
+> **Status: superseded and non-normative.** This document describes an early design
+> that predates the environment renderer registry, `RefinedPayload`, current module
+> names, and URL-backed file rendering. The current contract is defined by
+> [`README.md`](README.md) and the public API documentation. Do not use this file to
+> make implementation decisions.
+
 # Bob Artifact Library 仕様書
 
 **Version**: 0.1.0-draft

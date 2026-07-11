@@ -10,6 +10,7 @@ import PDFKit
 
 public struct PDFRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .pdf
+    public static let fileInput: ArtifactFileInput = .localFileURL
     public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
@@ -65,13 +66,7 @@ private struct PDFRendererBody: View {
         document = nil
         errorMessage = nil
         do {
-            let data: Data
-            if let url = ArtifactBinaryPayloadResolver.remoteURL(from: payload) {
-                let (remoteData, _) = try await URLSession.shared.data(from: url)
-                data = remoteData
-            } else {
-                data = try ArtifactBinaryPayloadResolver.data(from: payload)
-            }
+            let data = try await ArtifactBinaryDataLoader.shared.data(from: payload)
             guard let loaded = PDFDocument(data: data) else {
                 errorMessage = "The payload is not a valid PDF document."
                 return

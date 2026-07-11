@@ -5,6 +5,7 @@ import ArtifactView
 
 public struct HEICRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .heic
+    public static let fileInput: ArtifactFileInput = .localFileURL
     public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}

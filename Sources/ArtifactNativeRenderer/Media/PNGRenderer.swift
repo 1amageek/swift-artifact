@@ -5,6 +5,7 @@ import ArtifactView
 
 public struct PNGRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .png
+    public static let fileInput: ArtifactFileInput = .localFileURL
     public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}

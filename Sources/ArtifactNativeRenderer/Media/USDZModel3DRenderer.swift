@@ -16,6 +16,7 @@ import ArtifactView
 /// fetch.
 public struct USDZModel3DRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .usdz
+    public static let fileInput: ArtifactFileInput = .localFileURL
     /// The interactive 3D viewport should fill the card body edge-to-edge.
     public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 

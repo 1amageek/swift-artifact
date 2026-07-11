@@ -13,15 +13,55 @@ public struct DefaultArtifactView: View {
     }
 
     public var body: some View {
-        ArtifactBoundedScrollView(
-            .vertical,
-            contentInsets: EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12)
-        ) {
-            Text(artifact.payload)
-                .font(.system(.callout, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        Group {
+            if let localFileURL {
+                fileFallback(localFileURL)
+            } else {
+                ArtifactBoundedScrollView(
+                    .vertical,
+                    contentInsets: EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12)
+                ) {
+                    Text(artifact.payload)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
         }
+    }
+
+    private func fileFallback(_ url: URL) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "doc")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(url.lastPathComponent)
+                        .font(.callout.weight(.semibold))
+                    Text(artifact.type.rawValue)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    if let byteCount = artifact.attributes["byteCount"] {
+                        Text("\(byteCount) bytes")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            Link(destination: url) {
+                Label("Open File", systemImage: "arrow.up.right.square")
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var localFileURL: URL? {
+        let payload = artifact.payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: payload), url.isFileURL else { return nil }
+        return url
     }
 }
 

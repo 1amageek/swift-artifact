@@ -12,12 +12,14 @@ import ArtifactCore
 /// `ArtifactProgressView` uniformly.
 public struct AnyArtifactRenderer: Sendable {
     public let artifactType: ArtifactType
+    public let fileInput: ArtifactFileInput
     public let preferredContentInsets: EdgeInsets?
     public let refine: @Sendable (AnyArtifact) -> RefinedPayload
     public let body: @MainActor @Sendable (AnyArtifact, String) -> AnyView
 
     public init<R: ArtifactRenderable & Sendable>(_ renderer: R) {
         self.artifactType = R.artifactType
+        self.fileInput = R.fileInput
         self.preferredContentInsets = R.preferredContentInsets
         self.refine = { R.refine($0) }
         self.body = { artifact, payload in

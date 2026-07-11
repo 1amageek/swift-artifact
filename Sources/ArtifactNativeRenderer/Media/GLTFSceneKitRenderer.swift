@@ -13,6 +13,7 @@ import ArtifactView
 /// should provide their own `ArtifactRenderable` for these types.
 public struct GLTFSceneKitRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .gltf
+    public static let fileInput: ArtifactFileInput = .localFileURL
 
     public init() {}
 

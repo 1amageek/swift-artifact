@@ -26,6 +26,10 @@ public protocol ArtifactRenderable {
     /// route artifacts to the correct renderer.
     static var artifactType: ArtifactType { get }
 
+    /// The payload representation this renderer expects when an artifact is
+    /// opened through `ArtifactCanvas(url:)`. Inline artifacts are unaffected.
+    static var fileInput: ArtifactFileInput { get }
+
     /// Optional preferred content insets for hosting cards. When no explicit
     /// `.artifactCardContentInsets(_:)` is set in the environment, the card
     /// uses this value. Renderers whose body fills their frame edge-to-edge
@@ -51,6 +55,9 @@ public protocol ArtifactRenderable {
 }
 
 extension ArtifactRenderable {
+    /// Text is the common case for agent-generated artifacts and source files.
+    public static var fileInput: ArtifactFileInput { .text }
+
     /// Default refiner: wait until the artifact is complete before declaring
     /// anything renderable. Renderers with incremental support override this.
     public static func refine(_ artifact: AnyArtifact) -> RefinedPayload {

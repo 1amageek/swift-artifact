@@ -23,7 +23,7 @@ public struct ArtifactView: View {
 
     public var body: some View {
         Group {
-            if let renderer = renderers[artifact.type] {
+            if let renderer = renderers.artifactRenderer(for: artifact.type) {
                 switch renderer.refine(artifact) {
                 case .preRenderable:
                     ArtifactProgressView(artifact: artifact)

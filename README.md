@@ -17,8 +17,11 @@ rendering** while a model is still streaming.
   for a complete payload before decoding.
 - Environment-driven renderer registry — call `.artifactRenderer(_:)` once at the top
   of your view tree and let `ArtifactView` resolve the right renderer
+- Local and HTTPS file entry points through `ArtifactCanvas(url:)`, with bounded
+  loading, MIME detection, and the same renderer registry used by inline artifacts
 
-See [SPEC.md](SPEC.md) for the full specification.
+This README and the public API documentation define the current contract.
+[`SPEC.md`](SPEC.md) is retained only as a historical pre-implementation draft.
 
 ## Installation
 
@@ -57,7 +60,7 @@ want WebKit in your binary), depend on individual products instead:
 | Module | Depends on | Purpose |
 |---|---|---|
 | `SwiftArtifact` | All of the below | Umbrella — `@_exported` re-export of every module |
-| `ArtifactCore` | — | `ArtifactType`, `AnyArtifact`, parsing |
+| `ArtifactCore` | — | `ArtifactType`, `AnyArtifact`, parsing, file resolution and MIME detection |
 | `ArtifactRenderer` | Core | `ArtifactRenderable` protocol, `RefinedPayload`, `AnyArtifactRenderer` |
 | `ArtifactView` | Core + Renderer | `ArtifactView`, `ArtifactCard`, `ArtifactCanvas`, env registry |
 | `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / PDF / raster images / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) / Turtle / TriG / N-Quads / RDF/XML / JSON-LD |
@@ -106,6 +109,60 @@ struct ChatBubble: View {
             .artifactRenderer(VegaLiteWebViewRenderer())
     }
 }
+```
+
+### File URL display
+
+Use the same canvas and renderer registry for a file produced by another tool. The
+URL may reference a local regular file or an HTTPS resource:
+
+```swift
+ArtifactCanvas(url: outputURL)
+    .artifactRenderer(MarkdownRenderer())
+    .artifactRenderer(CodeRenderer())
+    .artifactRenderer(JSONRenderer())
+    .artifactRenderer(CSVRenderer())
+    .artifactRenderer(SVGRenderer())
+    .artifactRenderer(PDFRenderer())
+    .artifactRenderer(PNGRenderer())
+```
+
+`ArtifactCanvas(url:)` resolves the file before selecting a renderer. Type resolution
+uses this precedence:
+
+| Priority | Signal |
+|---:|---|
+| 1 | Explicit `type:` passed by the application |
+| 2 | Recognized file signature (magic bytes) |
+| 3 | Known filename extension |
+| 4 | HTTP response MIME or `UniformTypeIdentifiers` |
+| 5 | UTF-8 text or `application/octet-stream` fallback |
+
+Pass `type:` when the application owns a custom file format. swift-artifact does not
+define that format; it only routes the resolved file to the renderer registered for
+the application's MIME:
+
+```swift
+let designType = ArtifactType("application/vnd.example.design")
+
+ArtifactCanvas(url: designURL, type: designType)
+    .artifactRenderer(DesignRenderer())
+```
+
+Text renderers receive decoded UTF-8 contents. PDF, image, model, and other binary
+renderers receive a local `file://` URL; HTTPS files are downloaded to a temporary
+cache first. Unknown UTF-8 files remain readable as text, while unknown binary files
+show file metadata and an open action instead of attempting text decoding.
+
+The standard policy limits remote files to 128 MiB and decoded text files to 8 MiB.
+Plain HTTP is rejected unless an application explicitly supplies a policy that allows
+it.
+
+```swift
+ArtifactCanvas(
+    url: developmentServerURL,
+    loadingPolicy: ArtifactFileLoadingPolicy(allowsInsecureHTTP: true)
+)
 ```
 
 ### Standalone display
@@ -201,8 +258,8 @@ streaming. If a renderer doesn't override it, the view layer falls back to
 The framework keys every artifact on its MIME type. The extension column
 lists the canonical file suffix(es) for that format — useful when ingesting
 files from disk or routing on an upload's filename. Extensions are advisory
-metadata; the renderer registry resolves on `ArtifactType` (i.e. the MIME)
-alone.
+metadata; `ArtifactCanvas(url:)` uses them during MIME detection, while the
+renderer registry itself resolves on `ArtifactType` alone.
 
 ### Tier 1 — Claude-compatible
 
@@ -263,6 +320,9 @@ visible viewport.
 
 Binary-oriented renderers accept a payload string containing a remote URL,
 `file://` URL, absolute file path, data URL, or base64 data.
+
+When invoked through `ArtifactCanvas(url:)`, these renderers receive a resolved local
+`file://` URL. This gives local and remote source files one rendering path.
 
 Raster image renderers decode only complete payloads. They do not progressively
 render chunked image data; while `artifact.isComplete == false`, they stay in
@@ -334,6 +394,13 @@ struct MyJSONRenderer: ArtifactRenderable, Sendable {
         Text(payload).font(.system(.callout, design: .monospaced))
     }
 }
+```
+
+The default file input is decoded UTF-8 text. A renderer for a binary or random-access
+format declares that it consumes the resolved local file URL instead:
+
+```swift
+static let fileInput: ArtifactFileInput = .localFileURL
 ```
 
 To make the hosting card fill its chrome edge-to-edge (Map / WebView / Code

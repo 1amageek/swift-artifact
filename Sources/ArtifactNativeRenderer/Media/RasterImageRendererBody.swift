@@ -36,13 +36,7 @@ struct RasterImageRendererBody: View {
     private func loadImage() async {
         state = .loading
         do {
-            let data: Data
-            if let url = ArtifactBinaryPayloadResolver.remoteURL(from: payload) {
-                let (remoteData, _) = try await URLSession.shared.data(from: url)
-                data = remoteData
-            } else {
-                data = try ArtifactBinaryPayloadResolver.data(from: payload)
-            }
+            let data = try await ArtifactBinaryDataLoader.shared.data(from: payload)
             state = try .loaded(decodedImage(from: data))
         } catch is CancellationError {
             return

@@ -5,6 +5,7 @@ import ArtifactView
 
 public struct GIFRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .gif
+    public static let fileInput: ArtifactFileInput = .localFileURL
     public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
 
     public init() {}
