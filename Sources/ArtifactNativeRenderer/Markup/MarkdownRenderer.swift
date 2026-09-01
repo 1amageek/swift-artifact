@@ -2,6 +2,7 @@ import SwiftUI
 import ArtifactCore
 import ArtifactRenderer
 import ArtifactView
+import MarkdownUI
 
 /// Renders Markdown payloads using `swift-markdown-ui`, which provides
 /// block-level support (headings, lists, code blocks, block quotes, tables,
@@ -43,7 +44,7 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         ArtifactBoundedScrollView(.vertical) {
-            MarkdownImageBlockView(markdown: payload)
+            MarkdownView(payload)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(defaultArtifactCardContentInsets)
         }
