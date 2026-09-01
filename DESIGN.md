@@ -3,14 +3,16 @@
 ## Purpose and Scope
 
 This package adapts Markdown Artifact payloads to the external
-`swift-markdown-ui` `MarkdownView`. It owns Artifact refinement and renderer
-routing, not Markdown parsing or image layout.
+`swift-markdown-ui` `MarkdownView`. It owns Artifact refinement, renderer
+routing, and the card-friendly default image bounds.
 
 ## Responsibilities and Boundaries
 
 `MarkdownRenderer` validates streaming payload boundaries and invokes one
-`MarkdownView` for the renderable payload. Image parsing, loading, and sizing
-belong to `swift-markdown-ui`. No image-specific public view is defined here.
+`MarkdownView` for the renderable payload. Image parsing, loading, and frame
+semantics belong to `swift-markdown-ui`; this package supplies a default
+maximum image frame of 360 by 240 points for Artifact cards. No image-specific
+public view is defined here.
 
 ## Related Designs
 
@@ -26,6 +28,7 @@ flowchart LR
     A[AnyArtifact payload] --> B[MarkdownRenderer.refine]
     B --> C[MarkdownRenderer.body]
     C --> D[MarkdownView(payload)]
+    D --> P[Artifact default image frame<br/>max 360 x 240]
     D --> E[swift-markdown-ui image/text rendering]
 ```
 
@@ -36,9 +39,10 @@ flowchart LR
 - This package does not parse Markdown a second time.
 - This package does not expose `MarkdownImageBlockView` or another image entry
   point.
-- Artifact rendering applies no package-defined image pixel constants.
-- The host view may apply `markdownImageSize` to the Markdown view hierarchy;
-  the modifier applies to all descendant Markdown images.
+- Artifact Markdown images use a maximum 360 by 240 point frame, preserving
+  the source aspect ratio and aligning to the leading edge.
+- Direct `MarkdownView` consumers may apply `markdownImageSize`; the modifier
+  applies to all descendant Markdown images.
 
 ## Runtime Flows
 

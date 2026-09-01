@@ -28,7 +28,7 @@ This README and the public API documentation define the current contract.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.17.0"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.17.1"),
 ]
 ```
 
@@ -205,7 +205,7 @@ Renderers split into three layout families:
 
 | Family | Renderers | Sizing behavior |
 |---|---|---|
-| Text / table / source | Markdown, JSON, CSV, Code | Own their inner spacing and use bounded scrolling for large payloads. CSV measures the visible viewport, fills it for narrow tables, and expands horizontally only when the column count requires scrolling. |
+| Text / table / source | Markdown, JSON, CSV, Code | Own their inner spacing and use bounded scrolling for large payloads. Markdown images default to a 360 × 240pt maximum frame. CSV measures the visible viewport, fills it for narrow tables, and expands horizontally only when the column count requires scrolling. |
 | Intrinsic media | SVG, PNG, JPEG, WebP, GIF, TIFF, HEIC, BMP | Size from the rendered content. Raster images make the card body width the source of truth and compute height from the decoded image aspect ratio. |
 | Fill-frame surfaces | HTML, React, Mermaid, LaTeX, Vega-Lite, GeoJSON, USDZ, Turtle / TriG / N-Quads / RDF/XML / JSON-LD, PDF | Render into a WebView / Map / RealityView / Canvas / document viewport and expand to the frame the caller provides. **You are expected to wrap them with `.frame(...)`** at the call site when the default viewport is not appropriate. |
 

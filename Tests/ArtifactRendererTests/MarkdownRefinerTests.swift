@@ -1,7 +1,7 @@
 import Testing
 import ArtifactCore
 import ArtifactRenderer
-import ArtifactNativeRenderer
+@testable import ArtifactNativeRenderer
 
 @Suite("MarkdownRenderer.refine")
 struct MarkdownRefinerTests {
@@ -18,6 +18,11 @@ struct MarkdownRefinerTests {
     @Test func completePayloadIsReturnedVerbatim() {
         let result = MarkdownRenderer.refine(artifact(payload: "# Hello", isComplete: true))
         #expect(result == .renderable("# Hello"))
+    }
+
+    @Test func markdownImagesUseCardFriendlyDefaultBounds() {
+        #expect(MarkdownRenderer.defaultMarkdownImageMaxWidth == 360)
+        #expect(MarkdownRenderer.defaultMarkdownImageMaxHeight == 240)
     }
 
     @Test func streamingWithoutNewlineIsPreRenderable() {

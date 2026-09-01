@@ -9,6 +9,8 @@ import MarkdownUI
 /// thematic breaks) on top of `swift-markdown`'s CommonMark parser.
 public struct MarkdownRenderer: ArtifactRenderable, Sendable {
     public static let artifactType: ArtifactType = .markdown
+    static let defaultMarkdownImageMaxWidth: CGFloat = 360
+    static let defaultMarkdownImageMaxHeight: CGFloat = 240
     /// Markdown owns its reading inset internally so it renders with the same
     /// typography spacing both inside and outside `ArtifactCard`.
     public static let preferredContentInsets: EdgeInsets? = EdgeInsets()
@@ -45,6 +47,11 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         ArtifactBoundedScrollView(.vertical) {
             MarkdownView(payload)
+                .markdownImageSize(
+                    maxWidth: Self.defaultMarkdownImageMaxWidth,
+                    maxHeight: Self.defaultMarkdownImageMaxHeight,
+                    alignment: .leading
+                )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(defaultArtifactCardContentInsets)
         }
