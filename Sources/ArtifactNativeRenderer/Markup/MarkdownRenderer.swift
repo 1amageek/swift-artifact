@@ -1,5 +1,4 @@
 import SwiftUI
-import MarkdownUI
 import ArtifactCore
 import ArtifactRenderer
 import ArtifactView
@@ -44,7 +43,7 @@ public struct MarkdownRenderer: ArtifactRenderable, Sendable {
 
     public func body(artifact: AnyArtifact, payload: String) -> some View {
         ArtifactBoundedScrollView(.vertical) {
-            MarkdownView(payload)
+            MarkdownImageBlockView(markdown: payload)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(defaultArtifactCardContentInsets)
         }

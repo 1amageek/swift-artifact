@@ -1,7 +1,7 @@
 import Testing
 import ArtifactCore
 import ArtifactRenderer
-import ArtifactNativeRenderer
+@testable import ArtifactNativeRenderer
 
 @Suite("MarkdownRenderer.refine")
 struct MarkdownRefinerTests {
@@ -43,5 +43,24 @@ struct MarkdownRefinerTests {
         } else {
             Issue.record("Expected .preRenderable when only the newline has arrived")
         }
+    }
+
+    @Test func imageParagraphIsRenderedAsImageBlock() throws {
+        let blocks = MarkdownImageBlockParser.parse(
+            "# Apple\n\n![Hero](https://example.com/hero.png)\n\nSummary"
+        )
+
+        #expect(blocks.count == 3)
+        guard case let .image(url, alt) = blocks[1] else {
+            Issue.record("Expected a parsed image block")
+            return
+        }
+        #expect(url.absoluteString == "https://example.com/hero.png")
+        #expect(alt == "Hero")
+    }
+
+    @Test func markdownWithoutImagesRemainsARegularBlock() {
+        let source = "# Heading\n\nA paragraph."
+        #expect(MarkdownImageBlockParser.parse(source) == [.markdown(source: source)])
     }
 }
