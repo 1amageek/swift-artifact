@@ -1,5 +1,5 @@
 {
-  "originHash" : "e33261ece886939dda977f6ead39818c211399b3b92fb87add668ad8dc919907",
+  "originHash" : "d49fd5923793f7eaf5d7d5a334b9660fd2d8e1caae46b3043ccc7d2b7dac46dd",
   "pins" : [
     {
       "identity" : "beautiful-mermaid-swift",
@@ -105,8 +105,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/swift-markdown-ui.git",
       "state" : {
-        "revision" : "6e5c288aebe6ca16508ef98295ec7dae854c9c38",
-        "version" : "0.2.0"
+        "revision" : "3e3fcae635f8ca86edaffa70c0f3b7799dae0c6d",
+        "version" : "0.2.1"
       }
     },
     {
