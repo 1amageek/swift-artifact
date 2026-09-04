@@ -235,76 +235,71 @@ extension ArtifactChartValue {
     }
 }
 
-private func _previewCartesianChartPayload(mark: ArtifactChartMark) -> String {
-    """
-    {
-      "version": 1,
-      "dimension": "2d",
-      "mark": { "type": "\(mark.rawValue)" },
-      "data": [
-        { "category": "A", "value": 4, "series": "First" },
-        { "category": "B", "value": 7, "series": "First" },
-        { "category": "C", "value": 5, "series": "Second" },
-        { "category": "D", "value": 9, "series": "Second" }
-      ],
-      "encoding": {
-        "x": { "field": "category", "type": "nominal", "label": "Category" },
-        "y": { "field": "value", "type": "quantitative", "label": "Value" },
-        "series": { "field": "series", "type": "nominal", "label": "Series" }
-      },
-      "options": { "showLegend": true }
-    }
-    """
-}
-
-private let _previewSectorChartPayload = """
-    {
-      "version": 1,
-      "dimension": "2d",
-      "mark": { "type": "sector" },
-      "data": [
-        { "amount": 40, "series": "Completed" },
-        { "amount": 35, "series": "In progress" },
-        { "amount": 25, "series": "Remaining" }
-      ],
-      "encoding": {
-        "angle": { "field": "amount", "type": "quantitative", "label": "Amount" },
-        "series": { "field": "series", "type": "nominal", "label": "Status" }
-      },
-      "options": { "showLegend": true }
-    }
-    """
-
 #Preview("Swift Charts gallery") {
-    let samples: [(title: String, payload: String)] = [
-        ("Line", _previewCartesianChartPayload(mark: .line)),
-        ("Bar", _previewCartesianChartPayload(mark: .bar)),
-        ("Area", _previewCartesianChartPayload(mark: .area)),
-        ("Point", _previewCartesianChartPayload(mark: .point)),
-        ("Rectangle", _previewCartesianChartPayload(mark: .rectangle)),
-        ("Rule", _previewCartesianChartPayload(mark: .rule)),
-        ("Sector", _previewSectorChartPayload),
-    ]
-
     ScrollView {
         LazyVGrid(
             columns: [GridItem(.flexible()), GridItem(.flexible())],
             spacing: 16
         ) {
-            ForEach(samples.indices, id: \.self) { index in
-                let sample = samples[index]
+            ForEach(["line", "bar", "area", "point", "rectangle", "rule"], id: \.self) { mark in
                 ArtifactCard(
                     AnyArtifact(
-                        id: ArtifactIdentifier("chart-preview-\(index)"),
+                        id: ArtifactIdentifier("chart-preview-\(mark)"),
                         type: .swiftCharts,
-                        title: sample.title,
-                        payload: sample.payload,
+                        title: mark.capitalized,
+                        payload: """
+                            {
+                              "version": 1,
+                              "dimension": "2d",
+                              "mark": { "type": "\(mark)" },
+                              "data": [
+                                { "category": "A", "value": 4, "series": "First" },
+                                { "category": "B", "value": 7, "series": "First" },
+                                { "category": "C", "value": 5, "series": "Second" },
+                                { "category": "D", "value": 9, "series": "Second" }
+                              ],
+                              "encoding": {
+                                "x": { "field": "category", "type": "nominal", "label": "Category" },
+                                "y": { "field": "value", "type": "quantitative", "label": "Value" },
+                                "series": { "field": "series", "type": "nominal", "label": "Series" }
+                              },
+                              "options": { "showLegend": true }
+                            }
+                            """,
                         isComplete: true
                     ),
                     renderer: SwiftChartsRenderer()
                 )
                 .frame(minHeight: 300)
             }
+
+            ArtifactCard(
+                AnyArtifact(
+                    id: ArtifactIdentifier("chart-preview-sector"),
+                    type: .swiftCharts,
+                    title: "Sector",
+                    payload: """
+                        {
+                          "version": 1,
+                          "dimension": "2d",
+                          "mark": { "type": "sector" },
+                          "data": [
+                            { "amount": 40, "series": "Completed" },
+                            { "amount": 35, "series": "In progress" },
+                            { "amount": 25, "series": "Remaining" }
+                          ],
+                          "encoding": {
+                            "angle": { "field": "amount", "type": "quantitative", "label": "Amount" },
+                            "series": { "field": "series", "type": "nominal", "label": "Status" }
+                          },
+                          "options": { "showLegend": true }
+                        }
+                        """,
+                    isComplete: true
+                ),
+                renderer: SwiftChartsRenderer()
+            )
+            .frame(minHeight: 300)
         }
         .padding()
     }
