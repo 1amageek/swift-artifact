@@ -26,7 +26,8 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "ArtifactCore"
+            name: "ArtifactCore",
+            exclude: ["ChartSpec/DESIGN.md"]
         ),
         .target(
             name: "ArtifactRenderer",
@@ -56,7 +57,8 @@ let package = Package(
                     package: "CodeEditLanguages",
                     condition: .when(platforms: [.macOS])
                 ),
-            ]
+            ],
+            exclude: ["Chart/DESIGN.md"]
         ),
         .target(
             name: "ArtifactWebRenderer",

@@ -63,7 +63,7 @@ want WebKit in your binary), depend on individual products instead:
 | `ArtifactCore` | — | `ArtifactType`, `AnyArtifact`, parsing, file resolution and MIME detection |
 | `ArtifactRenderer` | Core | `ArtifactRenderable` protocol, `RefinedPayload`, `AnyArtifactRenderer` |
 | `ArtifactView` | Core + Renderer | `ArtifactView`, `ArtifactCard`, `ArtifactCanvas`, env registry |
-| `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / PDF / raster images / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) / Turtle / TriG / N-Quads / RDF/XML / JSON-LD |
+| `ArtifactNativeRenderer` | View | Markdown / JSON / CSV / Code / SVG / Swift Charts / PDF / raster images / GeoJSON (MapKit) / GLTF (SceneKit) / USDZ (RealityKit) / Turtle / TriG / N-Quads / RDF/XML / JSON-LD |
 | `ArtifactWebRenderer` | View | HTML / React / Mermaid / LaTeX (KaTeX) / Vega-Lite via `WKWebView` |
 
 `ArtifactNativeRenderer` pulls in [`swift-markdown-ui`](https://github.com/1amageek/swift-markdown-ui)
@@ -86,6 +86,7 @@ struct ChatBubble: View {
             .artifactRenderer(CodeRenderer())
             .artifactRenderer(JSONRenderer())
             .artifactRenderer(CSVRenderer())
+            .artifactRenderer(SwiftChartsRenderer())
             .artifactRenderer(SVGRenderer())
             .artifactRenderer(PDFRenderer())
             .artifactRenderer(PNGRenderer())
@@ -306,6 +307,7 @@ AnyArtifact(
 | JSON | `application/json` | `.json` | `JSONRenderer` |
 | CSV | `text/csv` | `.csv` | `CSVRenderer` |
 | Vega-Lite | `application/vnd.vegalite.v5+json` | `.vl.json` | `VegaLiteWebViewRenderer` |
+| Swift Charts | `application/vnd.swiftartifact.chart+json` | `.chart.json` | `SwiftChartsRenderer` |
 | GeoJSON | `application/geo+json` | `.geojson` | `GeoJSONMapKitRenderer` |
 | LaTeX | `application/x-latex` | `.tex`, `.latex` | `LaTeXWebViewRenderer` |
 | glTF (JSON) | `model/gltf+json` | `.gltf` | `GLTFSceneKitRenderer` |
@@ -315,6 +317,26 @@ AnyArtifact(
 sticky headers, type-aware alignment, zebra striping, row/table copy actions,
 and horizontal scrolling only when the table's minimum column widths exceed the
 visible viewport.
+
+Swift Charts artifacts use a versioned row-oriented JSON document. The renderer
+supports 2D line, bar, area, point, rectangle, rule, and sector marks. Values are
+typed as `quantitative`, `temporal`, `nominal`, or `ordinal`; unsupported options
+are reported instead of being ignored.
+
+```json
+{
+  "version": 1,
+  "dimension": "2d",
+  "mark": { "type": "line" },
+  "data": [
+    { "day": "2026-09-01T00:00:00Z", "value": 12.5 }
+  ],
+  "encoding": {
+    "x": { "field": "day", "type": "temporal" },
+    "y": { "field": "value", "type": "quantitative" }
+  }
+}
+```
 
 ### Documents and raster images
 

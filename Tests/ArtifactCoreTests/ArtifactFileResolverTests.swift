@@ -125,6 +125,7 @@ struct ArtifactFileResolverTests {
             ("graph.jsonld", .jsonLD),
             ("table.csv", .csv),
             ("chart.vl.json", .vegaLite),
+            ("chart.chart.json", .swiftCharts),
             ("map.geojson", .geoJSON),
             ("formula.tex", .latex),
             ("scene.gltf", .gltf),

@@ -21,6 +21,7 @@ extension ArtifactType {
     public static let json: ArtifactType = "application/json"
     public static let csv: ArtifactType = "text/csv"
     public static let vegaLite: ArtifactType = "application/vnd.vegalite.v5+json"
+    public static let swiftCharts: ArtifactType = "application/vnd.swiftartifact.chart+json"
     public static let gltf: ArtifactType = "model/gltf+json"
     public static let glb: ArtifactType = "model/gltf-binary"
     public static let usdz: ArtifactType = "model/vnd.usdz+zip"

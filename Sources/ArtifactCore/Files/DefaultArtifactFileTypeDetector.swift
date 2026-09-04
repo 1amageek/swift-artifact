@@ -78,6 +78,9 @@ public struct DefaultArtifactFileTypeDetector: ArtifactFileTypeDetecting, Sendab
         if lowercased.hasSuffix(".vl.json") {
             return .vegaLite
         }
+        if lowercased.hasSuffix(".chart.json") {
+            return .swiftCharts
+        }
 
         let fileExtension = (lowercased as NSString).pathExtension
         switch fileExtension {

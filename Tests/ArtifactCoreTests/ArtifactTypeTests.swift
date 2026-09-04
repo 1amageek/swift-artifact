@@ -34,6 +34,7 @@ struct ArtifactTypeTests {
         #expect(ArtifactType.json.rawValue == "application/json")
         #expect(ArtifactType.csv.rawValue == "text/csv")
         #expect(ArtifactType.vegaLite.rawValue == "application/vnd.vegalite.v5+json")
+        #expect(ArtifactType.swiftCharts.rawValue == "application/vnd.swiftartifact.chart+json")
         #expect(ArtifactType.gltf.rawValue == "model/gltf+json")
         #expect(ArtifactType.glb.rawValue == "model/gltf-binary")
         #expect(ArtifactType.usdz.rawValue == "model/vnd.usdz+zip")
