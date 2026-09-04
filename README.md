@@ -28,7 +28,7 @@ This README and the public API documentation define the current contract.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.17.1"),
+    .package(url: "https://github.com/1amageek/swift-artifact.git", from: "0.17.2"),
 ]
 ```
 
