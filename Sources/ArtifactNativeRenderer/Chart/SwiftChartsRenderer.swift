@@ -238,8 +238,8 @@ extension ArtifactChartValue {
 #Preview("Swift Charts gallery") {
     ScrollView {
         LazyVGrid(
-            columns: [GridItem(.flexible()), GridItem(.flexible())],
-            spacing: 16
+            columns: [GridItem(.adaptive(minimum: 500), spacing: 20)],
+            spacing: 20
         ) {
             ForEach(["line", "bar", "area", "point", "rectangle", "rule"], id: \.self) { mark in
                 ArtifactCard(
@@ -256,7 +256,15 @@ extension ArtifactChartValue {
                                 { "category": "A", "value": 4, "series": "First" },
                                 { "category": "B", "value": 7, "series": "First" },
                                 { "category": "C", "value": 5, "series": "Second" },
-                                { "category": "D", "value": 9, "series": "Second" }
+                                { "category": "D", "value": 9, "series": "Second" },
+                                { "category": "E", "value": 6, "series": "First" },
+                                { "category": "F", "value": 11, "series": "Second" },
+                                { "category": "G", "value": 8, "series": "First" },
+                                { "category": "H", "value": 13, "series": "Second" },
+                                { "category": "I", "value": 10, "series": "First" },
+                                { "category": "J", "value": 15, "series": "Second" },
+                                { "category": "K", "value": 12, "series": "First" },
+                                { "category": "L", "value": 17, "series": "Second" }
                               ],
                               "encoding": {
                                 "x": { "field": "category", "type": "nominal", "label": "Category" },
@@ -286,7 +294,9 @@ extension ArtifactChartValue {
                           "data": [
                             { "amount": 40, "series": "Completed" },
                             { "amount": 35, "series": "In progress" },
-                            { "amount": 25, "series": "Remaining" }
+                            { "amount": 25, "series": "Remaining" },
+                            { "amount": 18, "series": "Blocked" },
+                            { "amount": 12, "series": "Planned" }
                           ],
                           "encoding": {
                             "angle": { "field": "amount", "type": "quantitative", "label": "Amount" },
@@ -303,5 +313,5 @@ extension ArtifactChartValue {
         }
         .padding()
     }
-    .frame(width: 840, height: 900)
+    .frame(width: 1120, height: 1200)
 }
